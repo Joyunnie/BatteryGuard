@@ -72,8 +72,12 @@ final class SMCKit {
     // MARK: - Low-level Read/Write via subprocess
 
     /// Read an SMC key. Returns raw output line like "  CH0B  [ui8 ]  2 (bytes 02)"
+    /// Tries without sudo first; falls back to sudo if read fails.
     private func smcRead(key: String) throws -> String {
-        let (exitCode, stdout, stderr) = runSMC(args: ["-k", key, "-r"])
+        let (exitCode, stdout, stderr) = runProcess(
+            executable: kSMCBinaryPath,
+            args: ["-k", key, "-r"]
+        )
         let output = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if exitCode != 0 || output.contains("Error:") {
@@ -85,9 +89,13 @@ final class SMCKit {
     }
 
     /// Write an SMC key with hex value string (e.g. "02", "01000000").
+    /// Uses sudo since SMC writes require root privileges.
     private func smcWrite(key: String, hexValue: String) throws {
         print("[SMCKit] write \(key) = \(hexValue)")
-        let (exitCode, stdout, stderr) = runSMC(args: ["-k", key, "-w", hexValue])
+        let (exitCode, stdout, stderr) = runProcess(
+            executable: "/usr/bin/sudo",
+            args: [kSMCBinaryPath, "-k", key, "-w", hexValue]
+        )
         let output = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if exitCode != 0 || output.contains("Error:") {
@@ -98,10 +106,10 @@ final class SMCKit {
         print("[SMCKit] write \(key) = \(hexValue) → OK")
     }
 
-    /// Run the smc binary and capture output.
-    private func runSMC(args: [String]) -> (Int32, String, String) {
+    /// Run an executable with arguments and capture output.
+    private func runProcess(executable: String, args: [String]) -> (Int32, String, String) {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: kSMCBinaryPath)
+        process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = args
 
         let stdoutPipe = Pipe()
