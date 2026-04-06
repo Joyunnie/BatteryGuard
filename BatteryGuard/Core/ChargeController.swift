@@ -109,7 +109,12 @@ final class ChargeController: ObservableObject {
         try smc.open()
         print("[ChargeController] SMC binary found")
 
-        // SMC 읽기/쓰기 테스트
+        // 이전 세션 잔여 상태 초기화 — clean slate
+        print("[ChargeController] Resetting SMC to clean state...")
+        try? smc.disableForceDischarge()  // CHIE=00
+        try? smc.allowCharging()          // CHTE=00000000
+        print("[ChargeController] SMC reset complete")
+
         do {
             let temp = try smc.readBatteryTemperature()
             print("[ChargeController] Battery temp = \(String(format: "%.1f", temp))°C")
