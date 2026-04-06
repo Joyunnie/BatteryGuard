@@ -86,6 +86,7 @@ private let _smcStructSizeCheck: Void = {
 // MARK: - MagSafe LED State
 
 enum MagSafeLEDState: UInt8 {
+    case auto = 0
     case off = 1
     case green = 3
     case orange = 4
@@ -130,6 +131,8 @@ enum SMCError: Error, CustomStringConvertible {
 // MARK: - SMCKit
 
 final class SMCKit {
+    static let shared = SMCKit()
+
     private var connection: io_connect_t = 0
     private var isOpen = false
     private let lock = NSLock()
@@ -199,8 +202,15 @@ final class SMCKit {
 
     /// Write a single UInt8 value to an SMC key.
     func writeUInt8(key: String, value: UInt8) throws {
-        try writeKeyRaw(key: key, dataSize: 1) { bytes in
-            bytes.0 = value
+        print("[SMCKit] writeUInt8(\(key), \(value))")
+        do {
+            try writeKeyRaw(key: key, dataSize: 1) { bytes in
+                bytes.0 = value
+            }
+            print("[SMCKit] writeUInt8(\(key), \(value)) → success")
+        } catch {
+            print("[SMCKit] writeUInt8(\(key), \(value)) → FAILED: \(error)")
+            throw error
         }
     }
 
@@ -337,7 +347,13 @@ final class SMCKit {
         )
 
         guard kr == kIOReturnSuccess else {
+            print("[SMCKit] smcCall failed: kr=0x\(String(kr, radix: 16)), cmd=\(input.data8), result=\(output.result)")
             throw SMCError.readFailed("", kr)
+        }
+
+        // result 필드가 0이 아니면 SMC 내부 에러
+        if output.result != 0 {
+            print("[SMCKit] smcCall SMC-level error: result=\(output.result), cmd=\(input.data8)")
         }
 
         return output
