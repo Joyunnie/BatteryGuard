@@ -105,20 +105,16 @@ final class ChargeController: ObservableObject {
     // MARK: - 초기화
 
     func initialize() throws {
-        // SMCParamStruct 크기 검증
-        let structSize = MemoryLayout<SMCParamStruct>.size
-        print("[ChargeController] SMCParamStruct size = \(structSize) bytes (expected 80)")
-
-        print("[ChargeController] Opening SMC connection...")
+        print("[ChargeController] Initializing SMC (subprocess mode)...")
         try smc.open()
-        print("[ChargeController] SMC connection opened successfully")
+        print("[ChargeController] SMC binary found")
 
-        // CH0B 읽기 테스트 (충전 억제 상태 확인)
+        // SMC 읽기/쓰기 테스트
         do {
-            let ch0b = try smc.readUInt8(key: "CH0B")
-            print("[ChargeController] CH0B = 0x\(String(format: "%02x", ch0b)) (\(ch0b == 0 ? "charging" : "inhibited"))")
+            let temp = try smc.readBatteryTemperature()
+            print("[ChargeController] Battery temp = \(String(format: "%.1f", temp))°C")
         } catch {
-            print("[ChargeController] CH0B read failed: \(error)")
+            print("[ChargeController] Temp read failed (non-critical): \(error)")
         }
 
         chargeLimiter = ChargeLimiter(smc: smc, settings: settings)
