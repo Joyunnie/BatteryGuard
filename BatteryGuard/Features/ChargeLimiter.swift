@@ -43,4 +43,9 @@ final class ChargeLimiter {
         try smc.allowCharging()
         isInhibiting = false
     }
+
+    /// 내부 상태 리셋 (방전 종료 후 CHTE 상태와 동기화)
+    func resetState() {
+        isInhibiting = false
+    }
 }

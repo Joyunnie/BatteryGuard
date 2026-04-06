@@ -197,11 +197,12 @@ final class ChargeController: ObservableObject {
             }
         }
 
-        // 5. 방전 처리
+        // 5. 방전 처리 — 방전 중에는 CHTE를 건드리지 않음
         if isDischarging {
             if info.currentCharge <= settings.chargeLimit {
                 do { try discharger.stop() } catch { lastError = error.localizedDescription }
                 isDischarging = false
+                chargeLimiter.resetState()  // CHTE 상태 동기화
                 currentState = .chargingPaused
             } else {
                 currentState = .discharging
@@ -223,13 +224,15 @@ final class ChargeController: ObservableObject {
             }
         }
 
-        // 7. Sailing Mode (실패해도 계속)
-        if settings.sailingEnabled {
+        // 7. Sailing Mode — 방전 중에는 CHTE 충돌 방지를 위해 skip
+        if settings.sailingEnabled && !isDischarging {
             do { try sailingMode.apply(batteryInfo: info) } catch { lastError = error.localizedDescription }
         }
 
-        // 8. Charge Limit 적용 — 현재 잔량 vs 설정 limit 비교 (실패해도 계속)
-        do { try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit) } catch { lastError = error.localizedDescription }
+        // 8. Charge Limit 적용 — 방전 중에는 skip (CHTE 쓰면 CHIE=08이 무효화됨)
+        if !isDischarging {
+            do { try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit) } catch { lastError = error.localizedDescription }
+        }
 
         // 9. 상태 결정 — 항상 도달
         if info.isCharging && info.currentCharge < settings.chargeLimit {
