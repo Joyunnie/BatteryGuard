@@ -287,10 +287,15 @@ final class ChargeController: ObservableObject {
     func setChargeLimit(_ limit: Int) {
         settings.chargeLimit = max(20, min(100, limit))
         print("[ChargeController] setChargeLimit(\(settings.chargeLimit))")
-        // 즉시 적용: 현재 잔량 확인 후 충전 허용/억제 결정
         if let info = monitor.batteryInfo {
             do {
                 try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit)
+                // 즉시 상태 반영
+                if info.currentCharge >= settings.chargeLimit {
+                    currentState = .chargingPaused
+                } else if info.isPluggedIn {
+                    currentState = .charging
+                }
             } catch {
                 print("[ChargeController] chargeLimit apply FAILED: \(error)")
                 lastError = error.localizedDescription
@@ -301,12 +306,13 @@ final class ChargeController: ObservableObject {
     func startDischarge() {
         guard let info = monitor.batteryInfo,
               info.currentCharge > settings.chargeLimit else { return }
-        // Top Up과 상호 배타
         if isTopUpActive { cancelTopUp() }
         do {
             try discharger.start()
             isDischarging = true
+            currentState = .discharging
             _ = monitor.preventSleep(reason: "BatteryGuard: Discharge in progress")
+            refreshMonitor()
         } catch {
             lastError = error.localizedDescription
         }
@@ -316,18 +322,21 @@ final class ChargeController: ObservableObject {
         do {
             try discharger.stop()
             isDischarging = false
+            currentState = .chargingPaused
             monitor.allowSleep()
+            refreshMonitor()
         } catch {
             lastError = error.localizedDescription
         }
     }
 
     func startTopUp() {
-        // Discharge와 상호 배타
         if isDischarging { stopDischarge() }
         do {
             try topUp.activate()
             isTopUpActive = true
+            currentState = .topUp
+            refreshMonitor()
         } catch {
             lastError = error.localizedDescription
         }
@@ -337,19 +346,22 @@ final class ChargeController: ObservableObject {
         do {
             try topUp.deactivate()
             isTopUpActive = false
+            currentState = .chargingPaused
+            refreshMonitor()
         } catch {
             lastError = error.localizedDescription
         }
     }
 
     func startCalibration() {
-        // Calibration은 다른 모든 모드를 취소
         if isTopUpActive { cancelTopUp() }
         if isDischarging { stopDischarge() }
         do {
             try calibrationMode.start()
             isCalibrating = true
+            currentState = .calibrating
             _ = monitor.preventSleep(reason: "BatteryGuard: Calibration in progress")
+            refreshMonitor()
         } catch {
             lastError = error.localizedDescription
         }
@@ -359,9 +371,18 @@ final class ChargeController: ObservableObject {
         do {
             try calibrationMode.cancel()
             isCalibrating = false
+            currentState = .chargingPaused
             monitor.allowSleep()
+            refreshMonitor()
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    /// SMC 쓰기 후 즉시 배터리 상태 갱신
+    private func refreshMonitor() {
+        DispatchQueue.main.async {
+            self.monitor.batteryInfo = self.monitor.readBatteryInfo()
         }
     }
 
