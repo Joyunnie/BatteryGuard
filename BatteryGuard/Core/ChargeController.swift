@@ -301,6 +301,8 @@ final class ChargeController: ObservableObject {
     func startDischarge() {
         guard let info = monitor.batteryInfo,
               info.currentCharge > settings.chargeLimit else { return }
+        // Top Up과 상호 배타
+        if isTopUpActive { cancelTopUp() }
         do {
             try discharger.start()
             isDischarging = true
@@ -321,6 +323,8 @@ final class ChargeController: ObservableObject {
     }
 
     func startTopUp() {
+        // Discharge와 상호 배타
+        if isDischarging { stopDischarge() }
         do {
             try topUp.activate()
             isTopUpActive = true
@@ -339,6 +343,9 @@ final class ChargeController: ObservableObject {
     }
 
     func startCalibration() {
+        // Calibration은 다른 모든 모드를 취소
+        if isTopUpActive { cancelTopUp() }
+        if isDischarging { stopDischarge() }
         do {
             try calibrationMode.start()
             isCalibrating = true

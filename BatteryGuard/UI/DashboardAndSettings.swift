@@ -105,6 +105,7 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
+                    .disabled(controller.isCalibrating)
 
                     Button(action: {
                         if controller.isDischarging {
@@ -120,6 +121,7 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
+                    .disabled(controller.isCalibrating)
                 }
             }
             .padding()

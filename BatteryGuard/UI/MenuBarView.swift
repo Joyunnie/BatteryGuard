@@ -84,6 +84,7 @@ struct MenuBarView: View {
                 title: "Top Up",
                 icon: "arrow.up.to.line",
                 isActive: controller.isTopUpActive,
+                isDisabled: controller.isCalibrating,
                 action: {
                     if controller.isTopUpActive {
                         controller.cancelTopUp()
@@ -97,6 +98,7 @@ struct MenuBarView: View {
                 title: "Discharge",
                 icon: "arrow.down.to.line",
                 isActive: controller.isDischarging,
+                isDisabled: controller.isCalibrating,
                 action: {
                     if controller.isDischarging {
                         controller.stopDischarge()
@@ -174,6 +176,7 @@ struct ActionButton: View {
     let title: String
     let icon: String
     let isActive: Bool
+    var isDisabled: Bool = false
     let action: () -> Void
 
     var body: some View {
@@ -188,8 +191,10 @@ struct ActionButton: View {
             .padding(.vertical, 8)
             .background(isActive ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.1))
             .cornerRadius(8)
+            .opacity(isDisabled ? 0.4 : 1.0)
         }
         .buttonStyle(.plain)
+        .disabled(isDisabled)
     }
 }
 
