@@ -143,8 +143,15 @@ final class ChargeController: ObservableObject {
     private func runControlCycle() {
         guard let info = monitor.batteryInfo else { return }
 
-        // 1. 전원 미연결이면 아무것도 안 함
-        guard info.isPluggedIn else {
+        // 1. 전원 연결 판단 — force discharge 시 IOKit이 ExternalConnected=false를 반환하므로
+        //    사용자가 명시적으로 시작한 모드이거나 양의 전류가 흐르면 연결된 것으로 간주
+        let effectivelyPluggedIn = info.isPluggedIn
+            || isDischarging
+            || isTopUpActive
+            || isCalibrating
+            || info.amperage > 0
+
+        guard effectivelyPluggedIn else {
             currentState = .notConnected
             return
         }
