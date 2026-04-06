@@ -14,15 +14,20 @@ private let kSMCCmdReadBytes: UInt8 = 5
 private let kSMCCmdWriteBytes: UInt8 = 6
 private let kSMCCmdReadKeyInfo: UInt8 = 9
 
-// MARK: - SMC Keys
+// MARK: - SMC Keys (Apple Silicon M-series)
+// Note: BCLM does NOT exist on Apple Silicon. Charge limiting is done by
+// toggling CH0B/CH0C/CHTE on/off based on current battery percentage.
 
-private let kSMCKeyBCLM = "BCLM"  // Battery charge limit max (ui8)
-private let kSMCKeyCH0B = "CH0B"  // Charging inhibit (ui8)
-private let kSMCKeyCH0C = "CH0C"  // Adapter control (ui8)
+private let kSMCKeyCH0B = "CH0B"  // Charging inhibit (ui8: 0x00=allow, 0x02=inhibit)
+private let kSMCKeyCH0C = "CH0C"  // Charge circuit control (ui8: 0x00=allow, 0x02=inhibit)
+private let kSMCKeyCHTE = "CHTE"  // Charge termination enable (4 bytes: 0x01000000=disable, 0x00000000=enable)
+private let kSMCKeyCH0I = "CH0I"  // Force discharge - isolate battery (ui8: 0x01=on, 0x00=off)
+private let kSMCKeyCHIE = "CHIE"  // Force discharge - charge input enable (ui8: 0x08=on, 0x00=off)
+private let kSMCKeyCH0J = "CH0J"  // Force discharge - battery power only (ui8: 0x01=on, 0x00=off)
 private let kSMCKeyTB0T = "TB0T"  // Battery temp sensor 0
 private let kSMCKeyTB1T = "TB1T"  // Battery temp sensor 1
 private let kSMCKeyTB2T = "TB2T"  // Battery temp sensor 2
-private let kSMCKeyAPTS = "APTS"  // MagSafe LED control
+private let kSMCKeyACLC = "ACLC"  // MagSafe LED control (ui8: 0x00-0x04)
 
 // MARK: - SMCParamStruct (must be exactly 80 bytes)
 
@@ -83,15 +88,14 @@ private let _smcStructSizeCheck: Void = {
            "SMCParamStruct must be exactly 80 bytes, got \(MemoryLayout<SMCParamStruct>.size)")
 }()
 
-// MARK: - MagSafe LED State
+// MARK: - MagSafe LED State (ACLC key, 0x00-0x04)
 
 enum MagSafeLEDState: UInt8 {
-    case auto = 0
-    case off = 1
-    case green = 3
-    case orange = 4
-    case errorOnce = 5
-    case errorPermanent = 6
+    case off = 0x00
+    case green = 0x01
+    case orange = 0x02
+    case auto = 0x03
+    case errorBlink = 0x04
 }
 
 // MARK: - SMCError
@@ -258,28 +262,43 @@ final class SMCKit {
 
     // MARK: - Convenience Methods
 
-    /// Read the current battery charge limit (BCLM key, 0-100).
-    func readChargeLimit() throws -> UInt8 {
-        return try readUInt8(key: kSMCKeyBCLM)
+    // ── Charging Control ──────────────────────────────────────
+    // Apple Silicon has no BCLM key. Charge limiting is done by
+    // toggling the charge circuit on/off via CH0B + CH0C + CHTE.
+
+    /// Inhibit charging (CH0B=0x02, CH0C=0x02, CHTE=0x01000000).
+    func inhibitCharging() throws {
+        try writeUInt8(key: kSMCKeyCH0B, value: 0x02)
+        try writeUInt8(key: kSMCKeyCH0C, value: 0x02)
+        try writeBytes(key: kSMCKeyCHTE, bytes: [0x01, 0x00, 0x00, 0x00])
     }
 
-    /// Write the battery charge limit (BCLM key). Clamped to 20...100.
-    func writeChargeLimit(_ limit: UInt8) throws {
-        let clamped = min(max(limit, 20), 100)
-        try writeUInt8(key: kSMCKeyBCLM, value: clamped)
+    /// Allow charging (CH0B=0x00, CH0C=0x00, CHTE=0x00000000).
+    func allowCharging() throws {
+        try writeUInt8(key: kSMCKeyCH0B, value: 0x00)
+        try writeUInt8(key: kSMCKeyCH0C, value: 0x00)
+        try writeBytes(key: kSMCKeyCHTE, bytes: [0x00, 0x00, 0x00, 0x00])
     }
 
-    /// Enable or disable charging inhibit (CH0B key).
-    /// - Parameter inhibit: `true` to stop charging, `false` to allow.
-    func setChargingInhibit(_ inhibit: Bool) throws {
-        try writeUInt8(key: kSMCKeyCH0B, value: inhibit ? 0x02 : 0x00)
+    // ── Force Discharge ───────────────────────────────────────
+    // Forces the system to run on battery even with adapter connected.
+    // CH0I=isolate battery path, CHIE=charge input, CH0J=battery power only.
+
+    /// Enable force discharge (CH0I=0x01, CHIE=0x08, CH0J=0x01).
+    func enableForceDischarge() throws {
+        try writeUInt8(key: kSMCKeyCH0I, value: 0x01)
+        try writeUInt8(key: kSMCKeyCHIE, value: 0x08)
+        try writeUInt8(key: kSMCKeyCH0J, value: 0x01)
     }
 
-    /// Enable or disable adapter disconnect simulation (CH0C key).
-    /// - Parameter disconnect: `true` to simulate disconnect, `false` to reconnect.
-    func setAdapterDisconnect(_ disconnect: Bool) throws {
-        try writeUInt8(key: kSMCKeyCH0C, value: disconnect ? 0x02 : 0x00)
+    /// Disable force discharge (CH0I=0x00, CHIE=0x00, CH0J=0x00).
+    func disableForceDischarge() throws {
+        try writeUInt8(key: kSMCKeyCH0I, value: 0x00)
+        try writeUInt8(key: kSMCKeyCHIE, value: 0x00)
+        try writeUInt8(key: kSMCKeyCH0J, value: 0x00)
     }
+
+    // ── Battery Temperature ───────────────────────────────────
 
     /// Read battery temperature in °C. Returns the maximum of TB0T/TB1T/TB2T,
     /// ignoring keys that don't exist on the current hardware.
@@ -306,9 +325,30 @@ final class SMCKit {
         return maxTemp
     }
 
-    /// Set the MagSafe LED state (APTS key).
+    // ── MagSafe LED ───────────────────────────────────────────
+
+    /// Set the MagSafe LED state (ACLC key).
     func setMagSafeLED(_ state: MagSafeLEDState) throws {
-        try writeUInt8(key: kSMCKeyAPTS, value: state.rawValue)
+        try writeUInt8(key: kSMCKeyACLC, value: state.rawValue)
+    }
+
+    // ── Multi-byte Write Helper ───────────────────────────────
+
+    /// Write an array of bytes to an SMC key.
+    func writeBytes(key: String, bytes data: [UInt8]) throws {
+        print("[SMCKit] writeBytes(\(key), \(data.map { String(format: "0x%02x", $0) }))")
+        do {
+            try writeKeyRaw(key: key, dataSize: UInt32(data.count)) { bytes in
+                if data.count > 0 { bytes.0 = data[0] }
+                if data.count > 1 { bytes.1 = data[1] }
+                if data.count > 2 { bytes.2 = data[2] }
+                if data.count > 3 { bytes.3 = data[3] }
+            }
+            print("[SMCKit] writeBytes(\(key)) → success")
+        } catch {
+            print("[SMCKit] writeBytes(\(key)) → FAILED: \(error)")
+            throw error
+        }
     }
 
     // MARK: - Internal Helpers

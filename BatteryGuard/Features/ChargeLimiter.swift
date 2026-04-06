@@ -1,10 +1,11 @@
 // ChargeLimiter.swift
-// 충전 상한 설정 기능
+// 충전 상한 설정 기능 (Apple Silicon)
 //
-// SMC의 BCLM(Battery Charge Level Max) 키에 원하는 퍼센트 값을 기록.
-// SMC 펌웨어가 이 값을 읽고 배터리 충전 IC에 최대 충전 전압을 조절하도록 명령.
-// 충전 IC는 셀 전압이 해당 SoC에 도달하면 충전 FET를 차단.
-// BCLM 값은 SMC NVRAM에 저장되어 재부팅 후에도 유지됨.
+// Apple Silicon에는 BCLM 키가 없음. 대신 배터리 잔량을 폴링하면서
+// CH0B/CH0C/CHTE 키로 충전 회로를 직접 ON/OFF하여 제한.
+//   charge >= limit → inhibitCharging()
+//   charge < limit  → allowCharging()
+// ChargeController의 2초 제어 루프에서 매 틱마다 호출.
 
 import Foundation
 
@@ -12,27 +13,34 @@ final class ChargeLimiter {
     private let smc: SMCKit
     private let settings: UserSettings
 
-    private(set) var currentSMCLimit: UInt8 = 100
+    /// 현재 충전 억제 상태
+    private(set) var isInhibiting = false
 
     init(smc: SMCKit, settings: UserSettings) {
         self.smc = smc
         self.settings = settings
     }
 
-    func apply(limit: Int) throws {
-        let value = UInt8(max(20, min(100, limit)))
-        guard value != currentSMCLimit else { return }
-        try smc.writeChargeLimit(value)
-        currentSMCLimit = value
+    /// 현재 배터리 잔량에 따라 충전 허용/차단 결정
+    func apply(currentCharge: Int, limit: Int) throws {
+        if currentCharge >= limit {
+            if !isInhibiting {
+                try smc.inhibitCharging()
+                isInhibiting = true
+                print("[ChargeLimiter] charge \(currentCharge)% >= limit \(limit)% → inhibit")
+            }
+        } else {
+            if isInhibiting {
+                try smc.allowCharging()
+                isInhibiting = false
+                print("[ChargeLimiter] charge \(currentCharge)% < limit \(limit)% → allow")
+            }
+        }
     }
 
-    func readCurrentLimit() throws -> UInt8 {
-        let value = try smc.readChargeLimit()
-        currentSMCLimit = value
-        return value
-    }
-
+    /// 충전 허용 (제한 해제)
     func release() throws {
-        try apply(limit: 100)
+        try smc.allowCharging()
+        isInhibiting = false
     }
 }

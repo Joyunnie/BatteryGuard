@@ -1,14 +1,10 @@
 // CalibrationMode.swift
-// 배터리 캘리브레이션 기능
-//
-// 배터리 컨트롤러 IC는 쿨롱 카운팅으로 잔량을 추정함.
-// 장기간 중간 SoC에만 머물면 추정 오차(gauge drift)가 누적됨.
-// 풀 사이클을 수행하면 컨트롤러가 셀 전압의 상한/하한을 재학습.
+// 배터리 캘리브레이션 기능 (Apple Silicon)
 //
 // 캘리브레이션 사이클:
-// Phase 1: 현재 -> 100% 충전
-// Phase 2: 100% -> 10% 방전
-// Phase 3: 10% -> 100% 재충전
+// Phase 1: 현재 -> 100% 충전 (allowCharging)
+// Phase 2: 100% -> 10% 방전 (enableForceDischarge)
+// Phase 3: 10% -> 100% 재충전 (allowCharging)
 // Phase 4: 100%에서 1시간 유지
 // Phase 5: 원래 Charge Limit으로 복귀
 
@@ -48,10 +44,11 @@ final class CalibrationMode {
         originalHeatProtection = settings.heatProtectionEnabled
         settings.heatProtectionEnabled = false
 
-        try smc.writeChargeLimit(100)
-        try smc.setChargingInhibit(false)
-        try smc.setAdapterDisconnect(false)
+        // Phase 1: 100%까지 충전 허용
+        try smc.allowCharging()
+        try smc.disableForceDischarge()
         currentPhase = .charging1
+        print("[Calibration] start → Phase 1: charge to 100%")
     }
 
     func runStep(batteryInfo: BatteryInfo) throws {
@@ -61,23 +58,25 @@ final class CalibrationMode {
 
         case .charging1:
             if batteryInfo.currentCharge >= 100 {
-                try smc.setChargingInhibit(true)
-                try smc.setAdapterDisconnect(true)
+                try smc.inhibitCharging()
+                try smc.enableForceDischarge()
                 currentPhase = .discharging
+                print("[Calibration] Phase 2: discharge to 10%")
             }
 
         case .discharging:
             if batteryInfo.currentCharge <= 10 {
-                try smc.setAdapterDisconnect(false)
-                try smc.setChargingInhibit(false)
-                try smc.writeChargeLimit(100)
+                try smc.disableForceDischarge()
+                try smc.allowCharging()
                 currentPhase = .charging2
+                print("[Calibration] Phase 3: recharge to 100%")
             }
 
         case .charging2:
             if batteryInfo.currentCharge >= 100 {
                 holdStartTime = Date()
                 currentPhase = .holding
+                print("[Calibration] Phase 4: hold at 100% for 1 hour")
             }
 
         case .holding:
@@ -93,14 +92,14 @@ final class CalibrationMode {
     }
 
     private func restore() throws {
-        try smc.writeChargeLimit(UInt8(originalChargeLimit))
         settings.chargeLimit = originalChargeLimit
         settings.heatProtectionEnabled = originalHeatProtection
-        try smc.setChargingInhibit(false)
-        try smc.setAdapterDisconnect(false)
+        try smc.disableForceDischarge()
+        try smc.allowCharging()
         currentPhase = .idle
         controller?.isCalibrating = false
         monitor.allowSleep()
+        print("[Calibration] complete → restored limit \(originalChargeLimit)%")
     }
 
     func cancel() throws {

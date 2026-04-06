@@ -1,14 +1,10 @@
 // Discharger.swift
 // 방전 기능 (충전기 연결 상태에서 배터리로만 구동)
 //
-// SMC의 CH0B(Charging Inhibit) 키에 0x02를 쓰면 충전 FET가 차단됨.
-// 동시에 CH0C(Adapter Control) 키로 어댑터의 시스템 전력 공급도 차단.
-// -> MacBook이 배터리 전원으로만 구동되면서 자연 방전됨.
-//
-// Apple Silicon 전력 경로:
-//   [어댑터] -> [충전 IC] -> [시스템 레일] <- [배터리]
-// 충전 IC의 FET를 차단하면 어댑터->배터리 경로가 끊기고,
-// 시스템 레일의 전력 소스를 배터리로만 전환할 수 있음.
+// Apple Silicon force discharge keys:
+//   ON:  CH0I=0x01, CHIE=0x08, CH0J=0x01
+//   OFF: CH0I=0x00, CHIE=0x00, CH0J=0x00
+// 추가로 충전도 inhibit해야 방전만 진행됨.
 
 import Foundation
 
@@ -27,18 +23,18 @@ final class Discharger {
 
     func start() throws {
         guard !isActive else { return }
-        try smc.setChargingInhibit(true)
-        try smc.setAdapterDisconnect(true)
-        try smc.writeChargeLimit(UInt8(settings.chargeLimit))
+        try smc.inhibitCharging()
+        try smc.enableForceDischarge()
         isActive = true
+        print("[Discharger] force discharge started")
     }
 
     func stop() throws {
         guard isActive else { return }
-        try smc.setAdapterDisconnect(false)
-        try smc.setChargingInhibit(false)
-        try smc.writeChargeLimit(UInt8(settings.chargeLimit))
+        try smc.disableForceDischarge()
+        try smc.allowCharging()
         isActive = false
+        print("[Discharger] force discharge stopped")
     }
 
     func startInClamshell() throws {

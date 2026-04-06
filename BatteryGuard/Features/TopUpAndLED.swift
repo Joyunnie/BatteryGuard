@@ -1,11 +1,11 @@
 // TopUpAndLED.swift
-// Top Up 기능 + MagSafe LED 제어
+// Top Up 기능 + MagSafe LED 제어 (Apple Silicon)
 
 import Foundation
 
 // MARK: - Top Up
-// BCLM을 일시적으로 100으로 설정하여 완충 허용.
-// 100% 도달 후 원래 Charge Limit으로 자동 복귀.
+// 충전 억제를 해제하여 100%까지 충전 허용.
+// 100% 도달 후 원래 Charge Limit에 따라 다시 억제.
 
 final class TopUpFeature {
     private let smc: SMCKit
@@ -21,20 +21,21 @@ final class TopUpFeature {
     }
 
     func activate() throws {
-        try smc.writeChargeLimit(100)
-        try smc.setChargingInhibit(false)
+        try smc.allowCharging()
         isActive = true
+        print("[TopUp] activated → charging to 100%")
     }
 
     func deactivate() throws {
-        try smc.writeChargeLimit(UInt8(settings.chargeLimit))
+        // ChargeLimiter가 다음 틱에서 현재 잔량 기준으로 inhibit/allow 결정
         isActive = false
+        print("[TopUp] deactivated → returning to limit \(settings.chargeLimit)%")
     }
 }
 
 // MARK: - MagSafe LED Controller
-// APTS SMC 키를 통해 MagSafe LED 상태를 제어.
-// 충전 상태에 따라 초록/주황/점멸로 표시.
+// ACLC SMC 키를 통해 MagSafe LED 상태를 제어.
+// 0x00=off, 0x01=green, 0x02=orange, 0x03=auto, 0x04=error blink
 
 final class MagSafeLEDController {
     private let smc: SMCKit
@@ -68,7 +69,6 @@ final class MagSafeLEDController {
         try smc.setMagSafeLED(.auto)
     }
 
-    /// 주황/초록 교차 점멸 (방전 중 표시)
     func blinkOrangeGreen() throws {
         guard blinkTimer == nil else { return }
         blinkState = false

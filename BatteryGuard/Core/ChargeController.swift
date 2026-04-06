@@ -113,12 +113,12 @@ final class ChargeController: ObservableObject {
         try smc.open()
         print("[ChargeController] SMC connection opened successfully")
 
-        // SMC 읽기 테스트
+        // CH0B 읽기 테스트 (충전 억제 상태 확인)
         do {
-            let bclm = try smc.readChargeLimit()
-            print("[ChargeController] Current BCLM = \(bclm)")
+            let ch0b = try smc.readUInt8(key: "CH0B")
+            print("[ChargeController] CH0B = 0x\(String(format: "%02x", ch0b)) (\(ch0b == 0 ? "charging" : "inhibited"))")
         } catch {
-            print("[ChargeController] BCLM read failed: \(error)")
+            print("[ChargeController] CH0B read failed: \(error)")
         }
 
         chargeLimiter = ChargeLimiter(smc: smc, settings: settings)
@@ -220,8 +220,8 @@ final class ChargeController: ObservableObject {
             do { try sailingMode.apply(batteryInfo: info) } catch { lastError = error.localizedDescription }
         }
 
-        // 8. Charge Limit 적용 (실패해도 계속)
-        do { try chargeLimiter.apply(limit: settings.chargeLimit) } catch { lastError = error.localizedDescription }
+        // 8. Charge Limit 적용 — 현재 잔량 vs 설정 limit 비교 (실패해도 계속)
+        do { try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit) } catch { lastError = error.localizedDescription }
 
         // 9. 상태 결정 — 항상 도달
         if info.isCharging && info.currentCharge < settings.chargeLimit {
@@ -276,14 +276,13 @@ final class ChargeController: ObservableObject {
 
     private func handleWillSleep() {
         if settings.stopChargingOnSleep {
-            try? smc.setChargingInhibit(true)
+            try? smc.inhibitCharging()
         }
     }
 
     private func handleDidWake() {
         if !isDischarging && !heatProtectionTriggered {
-            try? smc.setChargingInhibit(false)
-            try? chargeLimiter.apply(limit: settings.chargeLimit)
+            try? smc.allowCharging()
         }
     }
 
@@ -292,14 +291,14 @@ final class ChargeController: ObservableObject {
     func setChargeLimit(_ limit: Int) {
         settings.chargeLimit = max(20, min(100, limit))
         print("[ChargeController] setChargeLimit(\(settings.chargeLimit))")
-        do {
-            try chargeLimiter.apply(limit: settings.chargeLimit)
-            // 쓰기 후 즉시 읽어서 검증
-            let readBack = try smc.readChargeLimit()
-            print("[ChargeController] BCLM write OK → readback = \(readBack)")
-        } catch {
-            print("[ChargeController] BCLM write FAILED: \(error)")
-            lastError = error.localizedDescription
+        // 즉시 적용: 현재 잔량 확인 후 충전 허용/억제 결정
+        if let info = monitor.batteryInfo {
+            do {
+                try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit)
+            } catch {
+                print("[ChargeController] chargeLimit apply FAILED: \(error)")
+                lastError = error.localizedDescription
+            }
         }
     }
 
@@ -387,9 +386,8 @@ final class ChargeController: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
         }
 
-        try? smc.writeChargeLimit(100)
-        try? smc.setChargingInhibit(false)
-        try? smc.setAdapterDisconnect(false)
+        try? smc.disableForceDischarge()
+        try? smc.allowCharging()
         if settings.controlMagSafeLED {
             try? smc.setMagSafeLED(.auto)
         }
