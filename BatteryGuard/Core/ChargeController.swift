@@ -197,13 +197,17 @@ final class ChargeController: ObservableObject {
             }
         }
 
-        // 5. 방전 처리 — 방전 중에는 CHTE를 건드리지 않음
+        // 5. 방전 처리 — 방전 중에는 CHTE를 건드리지 않음 (CHIE 무효화 방지)
         if isDischarging {
             if info.currentCharge <= settings.chargeLimit {
+                // 목표 도달 → 방전 중지 후 충전 억제로 전환하여 레벨 유지
                 do { try discharger.stop() } catch { lastError = error.localizedDescription }
                 isDischarging = false
-                chargeLimiter.resetState()  // CHTE 상태 동기화
+                chargeLimiter.resetState()
+                // 즉시 충전 억제 적용 (CHTE=01000000)
+                do { try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit) } catch { lastError = error.localizedDescription }
                 currentState = .chargingPaused
+                refreshMonitor()
             } else {
                 currentState = .discharging
             }
@@ -211,12 +215,14 @@ final class ChargeController: ObservableObject {
             return
         }
 
-        // 6. Auto Discharge
+        // 6. Auto Discharge — chargeLimit 초과 시 자동 방전 (CHIE=08)
         if settings.autoDischargeEnabled && info.currentCharge > settings.chargeLimit {
             do {
                 try discharger.start()
                 isDischarging = true
                 currentState = .discharging
+                _ = monitor.preventSleep(reason: "BatteryGuard: Auto discharge")
+                refreshMonitor()
                 updateLED()
                 return
             } catch {

@@ -305,7 +305,6 @@ struct SettingsView: View {
             appearanceSettings
                 .tabItem { Label("외관", systemImage: "paintbrush") }
         }
-        .frame(width: 450, height: 350)
         .padding()
     }
 

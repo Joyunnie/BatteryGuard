@@ -7,6 +7,7 @@ struct MenuBarView: View {
     @EnvironmentObject var controller: ChargeController
     @EnvironmentObject var monitor: BatteryMonitor
     @EnvironmentObject var settings: UserSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 12) {
@@ -137,6 +138,7 @@ struct MenuBarView: View {
     private var bottomActions: some View {
         HStack {
             Button("Dashboard") {
+                openWindow(id: "dashboard")
                 NSApp.setActivationPolicy(.regular)
                 NSApp.activate(ignoringOtherApps: true)
             }
@@ -145,7 +147,9 @@ struct MenuBarView: View {
             Spacer()
 
             Button("Settings") {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                openWindow(id: "settings")
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
             }
             .font(.system(size: 11))
 

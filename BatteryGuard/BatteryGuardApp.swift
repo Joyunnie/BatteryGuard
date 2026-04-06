@@ -26,11 +26,13 @@ struct BatteryGuardApp: App {
                 .frame(minWidth: 600, minHeight: 500)
         }
 
-        Settings {
+        Window("BatteryGuard Settings", id: "settings") {
             SettingsView()
                 .environmentObject(UserSettings.shared)
                 .environmentObject(ChargeController.shared)
+                .frame(width: 450, height: 350)
         }
+        .windowResizability(.contentSize)
     }
 }
 
