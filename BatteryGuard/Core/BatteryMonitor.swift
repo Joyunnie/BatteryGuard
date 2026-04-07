@@ -115,6 +115,10 @@ final class BatteryMonitor: ObservableObject {
 
         let isCharging = readBool(dict, key: "IsCharging")
         let externalConnected = readBool(dict, key: "ExternalConnected")
+        // #8: ExternalConnected는 force discharge 시 CHIE에 의해 false로 보고됨.
+        // ExternalChargeCapable / AppleRawExternalConnected는 물리적 연결 상태를 반영.
+        let externalChargeCapable = readBool(dict, key: "ExternalChargeCapable")
+        let rawExternalConnected = readBool(dict, key: "AppleRawExternalConnected")
         let cycleCount = dict["CycleCount"] as? Int ?? 0
 
         // Temperature: 데시켈빈 (K × 10). 예: 2969 → 296.9K → 23.75°C
@@ -126,9 +130,14 @@ final class BatteryMonitor: ObservableObject {
             tempCelsius = 0
         }
 
-        // Amperage: IOKit이 UInt64로 저장할 수 있음. Int16으로 재해석.
-        let rawAmperage = dict["Amperage"] as? Int ?? 0
-        let amperage = Int(Int16(truncatingIfNeeded: rawAmperage))
+        // Amperage: IOKit이 signed/unsigned 혼용으로 반환할 수 있음.
+        // NSNumber.intValue가 부호 변환을 올바르게 처리.
+        let amperage: Int
+        if let number = dict["Amperage"] as? NSNumber {
+            amperage = number.intValue
+        } else {
+            amperage = 0
+        }
 
         let voltage = dict["Voltage"] as? Int ?? 0
         let timeToFull = dict["AvgTimeToFull"] as? Int ?? -1
@@ -144,8 +153,8 @@ final class BatteryMonitor: ObservableObject {
             health = 100.0
         }
 
-        // ExternalConnected가 false인데 IsCharging이 true이면 연결된 것
-        let pluggedIn = externalConnected || isCharging
+        // #8: ExternalConnected 외에 ExternalChargeCapable / AppleRawExternalConnected로 보완
+        let pluggedIn = externalConnected || externalChargeCapable || rawExternalConnected || isCharging
 
         return BatteryInfo(
             currentCharge: currentCharge,
@@ -173,22 +182,20 @@ final class BatteryMonitor: ObservableObject {
         batteryInfo = readBatteryInfo()
 
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.batteryInfo = self.readBatteryInfo()
+            guard let self = self else { return }
+            self.batteryInfo = self.readBatteryInfo()
 
-                if let info = self.batteryInfo {
-                    let now = Date()
-                    if self.chargeHistory.isEmpty ||
-                       now.timeIntervalSince(self.chargeHistory.last!.timestamp) >= 300 {
-                        self.chargeHistory.append(ChargeRecord(
-                            timestamp: now,
-                            charge: info.currentCharge,
-                            isCharging: info.isCharging
-                        ))
-                        let cutoff = now.addingTimeInterval(-86400)
-                        self.chargeHistory.removeAll { $0.timestamp < cutoff }
-                    }
+            if let info = self.batteryInfo {
+                let now = Date()
+                if self.chargeHistory.isEmpty ||
+                   now.timeIntervalSince(self.chargeHistory.last!.timestamp) >= 300 {
+                    self.chargeHistory.append(ChargeRecord(
+                        timestamp: now,
+                        charge: info.currentCharge,
+                        isCharging: info.isCharging
+                    ))
+                    let cutoff = now.addingTimeInterval(-86400)
+                    self.chargeHistory.removeAll { $0.timestamp < cutoff }
                 }
             }
         }
@@ -228,6 +235,11 @@ final class BatteryMonitor: ObservableObject {
     private var sleepAssertionID: IOPMAssertionID = 0
 
     func preventSleep(reason: String) -> Bool {
+        // 이전 assertion이 남아있으면 해제 후 재생성 — 누수 방지
+        if sleepAssertionID != 0 {
+            IOPMAssertionRelease(sleepAssertionID)
+            sleepAssertionID = 0
+        }
         let result = IOPMAssertionCreateWithName(
             kIOPMAssertPreventUserIdleSystemSleep as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),

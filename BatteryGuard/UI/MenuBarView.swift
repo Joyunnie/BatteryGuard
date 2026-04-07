@@ -85,7 +85,6 @@ struct MenuBarView: View {
                 title: "Top Up",
                 icon: "arrow.up.to.line",
                 isActive: controller.isTopUpActive,
-                isDisabled: controller.isCalibrating,
                 action: {
                     if controller.isTopUpActive {
                         controller.cancelTopUp()
@@ -99,7 +98,6 @@ struct MenuBarView: View {
                 title: "Discharge",
                 icon: "arrow.down.to.line",
                 isActive: controller.isDischarging,
-                isDisabled: controller.isCalibrating,
                 action: {
                     if controller.isDischarging {
                         controller.stopDischarge()
@@ -168,7 +166,7 @@ struct MenuBarView: View {
         case .charging, .topUp: return .green
         case .chargingPaused: return .orange
         case .discharging: return .blue
-        case .calibrating: return .purple
+
         case .notConnected: return .gray
         }
     }

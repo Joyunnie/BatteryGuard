@@ -1,41 +1,12 @@
 // TopUpAndLED.swift
-// Top Up 기능 + MagSafe LED 제어 (Apple Silicon)
+// Top Up: battery charge 100 CLI로 대체 — ChargeController에서 직접 호출
+// MagSafe LED: raw SMC ACLC 키 — ChargeController가 smcQueue를 통해 제어
 
 import Foundation
 
-// MARK: - Top Up
-// 충전 억제를 해제하여 100%까지 충전 허용.
-// 100% 도달 후 원래 Charge Limit에 따라 다시 억제.
-
-final class TopUpFeature {
-    private let smc: SMCKit
-    private let monitor: BatteryMonitor
-    private let settings: UserSettings
-
-    private(set) var isActive = false
-
-    init(smc: SMCKit, monitor: BatteryMonitor, settings: UserSettings) {
-        self.smc = smc
-        self.monitor = monitor
-        self.settings = settings
-    }
-
-    func activate() throws {
-        try smc.allowCharging()
-        isActive = true
-        print("[TopUp] activated → charging to 100%")
-    }
-
-    func deactivate() throws {
-        // ChargeLimiter가 다음 틱에서 현재 잔량 기준으로 inhibit/allow 결정
-        isActive = false
-        print("[TopUp] deactivated → returning to limit \(settings.chargeLimit)%")
-    }
-}
-
 // MARK: - MagSafe LED Controller
 // ACLC SMC 키를 통해 MagSafe LED 상태를 제어.
-// 0x00=off, 0x01=green, 0x02=orange, 0x03=auto, 0x04=error blink
+// #12: blink의 SMC 쓰기를 caller가 지정한 백그라운드 큐에서 실행 — 메인 스레드 블로킹 방지
 
 final class MagSafeLEDController {
     private let smc: SMCKit
@@ -49,38 +20,22 @@ final class MagSafeLEDController {
         self.settings = settings
     }
 
-    func setGreen() throws {
-        stopBlink()
-        try smc.setMagSafeLED(.green)
-    }
-
-    func setOrange() throws {
-        stopBlink()
-        try smc.setMagSafeLED(.orange)
-    }
-
-    func setOff() throws {
-        stopBlink()
-        try smc.setMagSafeLED(.off)
-    }
-
-    func setAuto() throws {
-        stopBlink()
-        try smc.setMagSafeLED(.auto)
-    }
-
-    func blinkOrangeGreen() throws {
+    /// blink을 시작하되, SMC 쓰기는 지정된 큐에서 실행
+    func startBlink(on queue: DispatchQueue) {
         guard blinkTimer == nil else { return }
         blinkState = false
 
         blinkTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.blinkState.toggle()
-            try? self.smc.setMagSafeLED(self.blinkState ? .green : .orange)
+            let state: MagSafeLEDState = self.blinkState ? .green : .orange
+            queue.async {
+                try? self.smc.setMagSafeLED(state)
+            }
         }
     }
 
-    private func stopBlink() {
+    func stopBlink() {
         blinkTimer?.invalidate()
         blinkTimer = nil
     }

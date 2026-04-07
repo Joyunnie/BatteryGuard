@@ -45,12 +45,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             try ChargeController.shared.initialize()
         } catch {
             let alert = NSAlert()
-            alert.messageText = "SMC 초기화 실패"
+            alert.messageText = "초기화 실패"
             alert.informativeText = """
             \(error.localizedDescription)
 
-            root 권한으로 실행하거나, Helper tool을 설치하세요.
-            sudo 로 실행: sudo /path/to/BatteryGuard.app/Contents/MacOS/BatteryGuard
+            battery CLI가 설치되어 있는지 확인하세요:
+            curl -s https://raw.githubusercontent.com/actuallymentor/battery/main/setup.sh | bash
             """
             alert.alertStyle = .critical
             alert.runModal()
@@ -85,8 +85,7 @@ struct MenuBarLabel: View {
             return "battery.75percent"
         case .discharging:
             return "arrow.down.circle.fill"
-        case .calibrating:
-            return "arrow.2.circlepath"
+
         case .notConnected:
             return "battery.25percent"
         }

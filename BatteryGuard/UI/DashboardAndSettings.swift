@@ -20,7 +20,6 @@ struct DashboardView: View {
                     healthCard
                 }
 
-                calibrationCard
                 chargeHistoryCard
             }
             .padding(20)
@@ -105,7 +104,6 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
-                    .disabled(controller.isCalibrating)
 
                     Button(action: {
                         if controller.isDischarging {
@@ -121,7 +119,6 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
-                    .disabled(controller.isCalibrating)
                 }
             }
             .padding()
@@ -157,40 +154,6 @@ struct DashboardView: View {
                     Text("설계 용량: \(info.designCapacity) mAh")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                }
-            }
-            .padding()
-        }
-    }
-
-    // MARK: - Calibration Card
-    private var calibrationCard: some View {
-        GroupBox("캘리브레이션") {
-            VStack(spacing: 12) {
-                if controller.isCalibrating {
-                    HStack {
-                        ProgressView(value: controller.calibrationMode.progress)
-                        Text(controller.calibrationMode.currentPhase.rawValue)
-                            .font(.system(size: 12))
-                    }
-
-                    Button("캘리브레이션 취소") {
-                        controller.cancelCalibration()
-                    }
-                    .foregroundColor(.red)
-                } else {
-                    Text("배터리 캘리브레이션으로 잔량 표시 정확도를 복원합니다.")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-
-                    Text("사이클: 현재 → 100% → 10% → 100% → 1시간 유지 → 복원")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-
-                    Button("캘리브레이션 시작") {
-                        controller.startCalibration()
-                    }
-                    .controlSize(.large)
                 }
             }
             .padding()
@@ -296,9 +259,6 @@ struct SettingsView: View {
             chargeSettings
                 .tabItem { Label("충전", systemImage: "battery.100.bolt") }
 
-            sailingSettings
-                .tabItem { Label("Sailing", systemImage: "wind") }
-
             protectionSettings
                 .tabItem { Label("보호", systemImage: "shield.fill") }
 
@@ -312,10 +272,11 @@ struct SettingsView: View {
         Form {
             Section("Charge Limit") {
                 HStack {
+                    // #9: controller.setChargeLimit()로 applyMaintain도 호출
                     Slider(
                         value: Binding(
                             get: { Double(settings.chargeLimit) },
-                            set: { settings.chargeLimit = Int($0) }
+                            set: { controller.setChargeLimit(Int($0)) }
                         ),
                         in: 20...100,
                         step: 5
@@ -326,57 +287,10 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Discharge") {
-                Toggle("Automatic Discharge", isOn: $settings.autoDischargeEnabled)
-                Text("현재 잔량이 Charge Limit보다 높을 때 자동 방전")
+            Section("정보") {
+                Text("충전 제어는 battery CLI를 통해 관리됩니다. maintain 모드는 sleep/재부팅 후에도 유지됩니다.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
-            }
-
-            Section("Sleep") {
-                Toggle("Sleep 시 충전 중지", isOn: $settings.stopChargingOnSleep)
-                Text("MacBook이 sleep에 들어가기 전 충전을 일시정지합니다")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    private var sailingSettings: some View {
-        Form {
-            Section("Sailing Mode") {
-                Toggle("Sailing Mode 활성화", isOn: $settings.sailingEnabled)
-
-                if settings.sailingEnabled {
-                    HStack {
-                        Text("하한")
-                        Slider(
-                            value: Binding(
-                                get: { Double(settings.sailingLowerBound) },
-                                set: { settings.sailingLowerBound = Int($0) }
-                            ),
-                            in: 20...Double(max(20, settings.chargeLimit - 1)),
-                            step: 5
-                        )
-                        Text("\(settings.sailingLowerBound)%")
-                            .font(.system(.body, design: .monospaced))
-                            .frame(width: 45)
-                    }
-
-                    Text("범위: \(settings.sailingLowerBound)% ~ \(settings.chargeLimit)%")
-                        .font(.system(size: 12))
-                        .foregroundColor(.accentColor)
-                }
-            }
-
-            Section("설명") {
-                Text("""
-                Sailing Mode는 배터리를 설정 범위 내에서 자연스럽게 \
-                오르내리게 합니다. 능동적으로 방전하지 않으며, \
-                셀 자가 방전과 시스템 부하 초과 시의 자연 소모를 이용합니다.
-                """)
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
             }
         }
     }
@@ -387,17 +301,19 @@ struct SettingsView: View {
                 Toggle("Heat Protection 활성화", isOn: $settings.heatProtectionEnabled)
 
                 if settings.heatProtectionEnabled {
-                    HStack {
+                    HStack(spacing: 8) {
                         Text("임계 온도")
+                            .fixedSize()
                         Slider(
                             value: $settings.heatProtectionThreshold,
-                            in: 30...50,
+                            in: 20...50,
                             step: 1
                         )
                         Text(String(format: "%.0f°C", settings.heatProtectionThreshold))
                             .font(.system(.body, design: .monospaced))
                             .frame(width: 45)
                     }
+                    .padding(.horizontal, 4)
                 }
             }
 

@@ -13,9 +13,8 @@
 		AA000011 /* ChargeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100011 /* ChargeController.swift */; };
 		AA000012 /* ChargeLimiter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100012 /* ChargeLimiter.swift */; };
 		AA000013 /* Discharger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100013 /* Discharger.swift */; };
-		AA000014 /* SailingMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100014 /* SailingMode.swift */; };
 		AA000015 /* HeatProtection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100015 /* HeatProtection.swift */; };
-		AA000016 /* CalibrationMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100016 /* CalibrationMode.swift */; };
+
 		AA000017 /* TopUpAndLED.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100017 /* TopUpAndLED.swift */; };
 		AA000018 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100018 /* MenuBarView.swift */; };
 		AA000019 /* DashboardAndSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100019 /* DashboardAndSettings.swift */; };
@@ -32,9 +31,8 @@
 		AA100011 /* ChargeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeController.swift; sourceTree = "<group>"; };
 		AA100012 /* ChargeLimiter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeLimiter.swift; sourceTree = "<group>"; };
 		AA100013 /* Discharger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Discharger.swift; sourceTree = "<group>"; };
-		AA100014 /* SailingMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SailingMode.swift; sourceTree = "<group>"; };
 		AA100015 /* HeatProtection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeatProtection.swift; sourceTree = "<group>"; };
-		AA100016 /* CalibrationMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalibrationMode.swift; sourceTree = "<group>"; };
+
 		AA100017 /* TopUpAndLED.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopUpAndLED.swift; sourceTree = "<group>"; };
 		AA100018 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		AA100019 /* DashboardAndSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardAndSettings.swift; sourceTree = "<group>"; };
@@ -104,9 +102,8 @@
 			children = (
 				AA100012 /* ChargeLimiter.swift */,
 				AA100013 /* Discharger.swift */,
-				AA100014 /* SailingMode.swift */,
 				AA100015 /* HeatProtection.swift */,
-				AA100016 /* CalibrationMode.swift */,
+
 				AA100017 /* TopUpAndLED.swift */,
 			);
 			path = Features;
@@ -179,9 +176,8 @@
 				AA000011 /* ChargeController.swift in Sources */,
 				AA000012 /* ChargeLimiter.swift in Sources */,
 				AA000013 /* Discharger.swift in Sources */,
-				AA000014 /* SailingMode.swift in Sources */,
 				AA000015 /* HeatProtection.swift in Sources */,
-				AA000016 /* CalibrationMode.swift in Sources */,
+
 				AA000017 /* TopUpAndLED.swift in Sources */,
 				AA000018 /* MenuBarView.swift in Sources */,
 				AA000019 /* DashboardAndSettings.swift in Sources */,

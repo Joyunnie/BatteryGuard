@@ -1,6 +1,9 @@
 // ChargeController.swift
-// 모든 충전 제어 기능을 조율하는 중앙 컨트롤러
-// 각 Feature 모듈의 상태를 관리하고 SMC 명령을 실행
+// 충전 제어 중앙 컨트롤러 — battery CLI를 통한 제어
+//
+// 모든 SMC 제어는 battery CLI에 위임.
+// 제어 루프는 IOKit에서 배터리 상태를 읽어 UI에 표시만 함.
+// battery CLI 호출은 모두 백그라운드 스레드에서 실행 (메인 스레드 블로킹 방지).
 
 import Foundation
 import Combine
@@ -13,22 +16,15 @@ enum ChargeState: String {
     case discharging = "방전 중"
     case notConnected = "전원 미연결"
     case topUp = "Top Up 중"
-    case calibrating = "캘리브레이션"
+
 }
 
 // MARK: - UserSettings
-/// 사용자 설정값 (UserDefaults에 저장)
 class UserSettings: ObservableObject {
     static let shared = UserSettings()
 
     @Published var chargeLimit: Int {
         didSet { UserDefaults.standard.set(chargeLimit, forKey: "chargeLimit") }
-    }
-    @Published var sailingLowerBound: Int {
-        didSet { UserDefaults.standard.set(sailingLowerBound, forKey: "sailingLower") }
-    }
-    @Published var sailingEnabled: Bool {
-        didSet { UserDefaults.standard.set(sailingEnabled, forKey: "sailingEnabled") }
     }
     @Published var heatProtectionEnabled: Bool {
         didSet { UserDefaults.standard.set(heatProtectionEnabled, forKey: "heatProtection") }
@@ -36,14 +32,8 @@ class UserSettings: ObservableObject {
     @Published var heatProtectionThreshold: Double {
         didSet { UserDefaults.standard.set(heatProtectionThreshold, forKey: "heatThreshold") }
     }
-    @Published var autoDischargeEnabled: Bool {
-        didSet { UserDefaults.standard.set(autoDischargeEnabled, forKey: "autoDischarge") }
-    }
     @Published var controlMagSafeLED: Bool {
         didSet { UserDefaults.standard.set(controlMagSafeLED, forKey: "controlMagSafe") }
-    }
-    @Published var stopChargingOnSleep: Bool {
-        didSet { UserDefaults.standard.set(stopChargingOnSleep, forKey: "stopOnSleep") }
     }
 
     init() {
@@ -52,144 +42,170 @@ class UserSettings: ObservableObject {
         if defaults.object(forKey: "chargeLimit") == nil {
             defaults.set(80, forKey: "chargeLimit")
         }
-        if defaults.object(forKey: "sailingLower") == nil {
-            defaults.set(75, forKey: "sailingLower")
-        }
         if defaults.object(forKey: "heatThreshold") == nil {
             defaults.set(40.0, forKey: "heatThreshold")
         }
 
         self.chargeLimit = defaults.integer(forKey: "chargeLimit")
-        self.sailingLowerBound = defaults.integer(forKey: "sailingLower")
-        self.sailingEnabled = defaults.bool(forKey: "sailingEnabled")
         self.heatProtectionEnabled = defaults.bool(forKey: "heatProtection")
         self.heatProtectionThreshold = defaults.double(forKey: "heatThreshold")
-        self.autoDischargeEnabled = defaults.bool(forKey: "autoDischarge")
         self.controlMagSafeLED = defaults.bool(forKey: "controlMagSafe")
-        self.stopChargingOnSleep = defaults.bool(forKey: "stopOnSleep")
     }
 }
 
 // MARK: - ChargeController
-/// 충전 제어 중앙 관리자
-/// - 2초마다 배터리 상태를 확인하고 적절한 SMC 명령을 실행
-/// - 각 기능 모듈(Discharge, HeatProtection 등)의 우선순위를 관리
-/// - 상태 변경 시 MagSafe LED 업데이트
+/// battery CLI를 통한 충전 제어 관리자
+/// - 사용자 액션: battery CLI 명령을 백그라운드에서 실행
+/// - 제어 루프: IOKit 읽기 전용 (상태 표시 + 이벤트 감지)
 final class ChargeController: ObservableObject {
     static let shared = ChargeController()
 
     @Published var currentState: ChargeState = .notConnected
     @Published var isDischarging = false
     @Published var isTopUpActive = false
-    @Published var isCalibrating = false
+
     @Published var heatProtectionTriggered = false
     @Published var lastError: String?
 
     private let smc = SMCKit.shared
     private let monitor = BatteryMonitor.shared
     private let settings = UserSettings.shared
-    private var cancellables = Set<AnyCancellable>()
     private var controlTimer: Timer?
     private var sleepObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
 
-    // Feature 모듈
-    private(set) var chargeLimiter: ChargeLimiter!
-    private(set) var discharger: Discharger!
-    private(set) var sailingMode: SailingMode!
-    private(set) var heatProtection: HeatProtection!
-    private(set) var calibrationMode: CalibrationMode!
-    private(set) var topUp: TopUpFeature!
+    /// battery CLI 호출 전용 직렬 큐 — 메인 스레드 블로킹 방지
+    private let batteryQueue = DispatchQueue(label: "com.batteryguard.cli", qos: .userInitiated)
+
+    /// SMC 바이너리(온도/LED) 전용 직렬 큐 — 메인 스레드에서 subprocess 실행 방지 (#2, #3)
+    private let smcQueue = DispatchQueue(label: "com.batteryguard.smc", qos: .utility)
+
+    // Feature 모듈 (UI 참조용)
     private(set) var magSafeLED: MagSafeLEDController!
+
+    // SMC 온도 캐시 — smcQueue에서 주기적 갱신 (#2)
+    private var cachedSMCTemperature: Double = 0
+    private var smcTempTimer: Timer?
+
+    // LED 상태 추적 — 변경 시에만 SMC 쓰기 (#3)
+    private var lastLEDState: MagSafeLEDState?
+    private var isLEDBlinking = false
+
+    // 슬라이더 디바운스 — 드래그 중 중간값 CLI 호출 방지
+    private var chargeLimitDebounceWork: DispatchWorkItem?
 
     // MARK: - 초기화
 
     func initialize() throws {
-        print("[ChargeController] Initializing SMC (subprocess mode)...")
-        try smc.open()
-        print("[ChargeController] SMC binary found")
+        print("[ChargeController] Initializing with battery CLI...")
 
-        // 이전 세션 잔여 상태 초기화 — clean slate
-        print("[ChargeController] Resetting SMC to clean state...")
-        try? smc.disableForceDischarge()  // CHIE=00
-        try? smc.allowCharging()          // CHTE=00000000
-        print("[ChargeController] SMC reset complete")
-
-        do {
-            let temp = try smc.readBatteryTemperature()
-            print("[ChargeController] Battery temp = \(String(format: "%.1f", temp))°C")
-        } catch {
-            print("[ChargeController] Temp read failed (non-critical): \(error)")
+        // 이전 실행에서 남은 battery 프로세스가 있으면 kill — batteryQueue 교착 방지 (백그라운드)
+        batteryQueue.async {
+            let killTask = Process()
+            killTask.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            killTask.arguments = ["-f", "battery maintain_synchronous"]
+            try? killTask.run()
+            killTask.waitUntilExit()
+            print("[ChargeController] Stale battery processes cleaned up (pkill exit=\(killTask.terminationStatus))")
         }
 
-        chargeLimiter = ChargeLimiter(smc: smc, settings: settings)
-        discharger = Discharger(smc: smc, monitor: monitor, settings: settings)
-        sailingMode = SailingMode(smc: smc, monitor: monitor, settings: settings)
-        heatProtection = HeatProtection(smc: smc, monitor: monitor, settings: settings)
-        calibrationMode = CalibrationMode(smc: smc, monitor: monitor, settings: settings, controller: self)
-        topUp = TopUpFeature(smc: smc, monitor: monitor, settings: settings)
+        // 파일 존재 확인만 (빠름, 메인 스레드 안전)
+        try smc.open()
+
         magSafeLED = MagSafeLEDController(smc: smc, settings: settings)
 
         monitor.startMonitoring()
-        startControlLoop()
+        startDisplayLoop()
+        startSMCTempLoop()
         setupSleepWakeObservers()
-    }
 
-    // MARK: - 메인 제어 루프
-
-    /// 핵심 제어 루프 (2초 간격)
-    /// 우선순위: Calibration > HeatProtection > TopUp > Discharge > Sailing > ChargeLimit
-    private func startControlLoop() {
-        controlTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.runControlCycle()
+        // battery CLI 호출은 백그라운드에서 실행 (applyMaintain이 active action 가드 포함)
+        runBattery {
+            try self.applyMaintain()
+            print("[ChargeController] Initialized — battery CLI managing charge control")
         }
     }
 
-    private func runControlCycle() {
+    // MARK: - 백그라운드 battery CLI 실행
+
+    /// battery CLI 명령을 백그라운드 큐에서 실행하고 에러를 메인 스레드에서 처리
+    private func runBattery(_ work: @escaping () throws -> Void) {
+        #if DEBUG
+        print("[ChargeController] runBattery: enqueueing task")
+        #endif
+        batteryQueue.async { [weak self] in
+            #if DEBUG
+            print("[ChargeController] runBattery: task STARTED executing")
+            #endif
+            do {
+                try work()
+                #if DEBUG
+                print("[ChargeController] runBattery: task COMPLETED successfully")
+                #endif
+                if self?.lastError != nil {
+                    DispatchQueue.main.async { self?.lastError = nil }
+                }
+            } catch {
+                print("[ChargeController] runBattery: task FAILED — \(error)")
+                DispatchQueue.main.async {
+                    self?.lastError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    // MARK: - 디스플레이 루프 (읽기 전용)
+
+    private func startDisplayLoop() {
+        controlTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.updateDisplayState()
+        }
+    }
+
+    // MARK: - SMC 온도 캐시 루프 (#2)
+
+    /// SMC 온도를 5초마다 백그라운드에서 읽어 캐시 — 메인 스레드에서 subprocess 호출 제거
+    private func startSMCTempLoop() {
+        smcTempTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.settings.heatProtectionEnabled else { return }
+            self.smcQueue.async {
+                do {
+                    let temp = try self.smc.readBatteryTemperature()
+                    DispatchQueue.main.async {
+                        self.cachedSMCTemperature = Double(temp)
+                    }
+                } catch {
+                    // SMC 온도 읽기 실패 — IOKit 온도로 대체 (cachedSMCTemperature = 0이면 무시됨)
+                }
+            }
+        }
+    }
+
+    private func updateDisplayState() {
         guard let info = monitor.batteryInfo else { return }
 
-        // 1. 전원 연결 판단 — force discharge 시 IOKit이 ExternalConnected=false를 반환하므로
-        //    사용자가 명시적으로 시작한 모드이거나 양의 전류가 흐르면 연결된 것으로 간주
-        let effectivelyPluggedIn = info.isPluggedIn
-            || isDischarging
-            || isTopUpActive
-            || isCalibrating
-            || info.amperage > 0
+        // 전원 연결 판단
+        let pluggedIn = info.isPluggedIn || isDischarging || isTopUpActive
 
-        guard effectivelyPluggedIn else {
+        guard pluggedIn else {
             currentState = .notConnected
             return
         }
 
-        // 2. 캘리브레이션 모드 (최우선)
-        if isCalibrating {
-            do { try calibrationMode.runStep(batteryInfo: info) } catch { lastError = error.localizedDescription }
-            currentState = .calibrating
-            updateLED()
-            return
-        }
-
-        // 3. Heat Protection 체크 (실패해도 다음 단계 진행)
+        // Heat Protection 체크
         if settings.heatProtectionEnabled {
-            do {
-                let triggered = try heatProtection.check(batteryInfo: info)
-                heatProtectionTriggered = triggered
-                if triggered {
-                    currentState = .chargingPaused
-                    updateLED()
-                    return
-                }
-            } catch {
-                // 온도 읽기 실패 — Heat Protection 건너뛰고 계속 진행
-                print("[ChargeController] heatProtection.check failed: \(error)")
+            checkHeatProtection(batteryInfo: info)
+            if heatProtectionTriggered {
+                currentState = .chargingPaused
+                updateLED()
+                return
             }
         }
 
-        // 4. Top Up 모드
+        // Top Up 완료 감지
         if isTopUpActive {
             if info.currentCharge >= 100 {
-                do { try topUp.deactivate() } catch { lastError = error.localizedDescription }
-                isTopUpActive = false
+                completeTopUp()
             } else {
                 currentState = .topUp
                 updateLED()
@@ -197,50 +213,22 @@ final class ChargeController: ObservableObject {
             }
         }
 
-        // 5. 방전 처리 — 방전 중에는 CHTE를 건드리지 않음 (CHIE 무효화 방지)
+        // 방전 완료 감지
         if isDischarging {
             if info.currentCharge <= settings.chargeLimit {
-                // 목표 도달 → 방전 중지 후 충전 억제로 전환하여 레벨 유지
-                do { try discharger.stop() } catch { lastError = error.localizedDescription }
+                print("[ChargeController] Discharge complete: \(info.currentCharge)% <= \(settings.chargeLimit)%")
                 isDischarging = false
-                chargeLimiter.resetState()
-                // 즉시 충전 억제 적용 (CHTE=01000000)
-                do { try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit) } catch { lastError = error.localizedDescription }
-                currentState = .chargingPaused
-                refreshMonitor()
+                monitor.allowSleep()
+                smc.terminateLongProcess()
+                runBattery { try self.applyMaintain() }
             } else {
                 currentState = .discharging
-            }
-            updateLED()
-            return
-        }
-
-        // 6. Auto Discharge — chargeLimit 초과 시 자동 방전 (CHIE=08)
-        if settings.autoDischargeEnabled && info.currentCharge > settings.chargeLimit {
-            do {
-                try discharger.start()
-                isDischarging = true
-                currentState = .discharging
-                _ = monitor.preventSleep(reason: "BatteryGuard: Auto discharge")
-                refreshMonitor()
                 updateLED()
                 return
-            } catch {
-                lastError = error.localizedDescription
             }
         }
 
-        // 7. Sailing Mode — 방전 중에는 CHTE 충돌 방지를 위해 skip
-        if settings.sailingEnabled && !isDischarging {
-            do { try sailingMode.apply(batteryInfo: info) } catch { lastError = error.localizedDescription }
-        }
-
-        // 8. Charge Limit 적용 — 방전 중에는 skip (CHTE 쓰면 CHIE=08이 무효화됨)
-        if !isDischarging {
-            do { try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit) } catch { lastError = error.localizedDescription }
-        }
-
-        // 9. 상태 결정 — 항상 도달
+        // 일반 상태 결정
         if info.isCharging && info.currentCharge < settings.chargeLimit {
             currentState = .charging
         } else {
@@ -250,164 +238,235 @@ final class ChargeController: ObservableObject {
         updateLED()
     }
 
-    // MARK: - MagSafe LED 업데이트
+    // MARK: - Heat Protection
 
-    private func updateLED() {
-        guard settings.controlMagSafeLED else { return }
+    private var lastTemperature: Double = 0
+    private var heatProtectionPending = false
 
-        do {
-            switch currentState {
-            case .charging, .topUp:
-                try magSafeLED.setOrange()
-            case .chargingPaused:
-                try magSafeLED.setGreen()
-            case .discharging:
-                try magSafeLED.blinkOrangeGreen()
-            case .calibrating:
-                try magSafeLED.setOrange()
-            case .notConnected:
-                break
+    private func checkHeatProtection(batteryInfo: BatteryInfo) {
+        // #2: SMC 온도는 캐시에서 읽기 — 메인 스레드에서 subprocess 실행하지 않음
+        lastTemperature = max(cachedSMCTemperature, batteryInfo.temperature)
+
+        let threshold = settings.heatProtectionThreshold
+
+        // 이미 battery CLI 호출 중이면 중복 방지
+        guard !heatProtectionPending else { return }
+
+        if lastTemperature > threshold && !heatProtectionTriggered {
+            print("[ChargeController] Heat protection triggered: \(String(format: "%.1f", lastTemperature))°C > \(threshold)°C")
+            heatProtectionTriggered = true
+
+            // 방전 중이면 충전이 이미 없으므로 CLI 호출 불필요 — 방전 계속 진행
+            if isDischarging {
+                print("[ChargeController] Discharge active — skipping charging off (already not charging)")
+            } else {
+                // maintain 중이면 charging off로 충전만 차단
+                heatProtectionPending = true
+                runBattery {
+                    // #5: defer로 pending 해제 — 에러 시에도 반드시 실행
+                    defer { DispatchQueue.main.async { self.heatProtectionPending = false } }
+                    try self.smc.chargingOff()
+                }
             }
-        } catch {
-            // LED 제어 실패는 무시
+        } else if lastTemperature <= (threshold - 2.0) && heatProtectionTriggered {
+            print("[ChargeController] Heat protection cleared: \(String(format: "%.1f", lastTemperature))°C — restoring previous state")
+            heatProtectionTriggered = false
+
+            // 방전/TopUp/캘리브레이션 중이면 이미 해당 CLI가 제어 중 — maintain 불필요
+            if isDischarging || isTopUpActive {
+                print("[ChargeController] Active action running — no restore needed")
+            } else {
+                heatProtectionPending = true
+                runBattery {
+                    // #5: defer로 pending 해제 — 에러 시에도 반드시 실행
+                    defer { DispatchQueue.main.async { self.heatProtectionPending = false } }
+                    try self.applyMaintain()
+                }
+            }
         }
     }
 
-    // MARK: - Sleep/Wake 처리
+    // MARK: - MagSafe LED (#3)
+
+    /// LED 상태를 결정하고, 변경 시에만 SMC 쓰기 — smcQueue에서 실행
+    private func updateLED() {
+        guard settings.controlMagSafeLED else { return }
+
+        switch currentState {
+        case .charging, .topUp:
+            setLEDIfChanged(.orange)
+        case .chargingPaused:
+            setLEDIfChanged(.green)
+        case .discharging:
+            if !isLEDBlinking {
+                isLEDBlinking = true
+                lastLEDState = nil
+                magSafeLED.startBlink(on: smcQueue)
+            }
+        case .notConnected:
+            break
+        }
+    }
+
+    /// LED 상태가 변경된 경우에만 SMC 쓰기 — 불필요한 subprocess 호출 방지
+    private func setLEDIfChanged(_ state: MagSafeLEDState) {
+        if isLEDBlinking {
+            isLEDBlinking = false
+            magSafeLED.stopBlink()
+        }
+        guard state != lastLEDState else { return }
+        lastLEDState = state
+        smcQueue.async {
+            try? self.smc.setMagSafeLED(state)
+        }
+    }
+
+    // MARK: - Sleep/Wake
 
     private func setupSleepWakeObservers() {
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.handleWillSleep()
+        ) { _ in
+            print("[ChargeController] System will sleep")
         }
 
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            self?.handleDidWake()
-        }
-    }
-
-    private func handleWillSleep() {
-        if settings.stopChargingOnSleep {
-            try? smc.inhibitCharging()
-        }
-    }
-
-    private func handleDidWake() {
-        if !isDischarging && !heatProtectionTriggered {
-            try? smc.allowCharging()
+            print("[ChargeController] System did wake")
+            guard let self = self else { return }
+            // #11: wake 시 항상 maintain 재적용 — sleep 중 battery CLI가 중단될 수 있음
+            self.heatProtectionTriggered = false
+            self.lastLEDState = nil
+            self.runBattery { try self.applyMaintain() }
         }
     }
 
     // MARK: - 사용자 액션
 
     func setChargeLimit(_ limit: Int) {
-        settings.chargeLimit = max(20, min(100, limit))
-        print("[ChargeController] setChargeLimit(\(settings.chargeLimit))")
+        let clamped = max(20, min(100, limit))
+        settings.chargeLimit = clamped
+
+        guard !isDischarging && !isTopUpActive else { return }
+
+        // 즉시 UI 상태 업데이트
         if let info = monitor.batteryInfo {
+            if info.currentCharge >= clamped {
+                currentState = .chargingPaused
+            } else if info.isPluggedIn {
+                currentState = .charging
+            }
+        }
+
+        // 슬라이더 드래그 중 중간값마다 CLI 호출하지 않도록 디바운스 (0.5초)
+        chargeLimitDebounceWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.runBattery {
+                guard let self = self else { return }
+                let finalLimit = DispatchQueue.main.sync { self.settings.chargeLimit }
+                print("[ChargeController] setChargeLimit(\(finalLimit))")
+                try self.applyMaintain()
+            }
+        }
+        chargeLimitDebounceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    func startDischarge() {
+        guard let info = monitor.batteryInfo else { return }
+
+        if info.currentCharge <= settings.chargeLimit {
+            print("[ChargeController] charge \(info.currentCharge)% <= limit \(settings.chargeLimit)% — nothing to discharge")
+            return
+        }
+
+        if isTopUpActive { cancelTopUp() }
+
+        // 즉시 UI 상태 업데이트
+        isDischarging = true
+        currentState = .discharging
+        _ = monitor.preventSleep(reason: "BatteryGuard: Discharge in progress")
+
+        let target = settings.chargeLimit
+        runBattery {
+            print("[ChargeController] Starting discharge to \(target)%")
             do {
-                try chargeLimiter.apply(currentCharge: info.currentCharge, limit: settings.chargeLimit)
-                // 즉시 상태 반영
-                if info.currentCharge >= settings.chargeLimit {
-                    currentState = .chargingPaused
-                } else if info.isPluggedIn {
-                    currentState = .charging
-                }
+                try self.smc.discharge(to: target)
             } catch {
-                print("[ChargeController] chargeLimit apply FAILED: \(error)")
-                lastError = error.localizedDescription
+                // #4: 에러 시 상태 복원
+                print("[ChargeController] Discharge failed: \(error)")
+                DispatchQueue.main.async {
+                    self.isDischarging = false
+                    self.currentState = .chargingPaused
+                    self.monitor.allowSleep()
+                }
+                throw error
             }
         }
     }
 
-    func startDischarge() {
-        guard let info = monitor.batteryInfo,
-              info.currentCharge > settings.chargeLimit else { return }
-        if isTopUpActive { cancelTopUp() }
-        do {
-            try discharger.start()
-            isDischarging = true
-            currentState = .discharging
-            _ = monitor.preventSleep(reason: "BatteryGuard: Discharge in progress")
-            refreshMonitor()
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
     func stopDischarge() {
-        do {
-            try discharger.stop()
-            isDischarging = false
-            currentState = .chargingPaused
-            monitor.allowSleep()
-            refreshMonitor()
-        } catch {
-            lastError = error.localizedDescription
+        // 즉시 UI 상태 업데이트
+        isDischarging = false
+        currentState = .chargingPaused
+        monitor.allowSleep()
+
+        // 장시간 프로세스 즉시 종료 후 maintain 복원
+        smc.terminateLongProcess()
+        runBattery {
+            print("[ChargeController] Stopping discharge → resume maintain")
+            try self.applyMaintain()
         }
     }
 
     func startTopUp() {
         if isDischarging { stopDischarge() }
-        do {
-            try topUp.activate()
-            isTopUpActive = true
-            currentState = .topUp
-            refreshMonitor()
-        } catch {
-            lastError = error.localizedDescription
+
+        // 즉시 UI 상태 업데이트
+        isTopUpActive = true
+        currentState = .topUp
+
+        runBattery {
+            print("[ChargeController] Starting Top Up → charge to 100%")
+            do {
+                try self.smc.charge(to: 100)
+            } catch {
+                // #4: 에러 시 상태 복원
+                print("[ChargeController] Top Up failed: \(error)")
+                DispatchQueue.main.async {
+                    self.isTopUpActive = false
+                    self.currentState = .chargingPaused
+                }
+                throw error
+            }
         }
     }
 
     func cancelTopUp() {
-        do {
-            try topUp.deactivate()
-            isTopUpActive = false
-            currentState = .chargingPaused
-            refreshMonitor()
-        } catch {
-            lastError = error.localizedDescription
+        // 즉시 UI 상태 업데이트
+        isTopUpActive = false
+        currentState = .chargingPaused
+
+        // 장시간 프로세스 즉시 종료 후 maintain 복원
+        smc.terminateLongProcess()
+        runBattery {
+            print("[ChargeController] Canceling Top Up → resume maintain")
+            try self.applyMaintain()
         }
     }
 
-    func startCalibration() {
-        if isTopUpActive { cancelTopUp() }
-        if isDischarging { stopDischarge() }
-        do {
-            try calibrationMode.start()
-            isCalibrating = true
-            currentState = .calibrating
-            _ = monitor.preventSleep(reason: "BatteryGuard: Calibration in progress")
-            refreshMonitor()
-        } catch {
-            lastError = error.localizedDescription
-        }
+    private func completeTopUp() {
+        print("[ChargeController] Top Up complete (100%)")
+        isTopUpActive = false
+        currentState = .chargingPaused
+        smc.terminateLongProcess()
+        runBattery { try self.applyMaintain() }
     }
 
-    func cancelCalibration() {
-        do {
-            try calibrationMode.cancel()
-            isCalibrating = false
-            currentState = .chargingPaused
-            monitor.allowSleep()
-            refreshMonitor()
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    /// SMC 쓰기 후 즉시 배터리 상태 갱신
-    private func refreshMonitor() {
-        DispatchQueue.main.async {
-            self.monitor.batteryInfo = self.monitor.readBatteryInfo()
-        }
-    }
-
-    /// Right-Click 토글 (충전 일시정지 <-> 충전 재개)
+    /// Right-Click 토글
     func toggleCharging() {
         guard let info = monitor.batteryInfo else { return }
         if currentState == .chargingPaused || currentState == .discharging {
@@ -417,12 +476,34 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    // MARK: - Helpers
+
+    /// 현재 설정에 맞는 battery maintain 명령 실행 (batteryQueue에서 호출)
+    /// 임시 작업(discharge/topUp) 중에는 호출하지 않음 —
+    /// battery maintain이 실행되면 진행 중인 discharge/charge 프로세스를 kill함
+    private func applyMaintain() throws {
+        // #6: 메인 스레드에서 상태 플래그를 안전하게 읽기 — @Published는 thread-safe하지 않음
+        let (shouldSkip, limit) = DispatchQueue.main.sync {
+            (isDischarging || isTopUpActive, settings.chargeLimit)
+        }
+        guard !shouldSkip else {
+            print("[ChargeController] applyMaintain SKIPPED — active action running")
+            return
+        }
+        try smc.maintain(level: limit)
+    }
+
     // MARK: - 정리
 
     func shutdown() {
         controlTimer?.invalidate()
+        smcTempTimer?.invalidate()
         monitor.stopMonitoring()
         monitor.allowSleep()
+
+        if isLEDBlinking {
+            magSafeLED.stopBlink()
+        }
 
         if let obs = sleepObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
@@ -431,11 +512,20 @@ final class ChargeController: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
         }
 
-        try? smc.disableForceDischarge()
-        try? smc.allowCharging()
-        if settings.controlMagSafeLED {
-            try? smc.setMagSafeLED(.auto)
+        // 장시간 프로세스 정리
+        smc.terminateLongProcess()
+
+        // #13: 백그라운드에서 정리 + 5초 타임아웃 — 앱 종료 지연 방지
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? self.smc.maintainStop()
+            if self.settings.controlMagSafeLED {
+                try? self.smc.setMagSafeLED(.auto)
+            }
+            try? self.smc.close()
+            sem.signal()
         }
-        try? smc.close()
+        _ = sem.wait(timeout: .now() + 5)
+        print("[ChargeController] Shutdown complete — battery maintain stopped")
     }
 }
