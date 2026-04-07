@@ -76,6 +76,7 @@ final class BatteryHistory {
 
     private var lastChargePercent: Int?
     private var lastChargeLimit: Int?
+    private var lastCleanupDate: Date?
 
     /// 60초마다 호출 — 값이 변경된 경우에만 저장
     func record(chargePercent: Int, chargeLimit: Int) {
@@ -86,6 +87,14 @@ final class BatteryHistory {
         lastChargePercent = chargePercent
         lastChargeLimit = chargeLimit
 
+        // 1시간마다 24시간 초과 데이터 정리
+        let needsCleanup: Bool
+        if let last = lastCleanupDate {
+            needsCleanup = Date().timeIntervalSince(last) >= 3600
+        } else {
+            needsCleanup = true
+        }
+
         let ctx = container.newBackgroundContext()
         ctx.perform {
             let record = BatteryRecord(context: ctx)
@@ -93,18 +102,30 @@ final class BatteryHistory {
             record.chargePercent = Int16(chargePercent)
             record.chargeLimit = Int16(chargeLimit)
 
-            // 24시간 초과 데이터 삭제
-            let cutoff = Date().addingTimeInterval(-86400)
-            let deleteReq = NSFetchRequest<NSFetchRequestResult>(entityName: "BatteryRecord")
-            deleteReq.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
-            let batchDelete = NSBatchDeleteRequest(fetchRequest: deleteReq)
-            try? ctx.execute(batchDelete)
+            if needsCleanup {
+                let cutoff = Date().addingTimeInterval(-86400)
+                let deleteReq = NSFetchRequest<NSFetchRequestResult>(entityName: "BatteryRecord")
+                deleteReq.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
+                let batchDelete = NSBatchDeleteRequest(fetchRequest: deleteReq)
+                batchDelete.resultType = .resultTypeObjectIDs
+                if let result = try? ctx.execute(batchDelete) as? NSBatchDeleteResult,
+                   let ids = result.result as? [NSManagedObjectID], !ids.isEmpty {
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: [NSDeletedObjectsKey: ids],
+                        into: [self.container.viewContext]
+                    )
+                }
+            }
 
             do {
                 try ctx.save()
             } catch {
                 print("[BatteryHistory] Save failed: \(error)")
             }
+        }
+
+        if needsCleanup {
+            lastCleanupDate = Date()
         }
     }
 
