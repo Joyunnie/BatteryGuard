@@ -174,44 +174,76 @@ struct DashboardView: View {
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 120)
             } else {
-                Chart {
-                    ForEach(historyRecords, id: \.timestamp) { record in
-                        LineMark(
-                            x: .value("시간", record.timestamp),
-                            y: .value("%", record.chargePercent)
-                        )
-                        .foregroundStyle(.blue)
-                        .lineStyle(StrokeStyle(lineWidth: 2))
+                let allValues = historyRecords.flatMap { [$0.chargePercent, $0.chargeLimit] }
+                let dataMin = allValues.min() ?? 0
+                let dataMax = allValues.max() ?? 100
+                let range = max(dataMax - dataMin, 20)
+                let yMin = max(0, dataMin - 5)
+                let yMax = min(100, yMin + range + 10)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Chart {
+                        ForEach(historyRecords, id: \.timestamp) { record in
+                            LineMark(
+                                x: .value("시간", record.timestamp),
+                                y: .value("%", record.chargePercent),
+                                series: .value("종류", "충전 %")
+                            )
+                            .foregroundStyle(.blue)
+                            .lineStyle(StrokeStyle(lineWidth: 2))
+                        }
+                        ForEach(historyRecords, id: \.timestamp) { record in
+                            LineMark(
+                                x: .value("시간", record.timestamp),
+                                y: .value("%", record.chargeLimit),
+                                series: .value("종류", "충전 한도")
+                            )
+                            .foregroundStyle(.gray.opacity(0.5))
+                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                        }
                     }
-                    ForEach(historyRecords, id: \.timestamp) { record in
-                        LineMark(
-                            x: .value("시간", record.timestamp),
-                            y: .value("%", record.chargeLimit)
-                        )
-                        .foregroundStyle(.gray.opacity(0.6))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 3]))
-                    }
-                }
-                .chartYScale(domain: 0...100)
-                .chartYAxis {
-                    AxisMarks(values: [0, 25, 50, 75, 100]) { value in
-                        AxisGridLine()
-                        AxisValueLabel {
-                            if let v = value.as(Int.self) {
-                                Text("\(v)%")
-                                    .font(.system(size: 9))
+                    .chartYScale(domain: yMin...yMax)
+                    .chartYAxis {
+                        AxisMarks(position: .leading) { value in
+                            AxisGridLine()
+                            AxisValueLabel {
+                                if let v = value.as(Int.self) {
+                                    Text("\(v)%")
+                                        .font(.system(size: 9))
+                                }
                             }
                         }
                     }
-                }
-                .chartXAxis {
-                    AxisMarks(values: .stride(by: .hour, count: 4)) { _ in
-                        AxisGridLine()
-                        AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)))
+                    .chartXAxis {
+                        AxisMarks(values: .stride(by: .hour, count: 1)) { _ in
+                            AxisGridLine()
+                            AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)))
+                        }
+                    }
+                    .chartLegend(.hidden)
+                    .frame(height: 150)
+
+                    // 범례
+                    HStack(spacing: 16) {
+                        HStack(spacing: 4) {
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(.blue)
+                                .frame(width: 14, height: 2)
+                            Text("충전 %")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                        HStack(spacing: 4) {
+                            StrokeLine()
+                                .stroke(.gray.opacity(0.5), style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+                                .frame(width: 14, height: 2)
+                            Text("충전 한도")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
-                .frame(height: 150)
-                .padding(.top, 8)
+                .padding(.top, 4)
             }
         }
     }
@@ -242,6 +274,16 @@ struct DetailRow: View {
             Text(value)
                 .font(.system(size: 12, weight: .medium, design: .monospaced))
         }
+    }
+}
+
+/// 범례용 직선 Shape
+private struct StrokeLine: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        return path
     }
 }
 
