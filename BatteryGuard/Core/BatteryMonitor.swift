@@ -38,6 +38,7 @@ final class BatteryMonitor: ObservableObject {
     @Published var batteryInfo: BatteryInfo?
 
     private var timer: Timer?
+    private var historyTimer: Timer?
     private var runLoopSource: CFRunLoopSource?
     private var hasLoggedDictOnce = false
 
@@ -179,12 +180,26 @@ final class BatteryMonitor: ObservableObject {
             self.batteryInfo = self.readBatteryInfo()
         }
 
+        // 60초마다 배터리 이력 기록 (Core Data)
+        recordHistory()
+        historyTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+            self?.recordHistory()
+        }
+
         registerPowerSourceNotification()
+    }
+
+    private func recordHistory() {
+        guard let info = batteryInfo else { return }
+        let limit = UserSettings.shared.chargeLimit
+        BatteryHistory.shared.record(chargePercent: info.currentCharge, chargeLimit: limit)
     }
 
     func stopMonitoring() {
         timer?.invalidate()
         timer = nil
+        historyTimer?.invalidate()
+        historyTimer = nil
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
             runLoopSource = nil

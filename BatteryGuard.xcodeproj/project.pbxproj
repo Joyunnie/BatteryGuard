@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		AA000001 /* BatteryGuardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100001 /* BatteryGuardApp.swift */; };
 		AA000002 /* SMCKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100002 /* SMCKit.swift */; };
+		AA000009 /* BatteryHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100009 /* BatteryHistory.swift */; };
 		AA000010 /* BatteryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100010 /* BatteryMonitor.swift */; };
 		AA000011 /* ChargeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100011 /* ChargeController.swift */; };
 		AA000012 /* ChargeLimiter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100012 /* ChargeLimiter.swift */; };
@@ -27,6 +28,7 @@
 		AA100004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA100005 /* BatteryGuard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BatteryGuard.entitlements; sourceTree = "<group>"; };
 		AA100006 /* BatteryGuard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BatteryGuard.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA100009 /* BatteryHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryHistory.swift; sourceTree = "<group>"; };
 		AA100010 /* BatteryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryMonitor.swift; sourceTree = "<group>"; };
 		AA100011 /* ChargeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeController.swift; sourceTree = "<group>"; };
 		AA100012 /* ChargeLimiter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeLimiter.swift; sourceTree = "<group>"; };
@@ -83,6 +85,7 @@
 		AA300004 /* Core */ = {
 			isa = PBXGroup;
 			children = (
+				AA100009 /* BatteryHistory.swift */,
 				AA100010 /* BatteryMonitor.swift */,
 				AA100011 /* ChargeController.swift */,
 			);
@@ -172,6 +175,7 @@
 			files = (
 				AA000001 /* BatteryGuardApp.swift in Sources */,
 				AA000002 /* SMCKit.swift in Sources */,
+				AA000009 /* BatteryHistory.swift in Sources */,
 				AA000010 /* BatteryMonitor.swift in Sources */,
 				AA000011 /* ChargeController.swift in Sources */,
 				AA000012 /* ChargeLimiter.swift in Sources */,

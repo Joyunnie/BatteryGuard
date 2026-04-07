@@ -2,6 +2,7 @@
 // 배터리 상세 정보 대시보드 + 설정 창
 
 import SwiftUI
+import Charts
 
 // MARK: - Dashboard View
 
@@ -9,6 +10,7 @@ struct DashboardView: View {
     @EnvironmentObject var controller: ChargeController
     @EnvironmentObject var monitor: BatteryMonitor
     @EnvironmentObject var settings: UserSettings
+    @State private var historyRecords: [BatteryHistory.ChartRecord] = []
 
     var body: some View {
         ScrollView {
@@ -20,11 +22,16 @@ struct DashboardView: View {
                     healthCard
                 }
 
+                chargeHistoryCard
             }
             .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear { historyRecords = BatteryHistory.shared.fetchLast24Hours() }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            historyRecords = BatteryHistory.shared.fetchLast24Hours()
+        }
     }
 
     // MARK: - Battery Status Card
@@ -156,6 +163,56 @@ struct DashboardView: View {
                 }
             }
             .padding()
+        }
+    }
+
+    // MARK: - Charge History Chart
+    private var chargeHistoryCard: some View {
+        GroupBox("충전 이력 (24시간)") {
+            if historyRecords.count < 2 {
+                Text("데이터 수집 중...")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            } else {
+                Chart {
+                    ForEach(historyRecords, id: \.timestamp) { record in
+                        LineMark(
+                            x: .value("시간", record.timestamp),
+                            y: .value("%", record.chargePercent)
+                        )
+                        .foregroundStyle(.blue)
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                    }
+                    ForEach(historyRecords, id: \.timestamp) { record in
+                        LineMark(
+                            x: .value("시간", record.timestamp),
+                            y: .value("%", record.chargeLimit)
+                        )
+                        .foregroundStyle(.gray.opacity(0.6))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 3]))
+                    }
+                }
+                .chartYScale(domain: 0...100)
+                .chartYAxis {
+                    AxisMarks(values: [0, 25, 50, 75, 100]) { value in
+                        AxisGridLine()
+                        AxisValueLabel {
+                            if let v = value.as(Int.self) {
+                                Text("\(v)%")
+                                    .font(.system(size: 9))
+                            }
+                        }
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .hour, count: 4)) { _ in
+                        AxisGridLine()
+                        AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)))
+                    }
+                }
+                .frame(height: 150)
+                .padding(.top, 8)
+            }
         }
     }
 
