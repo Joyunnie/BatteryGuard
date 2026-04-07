@@ -80,8 +80,10 @@ final class BatteryHistory {
 
     /// 60초마다 호출 — 값이 변경된 경우에만 저장
     func record(chargePercent: Int, chargeLimit: Int) {
+        print("[BatteryHistory] record() called: charge=\(chargePercent)% limit=\(chargeLimit)%")
         // 변경 없으면 스킵
         if chargePercent == lastChargePercent && chargeLimit == lastChargeLimit {
+            print("[BatteryHistory] record() skipped — no change")
             return
         }
         lastChargePercent = chargePercent
