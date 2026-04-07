@@ -36,17 +36,10 @@ final class BatteryMonitor: ObservableObject {
     static let shared = BatteryMonitor()
 
     @Published var batteryInfo: BatteryInfo?
-    @Published var chargeHistory: [ChargeRecord] = []
 
     private var timer: Timer?
     private var runLoopSource: CFRunLoopSource?
     private var hasLoggedDictOnce = false
-
-    struct ChargeRecord {
-        let timestamp: Date
-        let charge: Int
-        let isCharging: Bool
-    }
 
     // MARK: - Helper
 
@@ -184,20 +177,6 @@ final class BatteryMonitor: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.batteryInfo = self.readBatteryInfo()
-
-            if let info = self.batteryInfo {
-                let now = Date()
-                if self.chargeHistory.isEmpty ||
-                   now.timeIntervalSince(self.chargeHistory.last!.timestamp) >= 300 {
-                    self.chargeHistory.append(ChargeRecord(
-                        timestamp: now,
-                        charge: info.currentCharge,
-                        isCharging: info.isCharging
-                    ))
-                    let cutoff = now.addingTimeInterval(-86400)
-                    self.chargeHistory.removeAll { $0.timestamp < cutoff }
-                }
-            }
         }
 
         registerPowerSourceNotification()

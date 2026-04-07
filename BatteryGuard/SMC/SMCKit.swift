@@ -291,9 +291,6 @@ final class SMCKit {
 
         do {
             try proc.run()
-            #if DEBUG
-            print("[SMCKit] Process started, pid=\(proc.processIdentifier): \(executable) \(args.joined(separator: " "))")
-            #endif
         } catch {
             print("[SMCKit] Process launch FAILED: \(error)")
             return (-1, "", error.localizedDescription)
@@ -326,10 +323,6 @@ final class SMCKit {
         proc.waitUntilExit()
         timeoutWork.cancel()
         readGroup.wait()
-
-        #if DEBUG
-        print("[SMCKit] Process finished, pid=\(proc.processIdentifier), exit=\(proc.terminationStatus)")
-        #endif
 
         return (
             proc.terminationStatus,

@@ -20,7 +20,6 @@ struct DashboardView: View {
                     healthCard
                 }
 
-                chargeHistoryCard
             }
             .padding(20)
         }
@@ -160,21 +159,6 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Charge History
-    private var chargeHistoryCard: some View {
-        GroupBox("충전 이력 (24시간)") {
-            if monitor.chargeHistory.isEmpty {
-                Text("데이터 수집 중...")
-                    .foregroundColor(.secondary)
-                    .padding()
-            } else {
-                ChargeHistoryChart(records: monitor.chargeHistory)
-                    .frame(height: 150)
-                    .padding()
-            }
-        }
-    }
-
     private func healthColor(_ percent: Double) -> Color {
         if percent >= 90 { return .green }
         if percent >= 80 { return .orange }
@@ -200,50 +184,6 @@ struct DetailRow: View {
                 .frame(width: 50, alignment: .leading)
             Text(value)
                 .font(.system(size: 12, weight: .medium, design: .monospaced))
-        }
-    }
-}
-
-struct ChargeHistoryChart: View {
-    let records: [BatteryMonitor.ChargeRecord]
-
-    var body: some View {
-        GeometryReader { geometry in
-            let width = geometry.size.width
-            let height = geometry.size.height
-
-            Path { path in
-                guard records.count > 1 else { return }
-
-                let timeRange = records.last!.timestamp.timeIntervalSince(records.first!.timestamp)
-                guard timeRange > 0 else { return }
-
-                for (index, record) in records.enumerated() {
-                    let x = CGFloat(record.timestamp.timeIntervalSince(records.first!.timestamp)) / CGFloat(timeRange) * width
-                    let y = height - CGFloat(record.charge) / 100.0 * height
-
-                    if index == 0 {
-                        path.move(to: CGPoint(x: x, y: y))
-                    } else {
-                        path.addLine(to: CGPoint(x: x, y: y))
-                    }
-                }
-            }
-            .stroke(Color.accentColor, lineWidth: 2)
-
-            ForEach([0, 25, 50, 75, 100], id: \.self) { level in
-                let y = height - CGFloat(level) / 100.0 * height
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: width, y: y))
-                }
-                .stroke(Color.secondary.opacity(0.2), lineWidth: 0.5)
-
-                Text("\(level)%")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .position(x: -15, y: y)
-            }
         }
     }
 }
@@ -301,19 +241,20 @@ struct SettingsView: View {
                 Toggle("Heat Protection 활성화", isOn: $settings.heatProtectionEnabled)
 
                 if settings.heatProtectionEnabled {
-                    HStack(spacing: 8) {
-                        Text("임계 온도")
-                            .fixedSize()
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("임계 온도")
+                            Spacer()
+                            Text(String(format: "%.0f°C", settings.heatProtectionThreshold))
+                                .font(.system(.body, design: .monospaced))
+                                .bold()
+                        }
                         Slider(
                             value: $settings.heatProtectionThreshold,
                             in: 20...50,
                             step: 1
                         )
-                        Text(String(format: "%.0f°C", settings.heatProtectionThreshold))
-                            .font(.system(.body, design: .monospaced))
-                            .frame(width: 45)
                     }
-                    .padding(.horizontal, 4)
                 }
             }
 
