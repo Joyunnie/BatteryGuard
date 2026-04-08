@@ -13,12 +13,24 @@
 		AA000010 /* BatteryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100010 /* BatteryMonitor.swift */; };
 		AA000011 /* ChargeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100011 /* ChargeController.swift */; };
 		AA000014 /* ChargeState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100014 /* ChargeState.swift */; };
+		AA000015 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100015 /* Protocols.swift */; };
 		AA000016 /* UserSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100016 /* UserSettings.swift */; };
 		AA000017 /* TopUpAndLED.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100017 /* TopUpAndLED.swift */; };
 		AA000018 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100018 /* MenuBarView.swift */; };
 		AA000019 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100019 /* DashboardView.swift */; };
 		AA000020 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100020 /* SettingsView.swift */; };
+		BB000001 /* BatteryGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* BatteryGuardTests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BB300001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA700001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA400001;
+			remoteInfo = BatteryGuard;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		AA100001 /* BatteryGuardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardApp.swift; sourceTree = "<group>"; };
@@ -31,15 +43,25 @@
 		AA100010 /* BatteryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryMonitor.swift; sourceTree = "<group>"; };
 		AA100011 /* ChargeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeController.swift; sourceTree = "<group>"; };
 		AA100014 /* ChargeState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeState.swift; sourceTree = "<group>"; };
+		AA100015 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
 		AA100016 /* UserSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserSettings.swift; sourceTree = "<group>"; };
 		AA100017 /* TopUpAndLED.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopUpAndLED.swift; sourceTree = "<group>"; };
 		AA100018 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		AA100019 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		AA100020 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		BB100001 /* BatteryGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardTests.swift; sourceTree = "<group>"; };
+		BB100002 /* BatteryGuardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BatteryGuardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		AA200001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB200001 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -53,6 +75,7 @@
 			isa = PBXGroup;
 			children = (
 				AA300002 /* BatteryGuard */,
+				BB300002 /* BatteryGuardTests */,
 				AA300005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -86,6 +109,7 @@
 				AA100010 /* BatteryMonitor.swift */,
 				AA100011 /* ChargeController.swift */,
 				AA100014 /* ChargeState.swift */,
+				AA100015 /* Protocols.swift */,
 				AA100016 /* UserSettings.swift */,
 				AA100017 /* TopUpAndLED.swift */,
 			);
@@ -96,6 +120,7 @@
 			isa = PBXGroup;
 			children = (
 				AA100006 /* BatteryGuard.app */,
+				BB100002 /* BatteryGuardTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -108,6 +133,14 @@
 				AA100020 /* SettingsView.swift */,
 			);
 			path = UI;
+			sourceTree = "<group>";
+		};
+		BB300002 /* BatteryGuardTests */ = {
+			isa = PBXGroup;
+			children = (
+				BB100001 /* BatteryGuardTests.swift */,
+			);
+			path = BatteryGuardTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -128,6 +161,23 @@
 			productName = BatteryGuard;
 			productReference = AA100006 /* BatteryGuard.app */;
 			productType = "com.apple.product-type.application";
+		};
+		BB400001 /* BatteryGuardTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB600001 /* Build configuration list for PBXNativeTarget "BatteryGuardTests" */;
+			buildPhases = (
+				BB500001 /* Sources */,
+				BB200001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BB400002 /* PBXTargetDependency */,
+			);
+			name = BatteryGuardTests;
+			productName = BatteryGuardTests;
+			productReference = BB100002 /* BatteryGuardTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -153,6 +203,7 @@
 			projectRoot = "";
 			targets = (
 				AA400001 /* BatteryGuard */,
+				BB400001 /* BatteryGuardTests */,
 			);
 		};
 /* End PBXProject section */
@@ -168,6 +219,7 @@
 				AA000010 /* BatteryMonitor.swift in Sources */,
 				AA000011 /* ChargeController.swift in Sources */,
 				AA000014 /* ChargeState.swift in Sources */,
+				AA000015 /* Protocols.swift in Sources */,
 				AA000016 /* UserSettings.swift in Sources */,
 				AA000017 /* TopUpAndLED.swift in Sources */,
 				AA000018 /* MenuBarView.swift in Sources */,
@@ -176,7 +228,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BB500001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB000001 /* BatteryGuardTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BB400002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA400001 /* BatteryGuard */;
+			targetProxy = BB300001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AA800001 /* Debug */ = {
@@ -340,6 +408,38 @@
 			};
 			name = Release;
 		};
+		BB800001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jiwon.batteryguard.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BatteryGuard.app/Contents/MacOS/BatteryGuard";
+			};
+			name = Debug;
+		};
+		BB800002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jiwon.batteryguard.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BatteryGuard.app/Contents/MacOS/BatteryGuard";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -357,6 +457,15 @@
 			buildConfigurations = (
 				AA800003 /* Debug */,
 				AA800004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB600001 /* Build configuration list for PBXNativeTarget "BatteryGuardTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB800001 /* Debug */,
+				BB800002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
