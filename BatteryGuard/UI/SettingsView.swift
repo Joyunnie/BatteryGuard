@@ -83,6 +83,13 @@ struct SettingsView: View {
 
     private var appearanceSettings: some View {
         Form {
+            Section("시작") {
+                Toggle("로그인 시 자동 시작", isOn: $settings.launchAtLogin)
+                Text("Mac 시작 시 BatteryGuard가 자동으로 실행됩니다")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+
             Section("MagSafe LED") {
                 Toggle("MagSafe LED 제어", isOn: $settings.controlMagSafeLED)
                 Text("""

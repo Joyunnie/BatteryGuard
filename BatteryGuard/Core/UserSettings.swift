@@ -2,9 +2,31 @@
 
 import Foundation
 import Combine
+import ServiceManagement
 
 class UserSettings: ObservableObject {
     static let shared = UserSettings()
+
+    /// SMAppService에서 직접 읽기 — UserDefaults에 저장하지 않음
+    @Published var launchAtLogin: Bool {
+        didSet {
+            guard launchAtLogin != oldValue else { return }
+            do {
+                if launchAtLogin {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                print("[UserSettings] Launch at login failed: \(error)")
+                // 실패 시 실제 상태로 롤백
+                let actual = SMAppService.mainApp.status == .enabled
+                if launchAtLogin != actual {
+                    launchAtLogin = actual
+                }
+            }
+        }
+    }
 
     @Published var chargeLimit: Int {
         didSet { UserDefaults.standard.set(chargeLimit, forKey: "chargeLimit") }
@@ -29,6 +51,7 @@ class UserSettings: ObservableObject {
             defaults.set(40.0, forKey: "heatThreshold")
         }
 
+        self.launchAtLogin = SMAppService.mainApp.status == .enabled
         self.chargeLimit = defaults.integer(forKey: "chargeLimit")
         self.heatProtectionEnabled = defaults.bool(forKey: "heatProtection")
         self.heatProtectionThreshold = defaults.double(forKey: "heatThreshold")
