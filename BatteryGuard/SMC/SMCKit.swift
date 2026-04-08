@@ -66,7 +66,7 @@ final class SMCKit {
     private var _runningLongProcess: Process?
     private let longProcessLock = NSLock()
 
-    var runningLongProcess: Process? {
+    private var runningLongProcess: Process? {
         longProcessLock.lock()
         defer { longProcessLock.unlock() }
         return _runningLongProcess
@@ -238,14 +238,14 @@ final class SMCKit {
 
     // MARK: - Battery CLI Subprocess
 
-    private var batteryEnv: [String: String] {
+    private lazy var batteryEnv: [String: String] = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return [
             "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/co.palokaj.battery",
             "HOME": home,
             "USER": NSUserName()
         ]
-    }
+    }()
 
     @discardableResult
     private func batteryCommand(_ args: [String], mode: RunMode = .captureOutput) throws -> String {

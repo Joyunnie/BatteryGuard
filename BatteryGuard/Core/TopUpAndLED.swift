@@ -6,7 +6,7 @@ import Foundation
 
 // MARK: - MagSafe LED Controller
 // ACLC SMC 키를 통해 MagSafe LED 상태를 제어.
-// #12: blink의 SMC 쓰기를 caller가 지정한 백그라운드 큐에서 실행 — 메인 스레드 블로킹 방지
+// blink의 SMC 쓰기를 caller가 지정한 백그라운드 큐에서 실행 — 메인 스레드 블로킹 방지
 
 final class MagSafeLEDController {
     private let smc: SMCKit

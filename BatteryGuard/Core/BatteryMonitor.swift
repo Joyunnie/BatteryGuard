@@ -111,7 +111,7 @@ final class BatteryMonitor: ObservableObject {
 
         let isCharging = readBool(dict, key: "IsCharging")
         let externalConnected = readBool(dict, key: "ExternalConnected")
-        // #8: ExternalConnected는 force discharge 시 CHIE에 의해 false로 보고됨.
+        // ExternalConnected는 force discharge 시 CHIE에 의해 false로 보고됨.
         // ExternalChargeCapable / AppleRawExternalConnected는 물리적 연결 상태를 반영.
         let externalChargeCapable = readBool(dict, key: "ExternalChargeCapable")
         let rawExternalConnected = readBool(dict, key: "AppleRawExternalConnected")
@@ -149,7 +149,7 @@ final class BatteryMonitor: ObservableObject {
             health = 100.0
         }
 
-        // #8: ExternalConnected 외에 ExternalChargeCapable / AppleRawExternalConnected로 보완
+        // ExternalConnected 외에 ExternalChargeCapable / AppleRawExternalConnected로 보완
         let pluggedIn = externalConnected || externalChargeCapable || rawExternalConnected || isCharging
 
         return BatteryInfo(

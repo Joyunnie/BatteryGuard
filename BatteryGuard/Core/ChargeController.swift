@@ -390,7 +390,9 @@ final class ChargeController: ObservableObject {
         }
         try smc.maintain(level: limit)
 
-        // Verify asynchronously — don't block the serial queue
+        // Verify asynchronously on a global queue — not on batteryQueue to avoid 2s block.
+        // Tradeoff: this can run concurrently with a batteryQueue task. battery CLI
+        // handles concurrent `battery status` reads safely (read-only command).
         let expectedLevel = limit
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { [weak self] in
             if !SMCKit.shared.verifyMaintain(expectedLevel: expectedLevel) {
