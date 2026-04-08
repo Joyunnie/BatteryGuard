@@ -13,13 +13,13 @@
 		AA000010 /* BatteryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100010 /* BatteryMonitor.swift */; };
 		AA000011 /* ChargeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100011 /* ChargeController.swift */; };
 		AA000014 /* ChargeState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100014 /* ChargeState.swift */; };
-
 		AA000016 /* UserSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100016 /* UserSettings.swift */; };
 		AA000017 /* TopUpAndLED.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100017 /* TopUpAndLED.swift */; };
 		AA000018 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100018 /* MenuBarView.swift */; };
 		AA000019 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100019 /* DashboardView.swift */; };
 		AA000020 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100020 /* SettingsView.swift */; };
 		BB000001 /* BatteryGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* BatteryGuardTests.swift */; };
+		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -34,8 +34,8 @@
 
 /* Begin PBXFileReference section */
 		AA100001 /* BatteryGuardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardApp.swift; sourceTree = "<group>"; };
+		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA100002 /* SMCKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMCKit.swift; sourceTree = "<group>"; };
-
 		AA100004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA100005 /* BatteryGuard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BatteryGuard.entitlements; sourceTree = "<group>"; };
 		AA100006 /* BatteryGuard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BatteryGuard.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -43,7 +43,6 @@
 		AA100010 /* BatteryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryMonitor.swift; sourceTree = "<group>"; };
 		AA100011 /* ChargeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeController.swift; sourceTree = "<group>"; };
 		AA100014 /* ChargeState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeState.swift; sourceTree = "<group>"; };
-
 		AA100016 /* UserSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserSettings.swift; sourceTree = "<group>"; };
 		AA100017 /* TopUpAndLED.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopUpAndLED.swift; sourceTree = "<group>"; };
 		AA100018 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
@@ -84,6 +83,7 @@
 			isa = PBXGroup;
 			children = (
 				AA100001 /* BatteryGuardApp.swift */,
+				CC100001 /* Assets.xcassets */,
 				AA100004 /* Info.plist */,
 				AA100005 /* BatteryGuard.entitlements */,
 				AA300003 /* SMC */,
@@ -108,7 +108,6 @@
 				AA100010 /* BatteryMonitor.swift */,
 				AA100011 /* ChargeController.swift */,
 				AA100014 /* ChargeState.swift */,
-
 				AA100016 /* UserSettings.swift */,
 				AA100017 /* TopUpAndLED.swift */,
 			);
@@ -144,6 +143,17 @@
 		};
 /* End PBXGroup section */
 
+/* Begin PBXResourcesBuildPhase section */
+		CC200001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXNativeTarget section */
 		AA400001 /* BatteryGuard */ = {
 			isa = PBXNativeTarget;
@@ -151,6 +161,7 @@
 			buildPhases = (
 				AA500001 /* Sources */,
 				AA200001 /* Frameworks */,
+				CC200001 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -218,7 +229,6 @@
 				AA000010 /* BatteryMonitor.swift in Sources */,
 				AA000011 /* ChargeController.swift in Sources */,
 				AA000014 /* ChargeState.swift in Sources */,
-
 				AA000016 /* UserSettings.swift in Sources */,
 				AA000017 /* TopUpAndLED.swift in Sources */,
 				AA000018 /* MenuBarView.swift in Sources */,
