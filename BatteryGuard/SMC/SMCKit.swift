@@ -177,17 +177,25 @@ final class SMCKit {
             throw BatteryError.commandFailed("smc", -1, "smc binary not available")
         }
 
-        let keys = ["TB0T", "TB1T", "TB2T"]
+        // Single subprocess reads all 3 sensor keys — 3x fewer fork/exec cycles
+        let script = "\(kSMCBinaryPath) -k TB0T -r 2>/dev/null; \(kSMCBinaryPath) -k TB1T -r 2>/dev/null; \(kSMCBinaryPath) -k TB2T -r 2>/dev/null"
+        let (code, stdout, _) = run("/bin/bash", args: ["-c", script])
+        guard code == 0 else {
+            throw BatteryError.commandFailed("smc temp read", code, stdout)
+        }
+
         var maxTemp: Float = -Float.greatestFiniteMagnitude
         var anySuccess = false
 
-        for key in keys {
-            do {
-                let temp = try smcReadFloat(key: key)
-                if temp > maxTemp { maxTemp = temp }
-                anySuccess = true
-            } catch {
-                continue
+        for line in stdout.components(separatedBy: "\n") where !line.isEmpty {
+            if let bracketEnd = line.range(of: "]"),
+               let bytesStart = line.range(of: "(bytes") {
+                let valueStr = line[bracketEnd.upperBound..<bytesStart.lowerBound]
+                    .trimmingCharacters(in: .whitespaces)
+                if let val = Float(valueStr) {
+                    if val > maxTemp { maxTemp = val }
+                    anySuccess = true
+                }
             }
         }
 

@@ -171,9 +171,10 @@ struct DashboardView: View {
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 120)
             } else {
+                let sampled = downsample(historyRecords, maxPoints: 200)
                 VStack(alignment: .leading, spacing: 4) {
                     Chart {
-                        ForEach(historyRecords, id: \.timestamp) { record in
+                        ForEach(sampled, id: \.timestamp) { record in
                             LineMark(
                                 x: .value("시간", record.timestamp),
                                 y: .value("%", record.chargePercent),
@@ -182,7 +183,7 @@ struct DashboardView: View {
                             .foregroundStyle(.blue)
                             .lineStyle(StrokeStyle(lineWidth: 2))
                         }
-                        ForEach(historyRecords, id: \.timestamp) { record in
+                        ForEach(sampled, id: \.timestamp) { record in
                             LineMark(
                                 x: .value("시간", record.timestamp),
                                 y: .value("%", record.chargeLimit),
@@ -235,6 +236,21 @@ struct DashboardView: View {
                 .padding(.top, 4)
             }
         }
+    }
+
+    private func downsample(_ records: [BatteryHistory.ChartRecord], maxPoints: Int) -> [BatteryHistory.ChartRecord] {
+        guard records.count > maxPoints else { return records }
+        let step = records.count / maxPoints
+        var result: [BatteryHistory.ChartRecord] = []
+        result.reserveCapacity(maxPoints + 1)
+        for i in stride(from: 0, to: records.count, by: step) {
+            result.append(records[i])
+        }
+        // Always include the last point for chart continuity
+        if let last = records.last, result.last?.timestamp != last.timestamp {
+            result.append(last)
+        }
+        return result
     }
 
     private func healthColor(_ percent: Double) -> Color {

@@ -30,6 +30,7 @@ final class ChargeController: ObservableObject {
     private var lastLEDState: MagSafeLEDState?
     private var isLEDBlinking = false
     private var chargeLimitDebounceWork: DispatchWorkItem?
+    private var hasVerifiedMaintain = false
 
     // MARK: - Init
 
@@ -390,15 +391,17 @@ final class ChargeController: ObservableObject {
         }
         try smc.maintain(level: limit)
 
-        // Verify asynchronously on a global queue — not on batteryQueue to avoid 2s block.
-        // Tradeoff: this can run concurrently with a batteryQueue task. battery CLI
-        // handles concurrent `battery status` reads safely (read-only command).
-        let expectedLevel = limit
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            if !SMCKit.shared.verifyMaintain(expectedLevel: expectedLevel) {
-                print("[ChargeController] WARNING: maintain \(expectedLevel) may not have applied correctly")
-                DispatchQueue.main.async {
-                    self?.lastError = "battery maintain \(expectedLevel) 적용 확인 실패"
+        // Only verify on first successful maintain — subsequent calls are trusted
+        // unless they throw. Avoids spawning battery status after every slider change.
+        if !hasVerifiedMaintain {
+            hasVerifiedMaintain = true
+            let expectedLevel = limit
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                if !SMCKit.shared.verifyMaintain(expectedLevel: expectedLevel) {
+                    print("[ChargeController] WARNING: maintain \(expectedLevel) may not have applied correctly")
+                    DispatchQueue.main.async {
+                        self?.lastError = "battery maintain \(expectedLevel) 적용 확인 실패"
+                    }
                 }
             }
         }
