@@ -8,9 +8,10 @@ class UserSettings: ObservableObject {
     static let shared = UserSettings()
 
     /// SMAppService에서 직접 읽기 — UserDefaults에 저장하지 않음
+    private var isUpdatingLaunchAtLogin = false
     @Published var launchAtLogin: Bool {
         didSet {
-            guard launchAtLogin != oldValue else { return }
+            guard !isUpdatingLaunchAtLogin, launchAtLogin != oldValue else { return }
             do {
                 if launchAtLogin {
                     try SMAppService.mainApp.register()
@@ -19,11 +20,9 @@ class UserSettings: ObservableObject {
                 }
             } catch {
                 print("[UserSettings] Launch at login failed: \(error)")
-                // 실패 시 실제 상태로 롤백
-                let actual = SMAppService.mainApp.status == .enabled
-                if launchAtLogin != actual {
-                    launchAtLogin = actual
-                }
+                isUpdatingLaunchAtLogin = true
+                launchAtLogin = SMAppService.mainApp.status == .enabled
+                isUpdatingLaunchAtLogin = false
             }
         }
     }
