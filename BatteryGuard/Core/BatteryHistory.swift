@@ -51,6 +51,13 @@ final class BatteryHistory {
         chargeLimitAttr.attributeType = .integer16AttributeType
 
         entity.properties = [timestampAttr, chargePercentAttr, chargeLimitAttr]
+
+        // Index on timestamp — all queries filter/sort by timestamp
+        let timestampIndex = NSFetchIndexDescription(name: "idx_timestamp", elements: [
+            NSFetchIndexElementDescription(property: timestampAttr, collationType: .binary)
+        ])
+        entity.indexes = [timestampIndex]
+
         model.entities = [entity]
 
         container = NSPersistentContainer(name: "BatteryGuardHistory", managedObjectModel: model)
