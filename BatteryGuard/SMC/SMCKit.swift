@@ -214,28 +214,6 @@ final class SMCKit {
 
     // MARK: - Raw SMC Helpers
 
-    private func smcReadFloat(key: String) throws -> Float {
-        let output = try smcRead(key: key)
-        if let bracketEnd = output.range(of: "]"),
-           let bytesStart = output.range(of: "(bytes") {
-            let valueStr = output[bracketEnd.upperBound..<bytesStart.lowerBound]
-                .trimmingCharacters(in: .whitespaces)
-            if let val = Float(valueStr) { return val }
-        }
-        if output.contains("no data") { return 0 }
-        throw BatteryError.commandFailed("smc -k \(key) -r", -1, output)
-    }
-
-    private func smcRead(key: String) throws -> String {
-        let (code, stdout, stderr) = run(kSMCBinaryPath, args: ["-k", key, "-r"])
-        let output = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if code != 0 || output.contains("Error:") {
-            throw BatteryError.commandFailed("smc -k \(key) -r", code,
-                (stderr.isEmpty ? output : stderr).trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-        return output
-    }
-
     private func smcWrite(key: String, hexValue: String) throws {
         let (code, stdout, stderr) = run("/usr/bin/sudo", args: [kSMCBinaryPath, "-k", key, "-w", hexValue])
         let output = (stdout + stderr).trimmingCharacters(in: .whitespacesAndNewlines)

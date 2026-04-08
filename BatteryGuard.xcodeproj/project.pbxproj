@@ -13,7 +13,7 @@
 		AA000010 /* BatteryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100010 /* BatteryMonitor.swift */; };
 		AA000011 /* ChargeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100011 /* ChargeController.swift */; };
 		AA000014 /* ChargeState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100014 /* ChargeState.swift */; };
-		AA000015 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100015 /* Protocols.swift */; };
+
 		AA000016 /* UserSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100016 /* UserSettings.swift */; };
 		AA000017 /* TopUpAndLED.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100017 /* TopUpAndLED.swift */; };
 		AA000018 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100018 /* MenuBarView.swift */; };
@@ -35,7 +35,7 @@
 /* Begin PBXFileReference section */
 		AA100001 /* BatteryGuardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardApp.swift; sourceTree = "<group>"; };
 		AA100002 /* SMCKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMCKit.swift; sourceTree = "<group>"; };
-		AA100003 /* SMCTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMCTest.swift; sourceTree = "<group>"; };
+
 		AA100004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA100005 /* BatteryGuard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BatteryGuard.entitlements; sourceTree = "<group>"; };
 		AA100006 /* BatteryGuard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BatteryGuard.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -43,7 +43,7 @@
 		AA100010 /* BatteryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryMonitor.swift; sourceTree = "<group>"; };
 		AA100011 /* ChargeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeController.swift; sourceTree = "<group>"; };
 		AA100014 /* ChargeState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeState.swift; sourceTree = "<group>"; };
-		AA100015 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
+
 		AA100016 /* UserSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserSettings.swift; sourceTree = "<group>"; };
 		AA100017 /* TopUpAndLED.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopUpAndLED.swift; sourceTree = "<group>"; };
 		AA100018 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
@@ -97,7 +97,6 @@
 			isa = PBXGroup;
 			children = (
 				AA100002 /* SMCKit.swift */,
-				AA100003 /* SMCTest.swift */,
 			);
 			path = SMC;
 			sourceTree = "<group>";
@@ -109,7 +108,7 @@
 				AA100010 /* BatteryMonitor.swift */,
 				AA100011 /* ChargeController.swift */,
 				AA100014 /* ChargeState.swift */,
-				AA100015 /* Protocols.swift */,
+
 				AA100016 /* UserSettings.swift */,
 				AA100017 /* TopUpAndLED.swift */,
 			);
@@ -219,7 +218,7 @@
 				AA000010 /* BatteryMonitor.swift in Sources */,
 				AA000011 /* ChargeController.swift in Sources */,
 				AA000014 /* ChargeState.swift in Sources */,
-				AA000015 /* Protocols.swift in Sources */,
+
 				AA000016 /* UserSettings.swift in Sources */,
 				AA000017 /* TopUpAndLED.swift in Sources */,
 				AA000018 /* MenuBarView.swift in Sources */,

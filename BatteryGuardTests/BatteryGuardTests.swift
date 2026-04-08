@@ -317,71 +317,7 @@ final class BatteryHistoryTests: XCTestCase {
     }
 }
 
-// MARK: - Mock for ChargeController Tests
-
-final class MockBatteryCLI: BatteryCLIProtocol {
-    var maintainCallCount = 0
-    var lastMaintainLevel: Int?
-    var maintainShouldThrow = false
-    var chargingOffCalled = false
-    var chargingOnCalled = false
-    var dischargeCalled = false
-    var dischargeLevel: Int?
-    var chargeCalled = false
-    var chargeLevel: Int?
-    var terminateCalled = false
-    var statusOutput = "Battery at 80%, maintaining at 80"
-    var verifyResult = true
-
-    func open() throws {}
-
-    @discardableResult
-    func maintain(level: Int) throws -> String {
-        if maintainShouldThrow {
-            throw BatteryError.commandFailed("battery maintain \(level)", 1, "failed")
-        }
-        maintainCallCount += 1
-        lastMaintainLevel = level
-        return "maintaining at \(level)"
-    }
-
-    @discardableResult
-    func maintainStop() throws -> String { return "stopped" }
-
-    @discardableResult
-    func chargingOff() throws -> String { chargingOffCalled = true; return "off" }
-
-    @discardableResult
-    func chargingOn() throws -> String { chargingOnCalled = true; return "on" }
-
-    @discardableResult
-    func discharge(to level: Int) throws -> String { dischargeCalled = true; dischargeLevel = level; return "" }
-
-    @discardableResult
-    func charge(to level: Int) throws -> String { chargeCalled = true; chargeLevel = level; return "" }
-
-    func status() throws -> String { return statusOutput }
-    func verifyMaintain(expectedLevel: Int) -> Bool { return verifyResult }
-    func terminateLongProcess() { terminateCalled = true }
-    func setMagSafeLED(_ state: MagSafeLEDState) throws {}
-    func readBatteryTemperature() throws -> Float { return 35.0 }
-}
-
-final class MockBatteryMonitor: BatteryMonitorProtocol {
-    var batteryInfo: BatteryInfo?
-    var preventSleepCalled = false
-    var allowSleepCalled = false
-
-    func startMonitoring(interval: TimeInterval) {}
-    func stopMonitoring() {}
-    func preventSleep(reason: String) -> Bool { preventSleepCalled = true; return true }
-    func allowSleep() { allowSleepCalled = true }
-}
-
 // MARK: - ChargeController Logic Tests
-// These test the state machine logic using the actual ChargeController
-// with real singletons. For true unit tests, ChargeController would need
-// constructor injection (future refactor).
 
 final class ChargeControllerStateTests: XCTestCase {
 
