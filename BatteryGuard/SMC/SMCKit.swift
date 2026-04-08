@@ -89,8 +89,6 @@ final class SMCKit {
         }
     }
 
-    func close() throws {}
-
     // MARK: - Battery CLI: Charge Maintenance
 
     /// battery maintain XX — 래퍼가 nohup 데몬을 spawn하고 즉시 종료
@@ -156,13 +154,12 @@ final class SMCKit {
     }
 
     /// battery status를 파싱하여 현재 maintain 레벨 확인.
-    /// 예상 레벨과 다르면 에러 로그 출력 후 false 반환.
     func verifyMaintain(expectedLevel: Int) -> Bool {
         do {
             let output = try status()
-            // battery status 출력에서 "maintain" 또는 설정 레벨 확인
-            // 예: "Battery at 80%, maintaining at 80"
-            if output.lowercased().contains("maintain") && output.contains("\(expectedLevel)") {
+            // "maintaining at XX" 또는 "maintain: XX" 패턴 매칭
+            let pattern = "maintain\\D+\(expectedLevel)\\b"
+            if let _ = output.range(of: pattern, options: .regularExpression, range: output.startIndex..<output.endIndex) {
                 return true
             }
             print("[SMCKit] Maintain verification MISMATCH — expected \(expectedLevel), status: \(output.prefix(200))")

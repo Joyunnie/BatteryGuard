@@ -85,7 +85,6 @@ struct MenuBarLabel: View {
             return "battery.75percent"
         case .discharging:
             return "arrow.down.circle.fill"
-
         case .notConnected:
             return "battery.25percent"
         }

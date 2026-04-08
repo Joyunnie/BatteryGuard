@@ -192,13 +192,8 @@ final class BatteryMonitor: ObservableObject {
     }
 
     private func recordHistory() {
-        guard let info = batteryInfo else {
-            print("[BatteryMonitor] recordHistory skipped — batteryInfo is nil")
-            return
-        }
-        let limit = UserSettings.shared.chargeLimit
-        print("[BatteryMonitor] recordHistory: charge=\(info.currentCharge)% limit=\(limit)%")
-        BatteryHistory.shared.record(chargePercent: info.currentCharge, chargeLimit: limit)
+        guard let info = batteryInfo else { return }
+        BatteryHistory.shared.record(chargePercent: info.currentCharge, chargeLimit: UserSettings.shared.chargeLimit)
     }
 
     func stopMonitoring() {

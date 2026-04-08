@@ -12,8 +12,8 @@
 		AA000009 /* BatteryHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100009 /* BatteryHistory.swift */; };
 		AA000010 /* BatteryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100010 /* BatteryMonitor.swift */; };
 		AA000011 /* ChargeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100011 /* ChargeController.swift */; };
-
-
+		AA000014 /* ChargeState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100014 /* ChargeState.swift */; };
+		AA000016 /* UserSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100016 /* UserSettings.swift */; };
 		AA000017 /* TopUpAndLED.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100017 /* TopUpAndLED.swift */; };
 		AA000018 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100018 /* MenuBarView.swift */; };
 		AA000019 /* DashboardAndSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100019 /* DashboardAndSettings.swift */; };
@@ -29,8 +29,8 @@
 		AA100009 /* BatteryHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryHistory.swift; sourceTree = "<group>"; };
 		AA100010 /* BatteryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryMonitor.swift; sourceTree = "<group>"; };
 		AA100011 /* ChargeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeController.swift; sourceTree = "<group>"; };
-
-
+		AA100014 /* ChargeState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeState.swift; sourceTree = "<group>"; };
+		AA100016 /* UserSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserSettings.swift; sourceTree = "<group>"; };
 		AA100017 /* TopUpAndLED.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopUpAndLED.swift; sourceTree = "<group>"; };
 		AA100018 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		AA100019 /* DashboardAndSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardAndSettings.swift; sourceTree = "<group>"; };
@@ -63,7 +63,6 @@
 				AA100005 /* BatteryGuard.entitlements */,
 				AA300003 /* SMC */,
 				AA300004 /* Core */,
-				AA300006 /* Features */,
 				AA300007 /* UI */,
 			);
 			path = BatteryGuard;
@@ -84,6 +83,9 @@
 				AA100009 /* BatteryHistory.swift */,
 				AA100010 /* BatteryMonitor.swift */,
 				AA100011 /* ChargeController.swift */,
+				AA100014 /* ChargeState.swift */,
+				AA100016 /* UserSettings.swift */,
+				AA100017 /* TopUpAndLED.swift */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -94,16 +96,6 @@
 				AA100006 /* BatteryGuard.app */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		AA300006 /* Features */ = {
-			isa = PBXGroup;
-			children = (
-
-
-				AA100017 /* TopUpAndLED.swift */,
-			);
-			path = Features;
 			sourceTree = "<group>";
 		};
 		AA300007 /* UI */ = {
@@ -172,8 +164,8 @@
 				AA000009 /* BatteryHistory.swift in Sources */,
 				AA000010 /* BatteryMonitor.swift in Sources */,
 				AA000011 /* ChargeController.swift in Sources */,
-
-
+				AA000014 /* ChargeState.swift in Sources */,
+				AA000016 /* UserSettings.swift in Sources */,
 				AA000017 /* TopUpAndLED.swift in Sources */,
 				AA000018 /* MenuBarView.swift in Sources */,
 				AA000019 /* DashboardAndSettings.swift in Sources */,
