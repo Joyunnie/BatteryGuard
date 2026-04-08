@@ -174,13 +174,6 @@ struct DashboardView: View {
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 120)
             } else {
-                let allValues = historyRecords.flatMap { [$0.chargePercent, $0.chargeLimit] }
-                let dataMin = allValues.min() ?? 0
-                let dataMax = allValues.max() ?? 100
-                let range = max(dataMax - dataMin, 20)
-                let yMin = max(0, dataMin - 5)
-                let yMax = min(100, yMin + range + 10)
-
                 VStack(alignment: .leading, spacing: 4) {
                     Chart {
                         ForEach(historyRecords, id: \.timestamp) { record in
@@ -202,9 +195,9 @@ struct DashboardView: View {
                             .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
                         }
                     }
-                    .chartYScale(domain: yMin...yMax)
+                    .chartYScale(domain: 0...100)
                     .chartYAxis {
-                        AxisMarks(position: .leading) { value in
+                        AxisMarks(values: [0, 25, 50, 75, 100]) { value in
                             AxisGridLine()
                             AxisValueLabel {
                                 if let v = value.as(Int.self) {
@@ -380,6 +373,9 @@ struct SettingsView: View {
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
             }
+
+            Divider()
+                .padding(.vertical, 8)
 
             Section("정보") {
                 HStack {

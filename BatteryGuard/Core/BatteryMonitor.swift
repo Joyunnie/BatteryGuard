@@ -77,7 +77,8 @@ final class BatteryMonitor: ObservableObject {
             return nil
         }
 
-        // 초회 기동 시 전체 딕셔너리 덤프
+        // 초회 기동 시 전체 딕셔너리 덤프 (Debug 전용)
+        #if DEBUG
         if !hasLoggedDictOnce {
             hasLoggedDictOnce = true
             print("[BatteryMonitor] ── AppleSmartBattery dictionary dump ──")
@@ -99,6 +100,7 @@ final class BatteryMonitor: ObservableObject {
             }
             print("[BatteryMonitor] ── end dump ──")
         }
+        #endif
 
         // CurrentCapacity: macOS 표시 % (0-100)
         let currentCharge = dict["CurrentCapacity"] as? Int ?? 0

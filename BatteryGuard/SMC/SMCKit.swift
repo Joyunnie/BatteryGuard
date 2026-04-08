@@ -155,6 +155,24 @@ final class SMCKit {
         return try batteryCommand(["status"])
     }
 
+    /// battery status를 파싱하여 현재 maintain 레벨 확인.
+    /// 예상 레벨과 다르면 에러 로그 출력 후 false 반환.
+    func verifyMaintain(expectedLevel: Int) -> Bool {
+        do {
+            let output = try status()
+            // battery status 출력에서 "maintain" 또는 설정 레벨 확인
+            // 예: "Battery at 80%, maintaining at 80"
+            if output.lowercased().contains("maintain") && output.contains("\(expectedLevel)") {
+                return true
+            }
+            print("[SMCKit] Maintain verification MISMATCH — expected \(expectedLevel), status: \(output.prefix(200))")
+            return false
+        } catch {
+            print("[SMCKit] Maintain verification FAILED — \(error)")
+            return false
+        }
+    }
+
     // MARK: - Battery Temperature (raw SMC read)
 
     func readBatteryTemperature() throws -> Float {

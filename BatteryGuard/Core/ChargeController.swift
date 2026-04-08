@@ -491,6 +491,15 @@ final class ChargeController: ObservableObject {
             return
         }
         try smc.maintain(level: limit)
+
+        // maintain 데몬 spawn 후 2초 대기, battery status로 검증
+        Thread.sleep(forTimeInterval: 2.0)
+        if !smc.verifyMaintain(expectedLevel: limit) {
+            print("[ChargeController] WARNING: maintain \(limit) may not have applied correctly")
+            DispatchQueue.main.async {
+                self.lastError = "battery maintain \(limit) 적용 확인 실패"
+            }
+        }
     }
 
     // MARK: - 정리
