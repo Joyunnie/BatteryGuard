@@ -62,18 +62,25 @@ struct MenuBarView: View {
                 Text("Charge Limit")
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
-                Text("\(settings.chargeLimit)%")
+                Text("\(controller.displayedChargeLimit)%")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundColor(.accentColor)
             }
 
             Slider(
                 value: Binding(
-                    get: { Double(settings.chargeLimit) },
+                    get: { Double(controller.displayedChargeLimit) },
                     set: { controller.setChargeLimit(Int($0)) }
                 ),
                 in: 20...100,
                 step: 5
+            )
+            .disabled(
+                !controller.isReady ||
+                controller.isCommandPending ||
+                controller.isDischarging ||
+                controller.isTopUpActive ||
+                controller.isHeatProtectionBlockingControls
             )
         }
     }
@@ -85,6 +92,11 @@ struct MenuBarView: View {
                 title: "Top Up",
                 icon: "arrow.up.to.line",
                 isActive: controller.isTopUpActive,
+                isDisabled: !controller.isReady ||
+                    controller.isCommandPending ||
+                    controller.isChargeLimitPending ||
+                    controller.isHeatProtectionBlockingControls ||
+                    controller.isDischarging,
                 action: {
                     if controller.isTopUpActive {
                         controller.cancelTopUp()
@@ -98,6 +110,11 @@ struct MenuBarView: View {
                 title: "Discharge",
                 icon: "arrow.down.to.line",
                 isActive: controller.isDischarging,
+                isDisabled: !controller.isReady ||
+                    controller.isCommandPending ||
+                    controller.isChargeLimitPending ||
+                    controller.isHeatProtectionBlockingControls ||
+                    controller.isTopUpActive,
                 action: {
                     if controller.isDischarging {
                         controller.stopDischarge()
@@ -113,10 +130,10 @@ struct MenuBarView: View {
     private var statusInfo: some View {
         VStack(spacing: 4) {
             if let info = monitor.batteryInfo {
-                StatusRow(label: "온도", value: String(format: "%.1f°C", info.temperature))
-                StatusRow(label: "건강도", value: String(format: "%.1f%%", info.healthPercent))
+                StatusRow(label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "N/A")
+                StatusRow(label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "N/A")
                 StatusRow(label: "사이클", value: "\(info.cycleCount)")
-                StatusRow(label: "전류", value: "\(info.amperage)mA")
+                StatusRow(label: "전류", value: info.amperage.map { "\($0)mA" } ?? "N/A")
 
                 if controller.heatProtectionTriggered {
                     HStack {

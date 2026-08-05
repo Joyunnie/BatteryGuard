@@ -26,13 +26,20 @@ struct SettingsView: View {
                 HStack {
                     Slider(
                         value: Binding(
-                            get: { Double(settings.chargeLimit) },
+                            get: { Double(controller.displayedChargeLimit) },
                             set: { controller.setChargeLimit(Int($0)) }
                         ),
                         in: 20...100,
                         step: 5
                     )
-                    Text("\(settings.chargeLimit)%")
+                    .disabled(
+                        !controller.isReady ||
+                        controller.isCommandPending ||
+                        controller.isDischarging ||
+                        controller.isTopUpActive ||
+                        controller.isHeatProtectionBlockingControls
+                    )
+                    Text("\(controller.displayedChargeLimit)%")
                         .font(.system(.body, design: .monospaced))
                         .frame(width: 45)
                 }
@@ -61,7 +68,10 @@ struct SettingsView: View {
                                 .bold()
                         }
                         Slider(
-                            value: $settings.heatProtectionThreshold,
+                            value: Binding(
+                                get: { settings.heatProtectionThreshold },
+                                set: { settings.heatProtectionThreshold = $0 }
+                            ),
                             in: 20...50,
                             step: 1
                         )

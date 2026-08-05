@@ -48,13 +48,13 @@ struct DashboardView: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         DetailRow(icon: "bolt.fill", label: "상태", value: controller.currentState.rawValue)
-                        DetailRow(icon: "thermometer", label: "온도", value: String(format: "%.1f°C", info.temperature))
-                        DetailRow(icon: "waveform.path", label: "전류", value: "\(info.amperage) mA")
+                        DetailRow(icon: "thermometer", label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "N/A")
+                        DetailRow(icon: "waveform.path", label: "전류", value: info.amperage.map { "\($0) mA" } ?? "N/A")
                         DetailRow(icon: "bolt.batteryblock", label: "전압", value: "\(info.voltage) mV")
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        DetailRow(icon: "heart.fill", label: "건강도", value: String(format: "%.1f%%", info.healthPercent))
+                        DetailRow(icon: "heart.fill", label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "N/A")
                         DetailRow(icon: "arrow.2.circlepath", label: "사이클", value: "\(info.cycleCount)")
                         DetailRow(icon: "cube.box", label: "용량", value: "\(info.maxCapacity)/\(info.designCapacity) mAh")
                         DetailRow(icon: "number", label: "시리얼", value: info.serialNumber)
@@ -76,17 +76,24 @@ struct DashboardView: View {
                     HStack {
                         Text("Charge Limit")
                         Spacer()
-                        Text("\(settings.chargeLimit)%")
+                        Text("\(controller.displayedChargeLimit)%")
                             .font(.system(.body, design: .monospaced))
                             .bold()
                     }
                     Slider(
                         value: Binding(
-                            get: { Double(settings.chargeLimit) },
+                            get: { Double(controller.displayedChargeLimit) },
                             set: { controller.setChargeLimit(Int($0)) }
                         ),
                         in: 20...100,
                         step: 5
+                    )
+                    .disabled(
+                        !controller.isReady ||
+                        controller.isCommandPending ||
+                        controller.isDischarging ||
+                        controller.isTopUpActive ||
+                        controller.isHeatProtectionBlockingControls
                     )
                 }
 
@@ -107,6 +114,13 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
+                    .disabled(
+                        !controller.isReady ||
+                        controller.isCommandPending ||
+                        controller.isChargeLimitPending ||
+                        controller.isHeatProtectionBlockingControls ||
+                        controller.isDischarging
+                    )
 
                     Button(action: {
                         if controller.isDischarging {
@@ -122,6 +136,13 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
+                    .disabled(
+                        !controller.isReady ||
+                        controller.isCommandPending ||
+                        controller.isChargeLimitPending ||
+                        controller.isHeatProtectionBlockingControls ||
+                        controller.isTopUpActive
+                    )
                 }
             }
             .padding()
@@ -133,22 +154,28 @@ struct DashboardView: View {
         GroupBox("배터리 건강") {
             VStack(spacing: 12) {
                 if let info = monitor.batteryInfo {
-                    ZStack {
-                        Circle()
-                            .stroke(Color.secondary.opacity(0.2), lineWidth: 8)
-                        Circle()
-                            .trim(from: 0, to: CGFloat(info.healthPercent / 100.0))
-                            .stroke(healthColor(info.healthPercent), style: StrokeStyle(lineWidth: 8, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
-                        VStack {
-                            Text(String(format: "%.1f", info.healthPercent))
-                                .font(.system(size: 24, weight: .bold, design: .rounded))
-                            Text("%")
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary)
+                    if let healthPercent = info.healthPercent {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.secondary.opacity(0.2), lineWidth: 8)
+                            Circle()
+                                .trim(from: 0, to: CGFloat(healthPercent / 100.0))
+                                .stroke(healthColor(healthPercent), style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                            VStack {
+                                Text(String(format: "%.1f", healthPercent))
+                                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                                Text("%")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                            }
                         }
+                        .frame(width: 100, height: 100)
+                    } else {
+                        Text("건강도 N/A")
+                            .foregroundColor(.secondary)
+                            .frame(width: 100, height: 100)
                     }
-                    .frame(width: 100, height: 100)
 
                     Text("사이클 카운트: \(info.cycleCount)")
                         .font(.system(size: 12))
