@@ -38,26 +38,43 @@ struct BatteryGuardApp: App {
 
 // MARK: - AppDelegate
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var initializationTask: Task<Void, Never>?
+
+    private var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
+        NSClassFromString("XCTestCase") != nil
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        do {
-            try ChargeController.shared.initialize()
-        } catch {
-            let alert = NSAlert()
-            alert.messageText = "초기화 실패"
-            alert.informativeText = """
-            \(error.localizedDescription)
+        // The unit-test bundle is app-hosted. Never let launching the test host
+        // initialize real battery control, history, login items, or SMC writes.
+        guard !isRunningTests else { return }
 
-            battery CLI가 설치되어 있는지 확인하세요:
-            curl -s https://raw.githubusercontent.com/actuallymentor/battery/main/setup.sh | bash
-            """
-            alert.alertStyle = .critical
-            alert.runModal()
+        initializationTask = Task { @MainActor in
+            do {
+                try await ChargeController.shared.initialize()
+            } catch {
+                guard !Task.isCancelled else { return }
+                let alert = NSAlert()
+                alert.messageText = "초기화 실패"
+                alert.informativeText = """
+                \(error.localizedDescription)
+
+                battery CLI를 신뢰할 수 있는 소스에서 수동으로 설치하고
+                /usr/local/co.palokaj.battery/battery 경로와 권한을 확인하세요.
+                """
+                alert.alertStyle = .critical
+                alert.runModal()
+            }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        guard !isRunningTests else { return }
+        initializationTask?.cancel()
+        initializationTask = nil
         ChargeController.shared.shutdown()
     }
 }

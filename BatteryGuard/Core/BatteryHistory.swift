@@ -22,6 +22,7 @@ final class BatteryHistory {
     static let shared = BatteryHistory()
 
     private let container: NSPersistentContainer
+    private let inMemory: Bool
 
     /// 차트용 구조체 — Core Data 컨텍스트 밖에서 안전하게 사용
     struct ChartRecord {
@@ -30,7 +31,8 @@ final class BatteryHistory {
         let chargeLimit: Int
     }
 
-    private init() {
+    init(inMemory: Bool = false) {
+        self.inMemory = inMemory
         // 프로그래매틱 모델 정의
         let model = NSManagedObjectModel()
 
@@ -62,13 +64,18 @@ final class BatteryHistory {
 
         container = NSPersistentContainer(name: "BatteryGuardHistory", managedObjectModel: model)
 
-        // Application Support에 저장
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let storeDir = appSupport.appendingPathComponent("BatteryGuard", isDirectory: true)
-        try? FileManager.default.createDirectory(at: storeDir, withIntermediateDirectories: true)
-        let storeURL = storeDir.appendingPathComponent("BatteryHistory.sqlite")
-
-        let desc = NSPersistentStoreDescription(url: storeURL)
+        let desc: NSPersistentStoreDescription
+        if inMemory {
+            desc = NSPersistentStoreDescription()
+            desc.type = NSInMemoryStoreType
+        } else {
+            // Application Support에 저장
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let storeDir = appSupport.appendingPathComponent("BatteryGuard", isDirectory: true)
+            try? FileManager.default.createDirectory(at: storeDir, withIntermediateDirectories: true)
+            let storeURL = storeDir.appendingPathComponent("BatteryHistory.sqlite")
+            desc = NSPersistentStoreDescription(url: storeURL)
+        }
         desc.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
         desc.setOption(true as NSNumber, forKey: NSInferMappingModelAutomaticallyOption)
         container.persistentStoreDescriptions = [desc]
@@ -112,16 +119,25 @@ final class BatteryHistory {
 
             if needsCleanup {
                 let cutoff = Date().addingTimeInterval(-86400)
-                let deleteReq = NSFetchRequest<NSFetchRequestResult>(entityName: "BatteryRecord")
-                deleteReq.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
-                let batchDelete = NSBatchDeleteRequest(fetchRequest: deleteReq)
-                batchDelete.resultType = .resultTypeObjectIDs
-                if let result = try? ctx.execute(batchDelete) as? NSBatchDeleteResult,
-                   let ids = result.result as? [NSManagedObjectID], !ids.isEmpty {
-                    NSManagedObjectContext.mergeChanges(
-                        fromRemoteContextSave: [NSDeletedObjectsKey: ids],
-                        into: [self.container.viewContext]
-                    )
+                if self.inMemory {
+                    // NSInMemoryStoreType does not support NSBatchDeleteRequest.
+                    let fetch = NSFetchRequest<BatteryRecord>(entityName: "BatteryRecord")
+                    fetch.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
+                    if let expired = try? ctx.fetch(fetch) {
+                        expired.forEach(ctx.delete)
+                    }
+                } else {
+                    let deleteReq = NSFetchRequest<NSFetchRequestResult>(entityName: "BatteryRecord")
+                    deleteReq.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
+                    let batchDelete = NSBatchDeleteRequest(fetchRequest: deleteReq)
+                    batchDelete.resultType = .resultTypeObjectIDs
+                    if let result = try? ctx.execute(batchDelete) as? NSBatchDeleteResult,
+                       let ids = result.result as? [NSManagedObjectID], !ids.isEmpty {
+                        NSManagedObjectContext.mergeChanges(
+                            fromRemoteContextSave: [NSDeletedObjectsKey: ids],
+                            into: [self.container.viewContext]
+                        )
+                    }
                 }
             }
 

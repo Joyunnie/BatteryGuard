@@ -18,6 +18,7 @@
 		AA000018 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100018 /* MenuBarView.swift */; };
 		AA000019 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100019 /* DashboardView.swift */; };
 		AA000020 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100020 /* SettingsView.swift */; };
+		AA000021 /* BatteryCommandRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100021 /* BatteryCommandRunner.swift */; };
 		BB000001 /* BatteryGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* BatteryGuardTests.swift */; };
 		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -47,6 +48,7 @@
 		AA100018 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		AA100019 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		AA100020 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		AA100021 /* BatteryCommandRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryCommandRunner.swift; sourceTree = "<group>"; };
 		BB100001 /* BatteryGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardTests.swift; sourceTree = "<group>"; };
 		BB100002 /* BatteryGuardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BatteryGuardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -96,6 +98,7 @@
 		AA300003 /* SMC */ = {
 			isa = PBXGroup;
 			children = (
+				AA100021 /* BatteryCommandRunner.swift */,
 				AA100002 /* SMCKit.swift */,
 			);
 			path = SMC;
@@ -224,6 +227,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA000001 /* BatteryGuardApp.swift in Sources */,
+				AA000021 /* BatteryCommandRunner.swift in Sources */,
 				AA000002 /* SMCKit.swift in Sources */,
 				AA000009 /* BatteryHistory.swift in Sources */,
 				AA000010 /* BatteryMonitor.swift in Sources */,
