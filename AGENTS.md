@@ -35,6 +35,8 @@ IOKit readings ---+                    result + verified CLI status
 - Apply monotonic timeouts, bounded output capture, cancellation, and process-group cleanup; never use broad `pkill -f` matching.
 - Treat cleanup failure as a terminal runner failure and reject later commands instead of continuing in an unknown state.
 - Verify control-changing commands with a subsequent status read before updating UI state.
+- Treat maintain as valid only when exactly one matching worker exists and the PID file points to it; stale or duplicate workers are failures.
+- Stop exact maintain worker PIDs before Top Up, Discharge, or charging-off transitions. Never signal an unrelated process group.
 - Coalesce rapid slider changes and block conflicting or duplicate operations.
 - Validate persisted limits and thresholds at every boundary.
 - Before using the privileged CLI, validate executable path, symlink target, owner/mode, version, and required capabilities.
@@ -50,9 +52,11 @@ IOKit readings ---+                    result + verified CLI status
 - Reconcile actual CLI and battery state on launch, wake, and after command completion; tolerate changes made from Terminal.
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.
+- Quit during Top Up or Discharge must cancel the long operation, restore the recorded maintain limit, and verify level, worker liveness, and non-discharge state before exit.
 - Do not expose a stop/disable command unless its result can be verified through an observable CLI state.
 - If temperature sensing is unavailable while heat protection is enabled, surface the degraded protection clearly and avoid unsafe automatic charging decisions.
 - When LED control is disabled or external power is removed, restore automatic LED behavior.
+- Route every LED intent through one generation-ordered actor/worker; stale writes and blink tasks must not outlive newer intent.
 
 ## Testing
 
@@ -71,6 +75,7 @@ Safe default checks:
 xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration Debug build-for-testing
 xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration Release build
 xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration Debug analyze
+xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration Debug build-for-testing SWIFT_STRICT_CONCURRENCY=complete SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
 ```
 
 - Do not run the full existing test suite until real hardware/login-item/store side effects have been isolated.
@@ -78,11 +83,11 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 
 ## Implementation Order
 
-1. Patch immediate safety issues, conflicting controls, and unsafe default-test side effects.
-2. Centralize process execution, process-group ownership, atomic command verification, and initialization readiness gating.
-3. Introduce the single reconciled charge state model.
-4. Rebuild lifecycle, Heat Protection, Top Up, and Discharge on that model.
-5. Add CLI preflight and native Charge Limit conflict handling.
+1. Patch immediate safety issues, conflicting controls, unsafe default-test side effects, and quit recovery.
+2. Centralize process execution, descendant policy, bounded lifecycle, and atomic status/worker verification.
+3. Run privileged CLI preflight before any hardware command.
+4. Complete async initialization/readiness, then introduce the single reconciled charge state model.
+5. Rebuild lifecycle, Heat Protection, Top Up, Discharge, and LED ownership on that model.
 6. Fix monitoring/history accuracy, diagnostics, and remaining UI truthfulness.
 7. Complete automated coverage and run controlled, opt-in hardware validation.
 

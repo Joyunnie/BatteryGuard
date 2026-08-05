@@ -18,6 +18,7 @@ final class BatteryRecord: NSManagedObject {
 
 // MARK: - BatteryHistory
 
+@MainActor
 final class BatteryHistory {
     static let shared = BatteryHistory()
 

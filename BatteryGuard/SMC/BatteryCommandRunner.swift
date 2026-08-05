@@ -82,6 +82,13 @@ actor BatteryCommandRunner {
         case discard
     }
 
+    enum DescendantPolicy: Sendable, Equatable {
+        /// The command is complete only after its entire process group exits.
+        case requireProcessGroupExit
+        /// The launcher may intentionally leave a persistent worker behind.
+        case allowPersistentProcessGroup
+    }
+
     struct Command: Sendable {
         let executable: String
         let arguments: [String]
@@ -89,6 +96,7 @@ actor BatteryCommandRunner {
         let label: String
         let timeout: TimeInterval
         let outputPolicy: OutputPolicy
+        let descendantPolicy: DescendantPolicy
 
         init(
             executable: String,
@@ -96,7 +104,8 @@ actor BatteryCommandRunner {
             environment: [String: String]? = nil,
             label: String,
             timeout: TimeInterval = 30,
-            outputPolicy: OutputPolicy = .capture
+            outputPolicy: OutputPolicy = .capture,
+            descendantPolicy: DescendantPolicy = .requireProcessGroupExit
         ) {
             self.executable = executable
             self.arguments = arguments
@@ -104,6 +113,7 @@ actor BatteryCommandRunner {
             self.label = label
             self.timeout = timeout
             self.outputPolicy = outputPolicy
+            self.descendantPolicy = descendantPolicy
         }
     }
 
@@ -127,9 +137,11 @@ actor BatteryCommandRunner {
         let id: UUID
         let command: Command
         let pid: pid_t
-        let stdoutTask: Task<Data, Never>?
-        let stderrTask: Task<Data, Never>?
+        let stdoutBuffer: BoundedOutputBuffer?
         let stderrBuffer: BoundedOutputBuffer?
+        let stdoutReadHandle: FileHandle?
+        let stderrReadHandle: FileHandle?
+        let stdoutDrainTask: Task<Void, Never>?
         let stderrDrainTask: Task<Void, Never>?
     }
 
@@ -301,9 +313,9 @@ actor BatteryCommandRunner {
     }
 
     private func execute(_ command: Command, id: UUID) async throws -> BatteryCommandResult {
+        let deadline = monotonicDeadline(after: command.timeout)
         let child = try spawn(command, id: id)
         activeCommand = ActiveCommand(child: child, requestedTermination: nil)
-        let deadline = monotonicDeadline(after: command.timeout)
         var waitStatus: Int32?
 
         do {
@@ -328,11 +340,21 @@ actor BatteryCommandRunner {
             let requestedTermination = activeCommand?.child.id == id
                 ? activeCommand?.requestedTermination
                 : nil
+            if command.descendantPolicy == .requireProcessGroupExit,
+               processGroupExists(child.pid) {
+                waitStatus = try await terminateProcessGroup(
+                    child,
+                    knownWaitStatus: waitStatus
+                )
+            }
             activeCommand = nil
             return await makeResult(
                 child: child,
                 waitStatus: waitStatus ?? 0,
-                requestedTermination: requestedTermination
+                requestedTermination: requestedTermination,
+                drainDeadline: command.descendantPolicy == .allowPersistentProcessGroup
+                    ? min(deadline, monotonicDeadline(nanoseconds: 250_000_000))
+                    : deadline
             )
         } catch {
             activeCommand = nil
@@ -378,7 +400,7 @@ actor BatteryCommandRunner {
         failPendingActions(with: terminalError)
     }
 
-    private func spawn(_ command: Command, id: UUID) throws -> SpawnedChild {
+    private nonisolated func spawn(_ command: Command, id: UUID) throws -> SpawnedChild {
         var fileActions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
         let fileActionsCode = posix_spawn_file_actions_init(&fileActions)
@@ -487,24 +509,16 @@ actor BatteryCommandRunner {
 
         try? outputPipe?.fileHandleForWriting.close()
         try? errorPipe?.fileHandleForWriting.close()
-        let stdoutTask = outputPipe.map { pipe in
-            Task.detached { Self.readCapped(pipe.fileHandleForReading) }
-        }
-        let stderrBuffer: BoundedOutputBuffer?
-        let stderrTask: Task<Data, Never>?
-        let stderrDrainTask: Task<Void, Never>?
-        if command.outputPolicy == .discardStdoutCaptureStderr, let errorPipe {
-            let buffer = BoundedOutputBuffer()
-            stderrBuffer = buffer
-            stderrTask = nil
-            stderrDrainTask = Task.detached {
-                Self.drain(errorPipe.fileHandleForReading, into: buffer)
+        let stdoutBuffer = outputPipe.map { _ in BoundedOutputBuffer() }
+        let stderrBuffer = errorPipe.map { _ in BoundedOutputBuffer() }
+        let stdoutDrainTask = outputPipe.flatMap { pipe in
+            stdoutBuffer.map { buffer in
+                Task.detached { Self.drain(pipe.fileHandleForReading, into: buffer) }
             }
-        } else {
-            stderrBuffer = nil
-            stderrDrainTask = nil
-            stderrTask = errorPipe.map { pipe in
-                Task.detached { Self.readCapped(pipe.fileHandleForReading) }
+        }
+        let stderrDrainTask = errorPipe.flatMap { pipe in
+            stderrBuffer.map { buffer in
+                Task.detached { Self.drain(pipe.fileHandleForReading, into: buffer) }
             }
         }
 
@@ -512,18 +526,20 @@ actor BatteryCommandRunner {
             id: id,
             command: command,
             pid: pid,
-            stdoutTask: stdoutTask,
-            stderrTask: stderrTask,
+            stdoutBuffer: stdoutBuffer,
             stderrBuffer: stderrBuffer,
+            stdoutReadHandle: outputPipe?.fileHandleForReading,
+            stderrReadHandle: errorPipe?.fileHandleForReading,
+            stdoutDrainTask: stdoutDrainTask,
             stderrDrainTask: stderrDrainTask
         )
     }
 
-    private func checkSpawnSetup(_ code: Int32, command: Command, operation: String) throws {
+    private nonisolated func checkSpawnSetup(_ code: Int32, command: Command, operation: String) throws {
         guard code == 0 else { throw spawnSetupError(command, code: code, operation: operation) }
     }
 
-    private func spawnSetupError(
+    private nonisolated func spawnSetupError(
         _ command: Command,
         code: Int32,
         operation: String
@@ -607,7 +623,8 @@ actor BatteryCommandRunner {
         let result = await makeResult(
             child: command.child,
             waitStatus: waitStatus,
-            requestedTermination: command.requestedTermination
+            requestedTermination: command.requestedTermination,
+            drainDeadline: monotonicDeadline(nanoseconds: terminationGraceNanoseconds)
         )
         if longRunningCommand?.child.id == command.child.id { longRunningCommand = nil }
         lastLongRunningResult = result
@@ -617,18 +634,24 @@ actor BatteryCommandRunner {
     private func makeResult(
         child: SpawnedChild,
         waitStatus: Int32,
-        requestedTermination: BatteryCommandTermination?
+        requestedTermination: BatteryCommandTermination?,
+        drainDeadline: UInt64
     ) async -> BatteryCommandResult {
-        let stdout = Self.decode(await child.stdoutTask?.value)
-        var stderr = Self.decode(await child.stderrTask?.value)
-        if let buffer = child.stderrBuffer {
-            let stderrDeadline = monotonicDeadline(nanoseconds: 250_000_000)
-            repeat {
-                await Self.pollDelay()
-                if !buffer.snapshot().isEmpty || buffer.hasFinishedDraining() { break }
-            } while DispatchTime.now().uptimeNanoseconds < stderrDeadline
-            stderr = Self.decode(buffer.snapshot())
+        while !capturesFinished(child), DispatchTime.now().uptimeNanoseconds < drainDeadline {
+            await Self.pollDelay()
         }
+
+        if child.command.descendantPolicy == .requireProcessGroupExit {
+            if child.stdoutBuffer?.hasFinishedDraining() == false {
+                try? child.stdoutReadHandle?.close()
+            }
+            if child.stderrBuffer?.hasFinishedDraining() == false {
+                try? child.stderrReadHandle?.close()
+            }
+        }
+
+        let stdout = Self.decode(child.stdoutBuffer?.snapshot())
+        let stderr = Self.decode(child.stderrBuffer?.snapshot())
 
         return BatteryCommandResult(
             commandID: child.id,
@@ -638,6 +661,12 @@ actor BatteryCommandRunner {
             stderr: stderr,
             termination: requestedTermination ?? Self.termination(from: waitStatus)
         )
+    }
+
+    private func capturesFinished(_ child: SpawnedChild) -> Bool {
+        let stdoutFinished = child.stdoutBuffer?.hasFinishedDraining() ?? true
+        let stderrFinished = child.stderrBuffer?.hasFinishedDraining() ?? true
+        return stdoutFinished && stderrFinished
     }
 
     private func pollWaitStatus(pid: pid_t) -> Int32? {
@@ -662,7 +691,7 @@ actor BatteryCommandRunner {
         return result.overflow ? UInt64.max : result.partialValue
     }
 
-    private func withCStringArray<T>(
+    private nonisolated func withCStringArray<T>(
         _ strings: [String],
         _ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> T
     ) -> T {
@@ -672,17 +701,6 @@ actor BatteryCommandRunner {
         return nullTerminated.withUnsafeMutableBufferPointer { buffer in
             body(buffer.baseAddress!)
         }
-    }
-
-    private nonisolated static func readCapped(_ handle: FileHandle) -> Data {
-        var captured = Data()
-        while let chunk = readChunk(fileDescriptor: handle.fileDescriptor) {
-            if captured.count < outputLimit {
-                captured.append(chunk.prefix(outputLimit - captured.count))
-            }
-        }
-        try? handle.close()
-        return captured
     }
 
     private nonisolated static func drain(
