@@ -32,6 +32,7 @@ struct BatteryInfo {
 /// - IOPMPowerSource: macOS 전원 관리 프레임워크. 배터리 상태를 userspace에 노출
 /// - IOServiceGetMatchingService: IOKit 레지스트리에서 AppleSmartBattery 서비스 검색
 /// - 2초 간격 폴링 + IOPowerSource notification 조합
+@MainActor
 final class BatteryMonitor: ObservableObject {
     static let shared = BatteryMonitor()
 
@@ -184,14 +185,16 @@ final class BatteryMonitor: ObservableObject {
         guard runsMonitoringInfrastructure else { return }
 
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.batteryInfo = self.readBatteryInfo()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.batteryInfo = self.readBatteryInfo()
+            }
         }
 
         // 60초마다 배터리 이력 기록 (Core Data)
         recordHistory()
         historyTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
-            self?.recordHistory()
+            Task { @MainActor [weak self] in self?.recordHistory() }
         }
 
         registerPowerSourceNotification()

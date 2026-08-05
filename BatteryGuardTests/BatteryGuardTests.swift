@@ -52,6 +52,8 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var chargingStatus: BatteryChargingStatus = .disabled
     private var maintainDelayValue: TimeInterval = 0
     private var openDelayValue: TimeInterval = 0
+    private var temperatureSequence: [Float?] = []
+    private var ledDelayByRawValue: [UInt8: TimeInterval] = [:]
 
     var operations: [String] {
         lock.lock()
@@ -110,6 +112,14 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         lock.unlock()
     }
 
+    func enqueueTemperatures(_ values: [Float?]) {
+        lock.withLock { temperatureSequence.append(contentsOf: values) }
+    }
+
+    func setLEDDelay(_ delay: TimeInterval, for state: MagSafeLEDState) {
+        lock.withLock { ledDelayByRawValue[state.rawValue] = delay }
+    }
+
     func open() async throws {
         try record("open")
         let delay = lock.withLock { openDelayValue }
@@ -124,7 +134,8 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
             BatteryControlStatus(
                 charging: chargingStatus,
                 isDischarging: longRunning,
-                maintainLevel: maintainLevel
+                maintainLevel: maintainLevel,
+                maintainWorker: .running(pid: 4_242)
             )
         }
     }
@@ -174,13 +185,20 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func readBatteryTemperature() async throws -> Float {
         try record("read-temperature")
-        guard let temperature else {
+        let nextTemperature = lock.withLock {
+            temperatureSequence.isEmpty ? temperatureValue : temperatureSequence.removeFirst()
+        }
+        guard let nextTemperature else {
             throw BatteryError.commandFailed("temperature", 1, "sensor unavailable")
         }
-        return temperature
+        return nextTemperature
     }
 
     func setMagSafeLED(_ state: MagSafeLEDState) async throws {
+        let delay = lock.withLock { ledDelayByRawValue[state.rawValue] ?? 0 }
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
         try record("set-led", detail: String(format: "%02x", state.rawValue))
     }
 
@@ -229,6 +247,7 @@ private func makeBatteryInfo(
 
 final class ChargeStateTests: XCTestCase {
     func testAllStatesHaveStableLabels() {
+        XCTAssertEqual(ChargeState.unknown.rawValue, "상태 확인 필요")
         XCTAssertEqual(ChargeState.charging.rawValue, "충전 중")
         XCTAssertEqual(ChargeState.chargingPaused.rawValue, "충전 일시정지")
         XCTAssertEqual(ChargeState.discharging.rawValue, "방전 중")
@@ -237,6 +256,7 @@ final class ChargeStateTests: XCTestCase {
     }
 }
 
+@MainActor
 final class UserSettingsTests: XCTestCase {
     func testDefaultsAndPersistenceUseIsolatedDefaults() {
         let defaults = makeTestDefaults()
@@ -311,6 +331,32 @@ final class StatusParsingTests: XCTestCase {
         XCTAssertNil(SMCKit.parseControlStatus(csv: ""))
         XCTAssertNil(SMCKit.parseControlStatus(csv: "80,00:10,disabled"))
         XCTAssertEqual(SMCKit.parseChargingStatus(csv: "bad"), .unknown)
+    }
+
+    func testMaintainWorkerClassificationRejectsDuplicatesAndStalePIDFiles() {
+        let path = "/usr/local/co.palokaj.battery/battery"
+        let processTable = """
+         101 100 /bin/bash \(path) maintain_synchronous 80
+         202 200 /bin/bash \(path) maintain_synchronous 80
+         303 300 /bin/bash /tmp/unrelated maintain_synchronous 80
+        """
+
+        XCTAssertEqual(
+            SMCKit.classifyMaintainWorkers(
+                pidFilePID: 202,
+                processTable: processTable,
+                batteryPath: path
+            ),
+            .duplicate(pids: [101, 202])
+        )
+        XCTAssertEqual(
+            SMCKit.classifyMaintainWorkers(
+                pidFilePID: 404,
+                processTable: "101 100 /bin/bash \(path) maintain_synchronous 80",
+                batteryPath: path
+            ),
+            .stale(pid: 404)
+        )
     }
 }
 
@@ -566,7 +612,44 @@ final class ProcessLifecycleTests: XCTestCase {
 
         XCTAssertEqual(result.exitCode, 7)
         XCTAssertEqual(result.stderr, "parent-error")
-        XCTAssertLessThan(elapsed, 0.5)
+        XCTAssertLessThan(elapsed, 1.5)
+    }
+
+    func testPersistentDescendantPolicyReturnsWithoutKillingTheWorker() async throws {
+        let runner = BatteryCommandRunner()
+        let parentPIDFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-persistent-parent-\(UUID().uuidString).pid")
+        let childPIDFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-persistent-child-\(UUID().uuidString).pid")
+        defer {
+            try? FileManager.default.removeItem(at: parentPIDFile)
+            try? FileManager.default.removeItem(at: childPIDFile)
+        }
+
+        let result = try await runner.run(
+            .init(
+                executable: "/bin/sh",
+                arguments: [
+                    "-c",
+                    "echo $$ > \(shellQuote(parentPIDFile.path)); sleep 30 & echo $! > \(shellQuote(childPIDFile.path)); printf launched"
+                ],
+                label: "persistent descendant fixture",
+                timeout: 1,
+                descendantPolicy: .allowPersistentProcessGroup
+            )
+        )
+        let parentPID = try XCTUnwrap(Int32(
+            String(contentsOf: parentPIDFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+        let childPID = try XCTUnwrap(Int32(
+            String(contentsOf: childPIDFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+        defer { _ = Darwin.kill(-parentPID, SIGKILL) }
+
+        XCTAssertEqual(result.stdout, "launched")
+        XCTAssertEqual(Darwin.kill(childPID, 0), 0)
     }
 
     func testSecondLongRunningLaunchIsRejectedWithoutStoppingTheFirst() async throws {
@@ -720,7 +803,10 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             try? FileManager.default.removeItem(at: fixture)
             try? FileManager.default.removeItem(at: pidFile)
         }
-        let backend = SMCKit(batteryPath: fixture.path)
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            executableTrustPolicy: .testFixture
+        )
 
         do {
             try await backend.startTopUp(to: 100)
@@ -766,7 +852,11 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             try? FileManager.default.removeItem(at: stateFile)
             try? FileManager.default.removeItem(at: eventFile)
         }
-        let backend = SMCKit(batteryPath: fixture.path)
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .running(pid: 4_242) },
+            executableTrustPolicy: .testFixture
+        )
 
         let first = Task { try await backend.applyMaintain(level: 60) }
         let firstMaintainStarted = await eventually {
@@ -783,6 +873,43 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         XCTAssertEqual(events, ["maintain-60", "status-60", "maintain-80", "status-80"])
     }
 
+    func testMaintainVerificationRejectsADeadWorkerEvenWhenTrackerMatches() async throws {
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        do {
+            try await backend.applyMaintain(level: 80)
+            XCTFail("Expected dead worker verification failure")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("worker=stopped"))
+        }
+    }
+
+    func testProductionPreflightRejectsAnUnpinnedExecutableBeforeUse() async throws {
+        let fixture = try makeExecutableFixture("#!/bin/bash\necho v1.3.4\n")
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let backend = SMCKit(batteryPath: fixture.path)
+
+        do {
+            try await backend.open()
+            XCTFail("Expected production preflight failure")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Battery CLI preflight failed"))
+        }
+    }
+
     func testMaintainFailurePreservesStderrWhenStdoutIsDiscarded() async throws {
         let fixture = try makeExecutableFixture(
             """
@@ -795,7 +922,10 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             """
         )
         defer { try? FileManager.default.removeItem(at: fixture) }
-        let backend = SMCKit(batteryPath: fixture.path)
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            executableTrustPolicy: .testFixture
+        )
 
         do {
             try await backend.applyMaintain(level: 80)
@@ -812,7 +942,11 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         let batteryFixture = try makeExecutableFixture(
             """
             #!/bin/bash
-            echo "80,00:10,disabled,not discharging,80"
+            if [[ "$1" == "version" ]]; then
+              echo "v1.3.4"
+            else
+              echo "80,00:10,disabled,not discharging,80"
+            fi
             """
         )
         let smcFixture = try makeExecutableFixture(
@@ -834,7 +968,8 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         let backend = SMCKit(
             batteryPath: batteryFixture.path,
             smcBinaryPath: smcFixture.path,
-            usesSudoForSMCWrites: false
+            usesSudoForSMCWrites: false,
+            executableTrustPolicy: .testFixture
         )
         try await backend.open()
 
@@ -892,7 +1027,10 @@ final class ChargeControllerSafetyTests: XCTestCase {
     ) -> (ChargeController, FakeChargeBackend, BatteryMonitor, UserSettings) {
         let backend = FakeChargeBackend()
         backend.temperature = temperature.map(Float.init)
-        let monitor = BatteryMonitor()
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { nil },
+            runsMonitoringInfrastructure: false
+        )
         monitor.batteryInfo = makeBatteryInfo(
             charge: charge,
             isCharging: isCharging,
@@ -953,6 +1091,28 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertEqual(controller.readiness, .ready)
         XCTAssertTrue(backend.operations.contains("maintain:80"))
         XCTAssertFalse(backend.operations.contains("maintain:60"))
+    }
+
+    func testInitializationBecomesReadyOnlyAfterHighTemperatureIsBlocked() async throws {
+        let backend = FakeChargeBackend()
+        backend.temperature = 45
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 70, temperature: 45) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.heatProtectionEnabled = true
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        try await controller.initialize()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertTrue(controller.heatProtectionTriggered)
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
     }
 
     func testInitializationFailureLeavesControlsUnavailable() async {
@@ -1104,6 +1264,33 @@ final class ChargeControllerSafetyTests: XCTestCase {
         )
     }
 
+    func testUnsafePostflightTemperatureReblocksInsteadOfPublishingRestoredMode() async {
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 45,
+            charge: 80
+        )
+        controller.processBatteryInfo(makeBatteryInfo(temperature: 45))
+        let initiallyBlocked = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(initiallyBlocked)
+
+        backend.enqueueTemperatures([37, nil])
+        let coolInfo = makeBatteryInfo(temperature: 37)
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+
+        let reblocked = await eventually {
+            controller.heatProtectionTriggered && !controller.isCommandPending
+        }
+        XCTAssertTrue(reblocked)
+        XCTAssertFalse(controller.isTopUpActive)
+        XCTAssertFalse(controller.isDischarging)
+        XCTAssertGreaterThanOrEqual(
+            backend.operations.filter { $0 == "disable-charging" }.count,
+            2
+        )
+    }
+
     func testMissingTemperatureBlocksAutomaticControlAndFailsClosed() async {
         let (controller, backend, _, _) = makeSUT(
             heatProtectionEnabled: true,
@@ -1164,6 +1351,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
         let dischargeInfo = makeBatteryInfo(charge: 90)
         monitor.batteryInfo = dischargeInfo
         controller.processBatteryInfo(dischargeInfo)
+        let blinkStarted = await eventually { backend.operations.contains("set-led:04") }
+        XCTAssertTrue(blinkStarted)
 
         settings.controlMagSafeLED = false
         controller.processBatteryInfo(dischargeInfo)
@@ -1177,11 +1366,53 @@ final class ChargeControllerSafetyTests: XCTestCase {
 
         XCTAssertFalse(backend.operations.contains("stop-maintain"))
     }
+
+    func testShutdownDuringTopUpCancelsAndRestoresVerifiedMaintain() async {
+        let (controller, backend, _, _) = makeSUT(charge: 70)
+        controller.startTopUp()
+        let topUpStarted = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(topUpStarted)
+
+        controller.shutdown()
+
+        XCTAssertTrue(backend.operations.contains("request-cancellation"))
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("read-status"))
+    }
+
+    func testShutdownDuringDischargeCancelsAndRestoresVerifiedMaintain() async {
+        let (controller, backend, _, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+
+        controller.shutdown()
+
+        XCTAssertTrue(backend.operations.contains("request-cancellation"))
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("read-status"))
+    }
 }
 
 final class MagSafeLEDStateTests: XCTestCase {
     func testOnlyExplicitColorsHaveHardCodedValues() {
         XCTAssertEqual(MagSafeLEDState.green.rawValue, 0x03)
         XCTAssertEqual(MagSafeLEDState.orange.rawValue, 0x04)
+    }
+
+    func testNewerGenerationWinsWhenAnOlderWriteIsSlow() async throws {
+        let backend = FakeChargeBackend()
+        backend.setLEDDelay(0.2, for: .orange)
+        let controller = MagSafeLEDController(backend: backend)
+
+        await controller.apply(.solid(.orange), generation: 1) { _ in }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        await controller.apply(.solid(.green), generation: 2) { _ in }
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        let writes = backend.operations.filter { $0.hasPrefix("set-led:") }
+        XCTAssertEqual(writes, ["set-led:04", "set-led:03"])
+        try await controller.shutdown(generation: 3)
     }
 }

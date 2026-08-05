@@ -197,6 +197,7 @@ struct MenuBarView: View {
         case .chargingPaused: return .orange
         case .discharging: return .blue
         case .notConnected: return .gray
+        case .unknown: return .secondary
         }
     }
 }

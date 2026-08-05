@@ -1,5 +1,58 @@
 # BatteryGuard 개선 계획
 
+## 0. 2026-08-05 실행 순서와 결과
+
+이 절은 기존 전체 계획을 대체하지 않는다. Phase 1·2 PR 재검토에서 확인된 blocking 항목을 실제 적용한 순서, 검증 조건과 결과를 기록한다.
+
+### 0.1 실행 순서
+
+1. 앱 종료 중 Top Up/Discharge를 취소하고 시작 시 기록한 maintain limit를 복원한다. 복원은 level 일치, discharge 해제와 maintain worker 생존을 모두 확인해야 성공이다.
+2. `status_csv` tracker 값만 신뢰하지 않고 PID 파일과 실제 프로세스 명령행을 대조한다. worker가 없거나 stale이거나 둘 이상이면 maintain 상태를 실패로 취급한다.
+3. `BatteryCommandRunner.Command`에 `requireProcessGroupExit`와 `allowPersistentProcessGroup` descendant policy를 명시한다. stdout/stderr는 제한된 buffer로 drain하고 parent 종료 후 pipe를 물려받은 자식 때문에 무기한 대기하지 않는다. timeout은 spawn 이전부터 결과 capture까지 monotonic deadline으로 제한하며 정리 대기도 유한하게 유지한다.
+4. privileged CLI preflight를 초기화 첫 동작으로 이동한다. production에서는 고정 절대 경로, regular file/directory, symlink 거부, root:wheel owner, group/other write 금지, 실행 권한과 최소 v1.3.4를 확인한다. fixture test만 완화된 별도 policy를 사용한다.
+5. readiness를 `initializing -> reconciling -> establishingControl -> ready/failed`의 완전한 async initialization 상태로 바꾼다. backend open, 실제 status, IOKit 측정, fresh temperature와 최초 verified control이 끝나기 전에는 UI 제어를 열지 않는다.
+6. `ChargeMode` 하나를 충전 제어 상태의 원본으로 사용한다. Maintain, Top Up, Discharge, Heat Block, transition과 failure를 상호 배타적으로 표현하고 기존 Boolean은 모두 파생값으로 바꾼다.
+7. Heat Protection을 상태 머신 전이로 재작성한다. 진입은 long operation과 maintain worker를 정리한 뒤 verified charging-off를 요구한다. 복원은 fresh preflight/postflight temperature를 모두 확인하며 실패 시 다시 charging-off를 적용하고 blocked 상태를 유지한다.
+8. MagSafe LED를 generation을 비교하는 actor와 단일 worker task로 바꾼다. solid, blink, restore 요청은 한 작업에서 순서대로 실행하고 오래된 generation의 오류/완료가 최신 intent를 바꾸지 못하게 한다.
+9. 종료 복구, dead/duplicate maintain worker, descendant policy, bounded output, preflight, async readiness, Heat Protection postflight re-block와 LED generation 역전 테스트를 추가한다. `BatteryMonitor`, `BatteryHistory`, `UserSettings`의 main-actor 경계를 명시하고 strict-concurrency complete 빌드를 경고 오류화로 통과시킨다.
+10. 자동 검증 통과 후에만 실제 하드웨어 체크리스트를 수행한다. 모든 변경 전후에 `status_csv`, PID 파일, 실제 worker 명령행과 `pmset -g batt`를 기록하고 최종 maintain 80을 복원한다.
+11. 기존 unrelated history를 force-push로 다시 쓰지 않는다. `baseline/import` PR은 원래 프로젝트 tree를 `main`에 연결하고, Phase 1·2 PR은 그 baseline을 base로 하여 안전 리팩터링 diff만 보여주도록 분리한다.
+
+### 0.2 자동 검증 결과
+
+- Debug 테스트: 51개, 실패 0개.
+- strict concurrency: `SWIFT_STRICT_CONCURRENCY=complete`와 `SWIFT_TREAT_WARNINGS_AS_ERRORS=YES`로 build/test 통과.
+- 테스트 host는 실제 CLI, 로그인 항목과 운영 Core Data store를 초기화하지 않는다.
+- fixture executable만으로 timeout, cancellation, process-group cleanup, persistent descendant와 bounded stdout/stderr를 검증했다.
+- production preflight가 고정 경로가 아닌 executable을 hardware command 전에 거부하는 테스트를 추가했다.
+
+### 0.3 실제 하드웨어 체크 기록
+
+시작 기준은 battery CLI v1.3.4, 80%, AC attached, charging disabled, not discharging, maintain 80이었다.
+
+| 검사 | 수행 내용 | 결과 |
+|---|---|---|
+| production preflight/initialize | root:wheel 755 directory, battery, smc 확인 후 새 Debug 앱 실행 | 통과 |
+| 정상 quit | maintain 중 앱 정상 종료 | 동일 worker 생존, maintain 80 유지 |
+| Top Up 중 quit | UI에서 Top Up 시작, `charging=enabled` 확인 후 정상 종료 | Top Up 취소, charging disabled, not discharging, maintain 80 복원 |
+| Discharge 중 quit | limit를 75로 임시 변경, UI와 `discharging` 확인 후 정상 종료 | discharge 종료, maintain 75 복원 후 UI에서 maintain 80으로 원복 |
+| duplicate worker | 초기 실기 실행에서 CLI의 지연된 signal 처리 때문에 3개 worker가 관찰됨 | 검증을 exact-one으로 강화하고 오래된 exact worker만 정리; 재실행 후 항상 한 worker만 확인 |
+| Heat Protection 진입 | threshold를 40°C에서 30°C로 임시 변경 | 최초 실행에서 worker가 남는 결함 발견; `disableCharging` 전에 exact maintain worker 정리를 추가한 뒤 worker 0, 보호 UI 확인 |
+| Heat Protection 복원 | threshold를 30°C에서 40°C로 복원 | maintain 80 worker 정확히 하나 복원 |
+| crash reconciliation | 앱 PID만 SIGKILL, maintain worker 생존 확인 후 재실행 | 기존 worker를 재시작하지 않고 actual state reconciliation 통과 |
+| sleep/wake | 현재 개발 세션을 중단하므로 수행하지 않음 | fake backend wake reconciliation 테스트로만 검증; 별도 수동 확인 필요 |
+| Terminal drift | 주기적 external drift reconciliation이 후속 범위라 변경 실행하지 않음 | 후속 단계에서 구현 후 수동 확인 필요 |
+
+최종 복원 상태는 80%, AC attached, charging disabled, not discharging, maintain 80, PID 파일과 일치하는 worker 정확히 하나이며 BatteryGuard 앱은 종료된 상태다.
+
+### 0.4 이 실행으로 바뀐 후속 계획
+
+- CLI preflight는 기존 3.6까지 기다리지 않고 모든 hardware command보다 먼저 실행하도록 완료했다. 3.6에는 macOS native Charge Limit 충돌 감지와 사용자 안내만 남는다.
+- readiness 최소 gate가 아니라 전체 async initialization을 완료했다. 이후 UI 개선은 `ChargeControllerReadiness`를 파생 표시해야 한다.
+- single `ChargeMode`, lifecycle, Heat Protection, Top Up/Discharge와 LED 재작성은 함께 완료됐다. 이후 새 기능은 Boolean 상태를 다시 추가하지 않고 이 상태 머신에 전이를 추가해야 한다.
+- monitor/history 정확성, 로컬 순환 진단 로그, native Charge Limit 충돌, periodic Terminal drift reconciliation과 별도 disable-control UX는 아직 후속 범위다.
+- hardware checklist의 sleep/wake와 Terminal drift 항목은 해당 후속 구현 뒤 다시 수행한다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.

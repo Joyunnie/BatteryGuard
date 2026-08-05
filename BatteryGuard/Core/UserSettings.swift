@@ -28,17 +28,18 @@ struct MainAppLaunchAtLoginService: LaunchAtLoginManaging {
     func unregister() throws { try SMAppService.mainApp.unregister() }
 }
 
-class UserSettings: ObservableObject {
+@MainActor
+final class UserSettings: ObservableObject {
     static let shared = UserSettings()
 
-    static let chargeLimitRange = 20...100
-    static let heatProtectionThresholdRange = 20.0...50.0
+    nonisolated static let chargeLimitRange = 20...100
+    nonisolated static let heatProtectionThresholdRange = 20.0...50.0
 
-    static func validatedChargeLimit(_ value: Int) -> Int {
+    nonisolated static func validatedChargeLimit(_ value: Int) -> Int {
         min(max(value, chargeLimitRange.lowerBound), chargeLimitRange.upperBound)
     }
 
-    static func validatedHeatProtectionThreshold(_ value: Double) -> Double {
+    nonisolated static func validatedHeatProtectionThreshold(_ value: Double) -> Double {
         guard value.isFinite else { return 40.0 }
         return min(max(value, heatProtectionThresholdRange.lowerBound), heatProtectionThresholdRange.upperBound)
     }

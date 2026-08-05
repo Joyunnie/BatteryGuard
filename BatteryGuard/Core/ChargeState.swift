@@ -3,6 +3,7 @@
 import Foundation
 
 enum ChargeState: String {
+    case unknown = "상태 확인 필요"
     case charging = "충전 중"
     case chargingPaused = "충전 일시정지"
     case discharging = "방전 중"

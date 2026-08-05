@@ -2,6 +2,7 @@
 // Semantic battery operations layered over BatteryCommandRunner.
 
 import Foundation
+import Darwin
 
 private let defaultBatteryPath = "/usr/local/co.palokaj.battery/battery"
 private let defaultSMCBinaryPath = "/usr/local/co.palokaj.battery/smc"
@@ -27,7 +28,7 @@ private actor AsyncOperationGate {
     }
 }
 
-enum MagSafeLEDState: UInt8, Sendable {
+enum MagSafeLEDState: UInt8, Equatable, Sendable {
     case green = 0x03
     case orange = 0x04
 }
@@ -36,6 +37,7 @@ enum BatteryError: Error, LocalizedError, CustomStringConvertible {
     case binaryNotFound(String)
     case invalidChargeLevel(Int)
     case unsupported(String)
+    case preflightFailed(String)
     case commandCancelled(String)
     case commandTimedOut(String)
     case commandFailed(String, Int32, String)
@@ -48,6 +50,8 @@ enum BatteryError: Error, LocalizedError, CustomStringConvertible {
             return "Charge level must be between 20 and 100, received \(level)"
         case .unsupported(let message):
             return message
+        case .preflightFailed(let message):
+            return "Battery CLI preflight failed: \(message)"
         case .commandCancelled(let command):
             return "Command cancelled: \(command)"
         case .commandTimedOut(let command):
@@ -66,10 +70,36 @@ enum BatteryChargingStatus: Equatable, Sendable {
     case unknown
 }
 
+enum MaintainWorkerStatus: Equatable, Sendable {
+    case running(pid: Int32)
+    case stopped
+    case stale(pid: Int32?)
+    case duplicate(pids: [Int32])
+    case unknown
+
+    var isRunning: Bool {
+        if case .running = self { return true }
+        return false
+    }
+}
+
 struct BatteryControlStatus: Equatable, Sendable {
     let charging: BatteryChargingStatus
     let isDischarging: Bool?
     let maintainLevel: Int?
+    let maintainWorker: MaintainWorkerStatus
+
+    init(
+        charging: BatteryChargingStatus,
+        isDischarging: Bool?,
+        maintainLevel: Int?,
+        maintainWorker: MaintainWorkerStatus = .unknown
+    ) {
+        self.charging = charging
+        self.isDischarging = isDischarging
+        self.maintainLevel = maintainLevel
+        self.maintainWorker = maintainWorker
+    }
 }
 
 /// Hardware-facing seam. Production delegates all child processes to
@@ -92,6 +122,13 @@ protocol ChargeBackend: AnyObject, Sendable {
 }
 
 actor SMCKit: ChargeBackend {
+    typealias MaintainWorkerProbe = @Sendable (_ pidFilePath: String, _ batteryPath: String) async throws -> MaintainWorkerStatus
+
+    enum ExecutableTrustPolicy: Sendable, Equatable {
+        case production
+        case testFixture
+    }
+
     static let shared = SMCKit()
 
     private let runner: BatteryCommandRunner
@@ -100,22 +137,40 @@ actor SMCKit: ChargeBackend {
     private let batteryPath: String
     private let smcBinaryPath: String
     private let usesSudoForSMCWrites: Bool
+    private let maintainPIDFilePath: String
+    private let maintainWorkerProbe: MaintainWorkerProbe?
+    private let executableTrustPolicy: ExecutableTrustPolicy
     private let statusCommandTimeout: TimeInterval = 2
     private let longRunningVerificationTimeoutNanoseconds: UInt64 = 3_000_000_000
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
     private var rawSMCAvailable = false
     private var savedMagSafeLEDValue: UInt8?
 
+    private struct MaintainWorkerProcess: Equatable, Sendable {
+        let pid: Int32
+        let processGroupID: Int32
+        let command: String
+    }
+
     init(
         runner: BatteryCommandRunner = BatteryCommandRunner(),
         batteryPath: String = defaultBatteryPath,
         smcBinaryPath: String = defaultSMCBinaryPath,
-        usesSudoForSMCWrites: Bool = true
+        usesSudoForSMCWrites: Bool = true,
+        maintainPIDFilePath: String? = nil,
+        maintainWorkerProbe: MaintainWorkerProbe? = nil,
+        executableTrustPolicy: ExecutableTrustPolicy = .production
     ) {
         self.runner = runner
         self.batteryPath = batteryPath
         self.smcBinaryPath = smcBinaryPath
         self.usesSudoForSMCWrites = usesSudoForSMCWrites
+        self.maintainPIDFilePath = maintainPIDFilePath
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".battery/battery.pid")
+                .path
+        self.maintainWorkerProbe = maintainWorkerProbe
+        self.executableTrustPolicy = executableTrustPolicy
     }
 
     func open() async throws {
@@ -125,17 +180,113 @@ actor SMCKit: ChargeBackend {
     }
 
     private func openUnlocked() async throws {
-        guard FileManager.default.fileExists(atPath: batteryPath) else {
-            throw BatteryError.binaryNotFound(
-                "battery CLI is not installed at \(batteryPath). Install and verify it manually before enabling charge control."
-            )
-        }
+        try validateExecutableBeforeUse(
+            path: batteryPath,
+            expectedProductionPath: defaultBatteryPath,
+            displayName: "battery CLI"
+        )
+        try await validateBatteryCLIVersionUnlocked()
 
         _ = try await readControlStatusUnlocked()
 
         let available = FileManager.default.fileExists(atPath: smcBinaryPath)
+        if available {
+            try validateExecutableBeforeUse(
+                path: smcBinaryPath,
+                expectedProductionPath: defaultSMCBinaryPath,
+                displayName: "SMC binary"
+            )
+        }
         rawSMCAvailable = available
         print("[SMCKit] battery CLI ready; raw SMC \(available ? "available" : "unavailable")")
+    }
+
+    private func validateExecutableBeforeUse(
+        path: String,
+        expectedProductionPath: String,
+        displayName: String
+    ) throws {
+        guard path.hasPrefix("/") else {
+            throw BatteryError.preflightFailed("\(displayName) path is not absolute: \(path)")
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw BatteryError.binaryNotFound(
+                "\(displayName) is not installed at \(path). Install and verify it manually before enabling charge control."
+            )
+        }
+
+        switch executableTrustPolicy {
+        case .production:
+            guard path == expectedProductionPath else {
+                throw BatteryError.preflightFailed(
+                    "\(displayName) must use the pinned path \(expectedProductionPath), received \(path)"
+                )
+            }
+            try validateRootOwnedPath(path, expectedType: S_IFREG, displayName: displayName)
+            let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
+            try validateRootOwnedPath(parent, expectedType: S_IFDIR, displayName: "\(displayName) directory")
+        case .testFixture:
+            var metadata = stat()
+            guard lstat(path, &metadata) == 0,
+                  metadata.st_mode & S_IFMT == S_IFREG,
+                  metadata.st_mode & S_IXUSR != 0 else {
+                throw BatteryError.preflightFailed("test fixture is not an executable regular file: \(path)")
+            }
+        }
+    }
+
+    private func validateRootOwnedPath(
+        _ path: String,
+        expectedType: mode_t,
+        displayName: String
+    ) throws {
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0 else {
+            throw BatteryError.preflightFailed("could not inspect \(displayName) at \(path): \(String(cString: strerror(errno)))")
+        }
+        guard metadata.st_mode & S_IFMT == expectedType else {
+            throw BatteryError.preflightFailed("\(displayName) must not be a symlink and has the wrong file type: \(path)")
+        }
+        guard metadata.st_uid == 0, metadata.st_gid == 0 else {
+            throw BatteryError.preflightFailed("\(displayName) must be owned by root:wheel: \(path)")
+        }
+        guard metadata.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
+            throw BatteryError.preflightFailed("\(displayName) is writable by group or others: \(path)")
+        }
+        if expectedType == S_IFREG, metadata.st_mode & S_IXUSR == 0 {
+            throw BatteryError.preflightFailed("\(displayName) is not owner-executable: \(path)")
+        }
+    }
+
+    private func validateBatteryCLIVersionUnlocked() async throws {
+        guard executableTrustPolicy == .production else { return }
+        let result = try await runProcess(
+            executable: "/bin/bash",
+            arguments: [batteryPath, "version"],
+            environment: batteryEnvironment,
+            label: "battery version",
+            timeout: statusCommandTimeout
+        )
+        guard let version = Self.parseSemanticVersion(result.stdout),
+              Self.semanticVersion(version, isAtLeast: [1, 3, 4]) else {
+            throw BatteryError.preflightFailed(
+                "battery CLI v1.3.4 or newer is required; received \(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+    }
+
+    private static func parseSemanticVersion(_ output: String) -> [Int]? {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let versionText = trimmed.hasPrefix("v") ? String(trimmed.dropFirst()) : trimmed
+        let components = versionText.split(separator: ".").compactMap { Int($0) }
+        return components.count >= 3 ? Array(components.prefix(3)) : nil
+    }
+
+    private static func semanticVersion(_ version: [Int], isAtLeast minimum: [Int]) -> Bool {
+        for (actual, required) in zip(version, minimum) where actual != required {
+            return actual > required
+        }
+        return version.count >= minimum.count
     }
 
     // MARK: - Verified charge operations
@@ -148,17 +299,26 @@ actor SMCKit: ChargeBackend {
 
     private func applyMaintainUnlocked(level: Int) async throws {
         try validateChargeLevel(level)
+        if executableTrustPolicy == .production,
+           let current = try? await readControlStatusUnlocked(),
+           current.maintainLevel == level,
+           current.maintainWorker.isRunning,
+           current.isDischarging != true {
+            return
+        }
+        try await terminateMaintainWorkersUnlocked()
         _ = try await batteryCommand(
             ["maintain", "\(level)"],
-            outputPolicy: .discardStdoutCaptureStderr
+            outputPolicy: .discardStdoutCaptureStderr,
+            descendantPolicy: .allowPersistentProcessGroup
         )
 
         let status = try await readControlStatusUnlocked()
-        guard status.maintainLevel == level else {
+        guard status.maintainLevel == level, status.maintainWorker.isRunning else {
             throw BatteryError.commandFailed(
                 "battery maintain \(level)",
                 -1,
-                "status_csv reported maintain=\(status.maintainLevel.map(String.init) ?? "unknown")"
+                "status_csv reported maintain=\(status.maintainLevel.map(String.init) ?? "unknown"), worker=\(status.maintainWorker)"
             )
         }
     }
@@ -170,6 +330,7 @@ actor SMCKit: ChargeBackend {
     }
 
     private func disableChargingUnlocked() async throws {
+        try await terminateMaintainWorkersUnlocked()
         _ = try await batteryCommand(["charging", "off"])
         let status = try await readControlStatusUnlocked()
         guard status.charging == .disabled else {
@@ -184,6 +345,7 @@ actor SMCKit: ChargeBackend {
     func startDischarge(to level: Int) async throws {
         try await withGate(controlGate) {
             try validateChargeLevel(level)
+            try await terminateMaintainWorkersUnlocked()
             let label = "battery discharge \(level)"
             try await launchLongRunning(["discharge", "\(level)"], label: label)
             try await verifyLongRunningStart(command: label) { $0.isDischarging == true }
@@ -193,6 +355,7 @@ actor SMCKit: ChargeBackend {
     func startTopUp(to level: Int) async throws {
         try await withGate(controlGate) {
             try validateChargeLevel(level)
+            try await terminateMaintainWorkersUnlocked()
             let label = "battery charge \(level)"
             try await launchLongRunning(["charge", "\(level)"], label: label)
             try await verifyLongRunningStart(command: label) { $0.charging == .enabled }
@@ -229,10 +392,116 @@ actor SMCKit: ChargeBackend {
 
     private func readControlStatusUnlocked() async throws -> BatteryControlStatus {
         let result = try await batteryCommand(["status_csv"], timeout: statusCommandTimeout)
-        guard let status = Self.parseControlStatus(csv: result.stdout) else {
+        guard let parsedStatus = Self.parseControlStatus(csv: result.stdout) else {
             throw BatteryError.unsupported("Installed battery CLI returned an unsupported status_csv format")
         }
-        return status
+        let workerStatus = try await readMaintainWorkerStatusUnlocked()
+        return BatteryControlStatus(
+            charging: parsedStatus.charging,
+            isDischarging: parsedStatus.isDischarging,
+            maintainLevel: parsedStatus.maintainLevel,
+            maintainWorker: workerStatus
+        )
+    }
+
+    private func readMaintainWorkerStatusUnlocked() async throws -> MaintainWorkerStatus {
+        if let maintainWorkerProbe {
+            return try await maintainWorkerProbe(maintainPIDFilePath, batteryPath)
+        }
+
+        do {
+            let result = try await runProcess(
+                executable: "/bin/ps",
+                arguments: ["-axo", "pid=,pgid=,command="],
+                label: "inspect maintain workers",
+                timeout: statusCommandTimeout
+            )
+            return Self.classifyMaintainWorkers(
+                pidFilePID: readMaintainPIDFile(),
+                processTable: result.stdout,
+                batteryPath: batteryPath
+            )
+        } catch {
+            return .unknown
+        }
+    }
+
+    static func classifyMaintainWorkers(
+        pidFilePID: Int32?,
+        processTable: String,
+        batteryPath: String
+    ) -> MaintainWorkerStatus {
+        let workers = parseMaintainWorkerProcesses(processTable: processTable, batteryPath: batteryPath)
+        guard workers.count <= 1 else { return .duplicate(pids: workers.map(\.pid).sorted()) }
+        guard let worker = workers.first else {
+            return pidFilePID == nil ? .stopped : .stale(pid: pidFilePID)
+        }
+        guard worker.pid == pidFilePID else { return .stale(pid: pidFilePID ?? worker.pid) }
+        return .running(pid: worker.pid)
+    }
+
+    private static func parseMaintainWorkerProcesses(
+        processTable: String,
+        batteryPath: String
+    ) -> [MaintainWorkerProcess] {
+        processTable.split(whereSeparator: \Character.isNewline).compactMap { line in
+            let fields = line.split(maxSplits: 2, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 3,
+                  let pid = Int32(fields[0]),
+                  let pgid = Int32(fields[1]),
+                  pid > 1,
+                  String(fields[2]).contains(batteryPath),
+                  String(fields[2]).contains("maintain_synchronous") ||
+                    String(fields[2]).contains("maintain_voltage_synchronous") else {
+                return nil
+            }
+            return MaintainWorkerProcess(pid: pid, processGroupID: pgid, command: String(fields[2]))
+        }
+    }
+
+    private func terminateMaintainWorkersUnlocked() async throws {
+        let result = try await runProcess(
+            executable: "/bin/ps",
+            arguments: ["-axo", "pid=,pgid=,command="],
+            label: "locate maintain workers",
+            timeout: statusCommandTimeout
+        )
+        let workers = Self.parseMaintainWorkerProcesses(
+            processTable: result.stdout,
+            batteryPath: batteryPath
+        )
+        guard !workers.isEmpty else { return }
+
+        for worker in workers { _ = Darwin.kill(worker.pid, SIGTERM) }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        for worker in workers where Darwin.kill(worker.pid, 0) == 0 {
+            guard Darwin.kill(worker.pid, SIGKILL) == 0 || errno == ESRCH else {
+                throw BatteryError.commandFailed(
+                    "stop maintain worker \(worker.pid)",
+                    -1,
+                    String(cString: strerror(errno))
+                )
+            }
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let survivors = workers.filter { Darwin.kill($0.pid, 0) == 0 }
+        guard survivors.isEmpty else {
+            throw BatteryError.commandFailed(
+                "stop maintain workers",
+                -1,
+                "workers survived termination: \(survivors.map(\.pid))"
+            )
+        }
+        if let pidFilePID = readMaintainPIDFile(), workers.contains(where: { $0.pid == pidFilePID }) {
+            try? FileManager.default.removeItem(atPath: maintainPIDFilePath)
+        }
+    }
+
+    private func readMaintainPIDFile() -> Int32? {
+        guard let text = try? String(contentsOfFile: maintainPIDFilePath, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              let pid = Int32(text), pid > 1 else { return nil }
+        return pid
     }
 
     static func parseControlStatus(csv: String) -> BatteryControlStatus? {
@@ -398,7 +667,8 @@ actor SMCKit: ChargeBackend {
     private func batteryCommand(
         _ arguments: [String],
         timeout: TimeInterval = 30,
-        outputPolicy: BatteryCommandRunner.OutputPolicy = .capture
+        outputPolicy: BatteryCommandRunner.OutputPolicy = .capture,
+        descendantPolicy: BatteryCommandRunner.DescendantPolicy = .requireProcessGroupExit
     ) async throws -> BatteryCommandResult {
         try await runProcess(
             executable: "/bin/bash",
@@ -406,7 +676,8 @@ actor SMCKit: ChargeBackend {
             environment: batteryEnvironment,
             label: "battery \(arguments.joined(separator: " "))",
             timeout: timeout,
-            outputPolicy: outputPolicy
+            outputPolicy: outputPolicy,
+            descendantPolicy: descendantPolicy
         )
     }
 
@@ -477,7 +748,8 @@ actor SMCKit: ChargeBackend {
         environment: [String: String]? = nil,
         label: String,
         timeout: TimeInterval = 30,
-        outputPolicy: BatteryCommandRunner.OutputPolicy = .capture
+        outputPolicy: BatteryCommandRunner.OutputPolicy = .capture,
+        descendantPolicy: BatteryCommandRunner.DescendantPolicy = .requireProcessGroupExit
     ) async throws -> BatteryCommandResult {
         let result: BatteryCommandResult
         do {
@@ -488,7 +760,8 @@ actor SMCKit: ChargeBackend {
                     environment: environment,
                     label: label,
                     timeout: timeout,
-                    outputPolicy: outputPolicy
+                    outputPolicy: outputPolicy,
+                    descendantPolicy: descendantPolicy
                 )
             )
         } catch is CancellationError {

@@ -104,6 +104,8 @@ struct MenuBarLabel: View {
             return "arrow.down.circle.fill"
         case .notConnected:
             return "battery.25percent"
+        case .unknown:
+            return "questionmark.circle"
         }
     }
 }
