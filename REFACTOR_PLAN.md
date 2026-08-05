@@ -104,15 +104,16 @@ BatteryHistory(inMemory: true)
 
 #### 책임
 
-- 한 번에 허용되는 명령을 직렬 실행한다.
-- 단발성 명령과 장기 실행 명령을 구분한다.
+- 단발성 명령 실행과 장기 실행 명령의 시작을 하나의 FIFO 큐에서 직렬화한다.
+- 장기 실행 프로세스가 동작 중이어도 상태 조회는 허용하되, 새 프로세스의 시작 순서는 실행기가 통제한다.
 - 프로세스 종료까지 기다린다.
-- exit code, stdout과 stderr를 수집한다.
-- 명령별 실제 제한시간을 적용한다.
-- timeout 시 정상 종료를 시도하고, 정해진 시간 안에 종료되지 않으면 해당 프로세스만 강제 종료한다.
+- exit code, stdout과 stderr를 수집하고 출력 크기를 제한한다.
+- wall clock 변경의 영향을 받지 않는 monotonic clock으로 명령별 실제 제한시간을 적용한다.
+- 각 명령을 독립 process group으로 시작한다.
+- timeout 또는 취소 시 process group 전체에 정상 종료를 요청하고, 정해진 시간 안에 종료되지 않으면 group 전체를 강제 종료한다.
 - Task 취소를 하위 프로세스 취소로 전달한다.
 - 실행 중인 프로세스와 명령 ID를 추적한다.
-- 제어 명령 종료 후 status 명령으로 실제 상태를 확인한다.
+- 취소나 정리 실패 시 실행기를 terminal failure 상태로 전환해 이후 명령을 거부한다.
 - 호출자에게 단순 Boolean이 아니라 구체적인 결과를 반환한다.
 
 ```swift
@@ -124,7 +125,14 @@ struct BatteryCommandResult {
 }
 ```
 
-`BatteryCommandRunner`는 프로세스 사실만 반환한다. `SMCKit`의 의미 단위 명령은 이 결과를 검사한 뒤 별도의 status 명령을 실행하고 `BatteryControlStatus`가 기대 상태와 일치하지 않으면 실패시킨다. 프로세스 계층이 CLI 출력 형식이나 충전 정책을 알게 만들지 않는다.
+`BatteryCommandRunner`는 프로세스 사실만 반환한다. `SMCKit`의 의미 단위 명령은 제어 명령 시작부터 결과 검사와 후속 status 검증까지 하나의 operation gate 안에서 실행한다. `BatteryControlStatus`가 기대 상태와 일치하지 않으면 실패시키며, 장기 실행 명령의 시작 검증이 실패하면 시작한 process group을 반드시 정리한다. 프로세스 계층이 CLI 출력 형식이나 충전 정책을 알게 만들지 않는다.
+
+초기화가 완료되기 전에 사용자가 제어 명령을 시작할 수 있으면 초기 maintain과 사용자 요청이 경쟁한다. 따라서 원래 lifecycle 단계에서 다룰 readiness gate의 최소 부분을 이 단계로 당긴다.
+
+- 초기 CLI 상태 조회와 최초 maintain 검증이 끝날 때까지 제어 UI를 비활성화한다.
+- 초기화 실패를 별도 readiness 상태로 보존하고 성공한 것처럼 제어를 열지 않는다.
+- 일반 종료에서는 persistent maintain을 중단하지 않는다.
+- 현재 CLI가 중단 결과를 신뢰성 있게 관찰할 수 없는 `stopMaintain` API는 노출하지 않는다. 명시적인 `Disable BatteryGuard Control`은 3.4에서 검증 가능한 상태 정의와 함께 구현한다.
 
 #### 명령 성공 규칙
 
@@ -132,6 +140,7 @@ struct BatteryCommandResult {
 - exit code가 성공이어도 기대 상태가 확인되지 않으면 제어 명령은 성공이 아니다.
 - maintain 제한 변경은 최초 실행뿐 아니라 매번 변경 후 확인한다.
 - timeout, Task 취소, 비정상 종료와 상태 검증 실패를 서로 다른 오류로 보존한다.
+- maintain처럼 stdout을 버리는 명령도 실패 진단용 stderr는 보존한다.
 
 #### 이유
 
@@ -142,8 +151,19 @@ struct BatteryCommandResult {
 - 모든 배터리 CLI 호출이 명령 실행기를 통과한다.
 - 오류 메시지와 stderr가 사라지지 않는다.
 - timeout 후 고아 프로세스가 남지 않는다.
+- timeout과 취소 후 명령이 만든 자식 프로세스도 남지 않는다.
+- 단발성 명령과 장기 실행 시작의 FIFO 순서가 보장된다.
+- 제어 명령과 후속 status 검증 사이에 다른 제어 명령이 끼어들지 않는다.
+- 장기 실행 시작 후 status 조회 또는 파싱이 실패하면 시작한 process group이 정리된다.
+- 초기화와 최초 maintain 검증이 끝나기 전에는 사용자 제어가 실행되지 않는다.
 - UI는 상태 검증이 끝난 뒤에만 성공 상태로 전환된다.
 - 명령 실행기 테스트는 임시 fixture executable만 사용한다.
+
+#### 이후 단계에 미치는 영향
+
+- 3.3의 단일 상태 모델 도입 순서와 범위는 바뀌지 않는다. readiness는 충전 모드의 대체물이 아니라 초기화 경계다.
+- 3.4의 시작/종료 정책 중 초기화 readiness gate만 선행 구현한다. launch/wake/crash reconciliation과 명시적인 제어 해제 기능은 그대로 3.4에서 구현한다.
+- process group, 원자적 검증, stderr와 출력 상한 관련 자동 테스트는 3.8에서 기다리지 않고 이 단계의 회귀 테스트로 당긴다. 3.8은 전체 상태 전이와 실제 하드웨어 검증을 계속 담당한다.
 
 ### 3.3 단일 충전 상태 모델 도입
 
@@ -168,6 +188,8 @@ enum ChargeMode: Equatable {
 - UI용 Boolean은 상태에서 계산하며 별도로 저장하지 않는다.
 - 각 비동기 작업에 operation ID 또는 generation을 부여한다.
 - 오래된 비동기 완료는 더 새로운 사용자 요청의 상태를 덮어쓸 수 없다.
+- `ChargeController`, `BatteryMonitor`, `UserSettings`처럼 UI가 소유하는 공유 observable 상태의 main-actor 격리를 명시한다.
+- `BatteryHistory`는 Core Data context의 queue 경계를 지키고, Swift strict-concurrency 검사에서 새 경고를 만들지 않도록 호출 경계를 정리한다.
 - 명령 실행 중 새로운 요청을 거부할지, 취소할지, 합칠지를 기능별로 명시한다.
 - 실패 시 무조건 `idle`로 숨기지 않고 원인과 마지막 확인 상태를 보존한다.
 - 앱이 기대한 상태와 CLI가 보고한 상태가 다르면 실제 확인 상태를 우선하고 drift를 기록한다.
@@ -182,6 +204,7 @@ enum ChargeMode: Equatable {
 - Maintain, Top Up, Discharge와 Heat Protection이 동시에 활성 상태로 표현될 수 없다.
 - 오래된 명령 완료가 최신 상태를 변경하지 않는다.
 - 모든 허용 전이와 거부 전이에 단위 테스트가 있다.
+- 상태 계층의 actor 격리가 코드에 표현되고 strict-concurrency 경고를 다음 단계로 새로 전파하지 않는다.
 
 ### 3.4 시작, 종료, 크래시와 절전 정책 구현
 
@@ -467,7 +490,7 @@ enum ChargeMode: Equatable {
 각 단계는 기존 사용자 변경을 섞지 않은 독립 커밋으로 저장한다.
 
 1. 즉시 안전 가드, 충돌 차단, 가짜 backend와 안전한 테스트 저장소
-2. `BatteryCommandRunner`와 프로세스 결과 모델
+2. `BatteryCommandRunner`, process group 정리, 원자적 상태 검증과 초기화 readiness gate
 3. 단일 충전 상태와 reconciliation
 4. lifecycle, Heat Protection, Top Up과 Discharge
 5. CLI preflight와 native Charge Limit 충돌 처리
