@@ -24,7 +24,7 @@ IOKit readings ---+                    result + verified CLI status
 - IOKit is the source of truth for measurements; verified CLI status is the source of truth for charge control; UI state is derived from both.
 - Represent charge control with one mutually exclusive state enum, not independent booleans.
 - Use operation IDs/generations so stale async completions cannot overwrite newer intent.
-- Keep abstractions minimal: start with `ChargeBackend` and `BatteryHistoryStore`; add more only when justified by testing or multiple implementations.
+- Keep abstractions minimal: use `ChargeBackend` plus an in-memory Core Data configuration; add a `BatteryHistoryStore` protocol only if a second implementation becomes necessary.
 - Reuse existing views, IOKit monitoring, and history code. Replace unsafe process/state internals incrementally; do not rewrite the app wholesale.
 
 ## Hardware and Command Safety
@@ -74,14 +74,13 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 
 ## Implementation Order
 
-1. Patch immediate safety issues and conflicting controls.
-2. Introduce safe test seams and remove default-test side effects.
-3. Centralize process execution in `BatteryCommandRunner`.
-4. Introduce the single reconciled charge state model.
-5. Rebuild lifecycle, Heat Protection, Top Up, and Discharge on that model.
-6. Add CLI preflight and native Charge Limit conflict handling.
-7. Fix monitoring/history accuracy, diagnostics, and remaining UI truthfulness.
-8. Run controlled, opt-in hardware validation.
+1. Patch immediate safety issues, conflicting controls, and unsafe default-test side effects.
+2. Centralize process execution in `BatteryCommandRunner` and return structured results.
+3. Introduce the single reconciled charge state model.
+4. Rebuild lifecycle, Heat Protection, Top Up, and Discharge on that model.
+5. Add CLI preflight and native Charge Limit conflict handling.
+6. Fix monitoring/history accuracy, diagnostics, and remaining UI truthfulness.
+7. Complete automated coverage and run controlled, opt-in hardware validation.
 
 ## Reject a Change If
 

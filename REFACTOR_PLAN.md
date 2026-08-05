@@ -30,7 +30,7 @@ IOKit readings ---+                    result + verified CLI status
 
 ## 3. 단계별 구현 계획
 
-### 3.1 즉시 위험한 동작 봉합
+### 3.1 즉시 위험한 동작 봉합과 안전한 테스트 기반
 
 대규모 리팩터링보다 먼저 현재 코드가 실제 배터리에 잘못된 명령을 전달할 수 있는 경로를 차단한다.
 
@@ -47,6 +47,10 @@ IOKit readings ---+                    result + verified CLI status
 - 명령 이름 문자열을 광범위하게 찾는 `pkill -f` 방식을 제거한다.
 - 명령 실패를 무시하지 않고 최소한 UI 오류와 로컬 진단 로그로 남긴다.
 - 누락된 온도, 건강도, 전류 값을 `0`, `100%` 같은 정상적인 측정값으로 위장하지 않는다.
+- `ChargeController`가 주입된 `ChargeBackend`를 사용하게 하고 테스트는 가짜 backend만 사용한다.
+- 이력 테스트는 인메모리 Core Data store를 사용한다. 별도 구현이 실제로 필요해지기 전에는 `BatteryHistoryStore` 프로토콜을 추가하지 않는다.
+- 로그인 항목은 작은 래퍼로 격리하고 기본 테스트에서 실제 `SMAppService`를 변경하지 않는다.
+- 앱이 XCTest host로 시작될 때 실제 CLI, SMC, 로그인 항목과 운영 이력을 초기화하지 않는다.
 
 #### 이유
 
@@ -59,14 +63,16 @@ IOKit readings ---+                    result + verified CLI status
 - 명령 실패 후 UI가 성공한 것처럼 표시되지 않는다.
 - 잘못된 저장값이 실제 CLI 인자로 전달되지 않는다.
 - LED 제어를 해제하면 자동 동작으로 복원된다.
+- 기본 테스트 전체를 실행해도 실제 충전 상태, 로그인 항목과 사용자 이력이 변하지 않는다.
+- 성공, 실패, timeout, 취소와 오래된 완료를 fake backend 또는 fixture executable로 재현할 수 있다.
 
-### 3.2 실제 하드웨어를 건드리지 않는 테스트 구조 도입
+#### 3.1에 통합된 테스트 경계
 
-1인용 앱에 불필요한 서비스 계층을 만들지 않고, 우선 두 개의 경계만 분리한다.
+1인용 앱에 불필요한 서비스 계층을 만들지 않는다. 1단계에서 다음 경계만 도입했고 이후 단계의 안전한 리팩터링 기반으로 계속 사용한다.
 
 ```swift
 protocol ChargeBackend
-protocol BatteryHistoryStore
+BatteryHistory(inMemory: true)
 ```
 
 로그인 항목 동작을 테스트할 필요가 있으면 `SMAppService`를 감싸는 작은 래퍼를 추가한다. Clock, LED, 설정 저장소 등을 처음부터 모두 프로토콜로 만들지 않는다.
@@ -92,7 +98,7 @@ protocol BatteryHistoryStore
 - 성공뿐 아니라 실패, timeout과 취소 상태를 가짜 backend로 재현할 수 있다.
 - 테스트 순서와 현재 Mac의 배터리 상태가 결과에 영향을 주지 않는다.
 
-### 3.3 `BatteryCommandRunner`로 CLI 실행 통합
+### 3.2 `BatteryCommandRunner`로 CLI 실행 통합
 
 모든 CLI 실행을 하나의 actor에 모아 명령 수명주기와 동시성을 통제한다.
 
@@ -115,9 +121,10 @@ struct BatteryCommandResult {
     let stdout: String
     let stderr: String
     let termination: TerminationReason
-    let verifiedStatus: BatteryControlStatus?
 }
 ```
+
+`BatteryCommandRunner`는 프로세스 사실만 반환한다. `SMCKit`의 의미 단위 명령은 이 결과를 검사한 뒤 별도의 status 명령을 실행하고 `BatteryControlStatus`가 기대 상태와 일치하지 않으면 실패시킨다. 프로세스 계층이 CLI 출력 형식이나 충전 정책을 알게 만들지 않는다.
 
 #### 명령 성공 규칙
 
@@ -138,7 +145,7 @@ struct BatteryCommandResult {
 - UI는 상태 검증이 끝난 뒤에만 성공 상태로 전환된다.
 - 명령 실행기 테스트는 임시 fixture executable만 사용한다.
 
-### 3.4 단일 충전 상태 모델 도입
+### 3.3 단일 충전 상태 모델 도입
 
 여러 Boolean이 독립적으로 움직이는 현재 구조를 하나의 명시적인 상태로 교체한다. 별도의 Redux, 이벤트 버스나 범용 reducer 프레임워크는 도입하지 않는다.
 
@@ -176,7 +183,7 @@ enum ChargeMode: Equatable {
 - 오래된 명령 완료가 최신 상태를 변경하지 않는다.
 - 모든 허용 전이와 거부 전이에 단위 테스트가 있다.
 
-### 3.5 시작, 종료, 크래시와 절전 정책 구현
+### 3.4 시작, 종료, 크래시와 절전 정책 구현
 
 앱의 메모리 상태가 아니라 실제 CLI와 배터리 상태를 기준으로 복구한다.
 
@@ -221,7 +228,7 @@ enum ChargeMode: Equatable {
 - 외부 CLI 변경을 영구적으로 덮어쓰거나 무시하지 않는다.
 - 상태를 확인할 수 없을 때 UI가 확정적인 성공 상태를 표시하지 않는다.
 
-### 3.6 Heat Protection, Top Up과 Discharge 재구현
+### 3.5 Heat Protection, Top Up과 Discharge 재구현
 
 각 기능을 독립 Boolean과 임시 명령 조합이 아니라 단일 상태 모델 위의 전이로 구현한다.
 
@@ -267,7 +274,7 @@ enum ChargeMode: Equatable {
 - 취소, timeout과 명령 실패 후 복귀 상태가 테스트된다.
 - 기능 종료 후 실제 상태 검증이 수행된다.
 
-### 3.7 외부 CLI 사전 검사와 macOS 기본 기능 충돌 방지
+### 3.6 외부 CLI 사전 검사와 macOS 기본 기능 충돌 방지
 
 자동 설치기나 거대한 업데이트 시스템은 만들지 않는다. 다만 root 권한으로 동작할 수 있는 외부 실행 파일을 단순히 존재 여부만으로 신뢰하지 않는다.
 
@@ -306,7 +313,7 @@ enum ChargeMode: Equatable {
 - preflight 실패가 충전 명령 실패와 구분되어 표시된다.
 - 두 충전 제어 시스템을 동시에 사용하는 위험이 사용자에게 명확하다.
 
-### 3.8 모니터링, 이력과 UI 정확성 개선
+### 3.7 모니터링, 이력과 UI 정확성 개선
 
 안전성과 제어 상태가 안정된 뒤 측정, 저장과 표시의 정확성을 정리한다.
 
@@ -351,7 +358,7 @@ enum ChargeMode: Equatable {
 - UI 버전과 로그인 항목 상태가 시스템의 실제 상태를 반영한다.
 - 최근 명령과 실패 원인을 로컬에서 확인할 수 있다.
 
-### 3.9 자동 테스트와 실제 하드웨어 검증
+### 3.8 자동 테스트와 실제 하드웨어 검증
 
 자동 테스트와 실제 하드웨어 검증을 명확히 분리한다.
 
@@ -459,14 +466,13 @@ enum ChargeMode: Equatable {
 
 각 단계는 기존 사용자 변경을 섞지 않은 독립 커밋으로 저장한다.
 
-1. 즉시 안전 가드와 충돌 차단
-2. 가짜 backend와 안전한 테스트 저장소
-3. `BatteryCommandRunner`와 프로세스 결과 모델
-4. 단일 충전 상태와 reconciliation
-5. lifecycle, Heat Protection, Top Up과 Discharge
-6. CLI preflight와 native Charge Limit 충돌 처리
-7. 모니터링, 이력, UI 정확성과 로컬 진단 로그
-8. 자동 테스트 완료와 통제된 하드웨어 검증 기록
+1. 즉시 안전 가드, 충돌 차단, 가짜 backend와 안전한 테스트 저장소
+2. `BatteryCommandRunner`와 프로세스 결과 모델
+3. 단일 충전 상태와 reconciliation
+4. lifecycle, Heat Protection, Top Up과 Discharge
+5. CLI preflight와 native Charge Limit 충돌 처리
+6. 모니터링, 이력, UI 정확성과 로컬 진단 로그
+7. 자동 테스트 완료와 통제된 하드웨어 검증 기록
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
