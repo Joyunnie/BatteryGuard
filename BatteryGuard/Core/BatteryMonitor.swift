@@ -137,9 +137,10 @@ final class BatteryMonitor: ObservableObject {
             return Double(rawValue) / 10.0 - 273.15
         }
 
-        // Amperage: IOKit이 signed/unsigned 혼용으로 반환할 수 있음.
-        // NSNumber.intValue가 부호 변환을 올바르게 처리.
-        let amperage = (dict["Amperage"] as? NSNumber)?.intValue
+        // Amperage is documented as mA, but IOKit can bridge a negative value
+        // through an unsigned CFNumber representation. Reject implausible
+        // values instead of displaying a wrapped integer as a real current.
+        let amperage = Self.normalizedAmperage(dict["Amperage"] as? NSNumber)
 
         let voltage = dict["Voltage"] as? Int ?? 0
         let timeToFull = dict["AvgTimeToFull"] as? Int ?? -1
@@ -174,6 +175,29 @@ final class BatteryMonitor: ObservableObject {
             isPresent: batteryPresent,
             serialNumber: serialNumber
         )
+    }
+
+    nonisolated static func normalizedAmperage(_ number: NSNumber?) -> Int? {
+        guard let number else { return nil }
+        let plausibleRange: ClosedRange<Int64> = -50_000...50_000
+        let signedValue = number.int64Value
+        if plausibleRange.contains(signedValue) { return Int(signedValue) }
+
+        let unsignedValue = number.uint64Value
+        let bridgedType = String(cString: number.objCType)
+        let recovered: Int64?
+        switch bridgedType {
+        case "S":
+            recovered = Int64(Int16(bitPattern: UInt16(truncatingIfNeeded: unsignedValue)))
+        case "I", "L":
+            recovered = Int64(Int32(bitPattern: UInt32(truncatingIfNeeded: unsignedValue)))
+        case "Q":
+            recovered = Int64(bitPattern: unsignedValue)
+        default:
+            recovered = nil
+        }
+        guard let recovered, plausibleRange.contains(recovered) else { return nil }
+        return Int(recovered)
     }
 
     // MARK: - 모니터링 시작/중지

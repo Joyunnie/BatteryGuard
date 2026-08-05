@@ -28,6 +28,28 @@ struct MainAppLaunchAtLoginService: LaunchAtLoginManaging {
     func unregister() throws { try SMAppService.mainApp.unregister() }
 }
 
+enum LaunchAtLoginState: Equatable {
+    case disabled
+    case enabled
+    case requiresApproval
+    case unavailable
+    case unknown(Int)
+
+    init(_ status: SMAppService.Status) {
+        switch status {
+        case .notRegistered: self = .disabled
+        case .enabled: self = .enabled
+        case .requiresApproval: self = .requiresApproval
+        case .notFound: self = .unavailable
+        @unknown default: self = .unknown(status.rawValue)
+        }
+    }
+
+    var isRequested: Bool {
+        self == .enabled || self == .requiresApproval
+    }
+}
+
 @MainActor
 final class UserSettings: ObservableObject {
     static let shared = UserSettings()
@@ -49,36 +71,14 @@ final class UserSettings: ObservableObject {
     private var chargeLimitStorage: Int
     private var heatProtectionThresholdStorage: Double
 
-    /// SMAppService에서 직접 읽기 — UserDefaults에 저장하지 않음
-    private var isUpdatingLaunchAtLogin = false
-    @Published var launchAtLogin: Bool {
-        didSet {
-            guard !isUpdatingLaunchAtLogin, launchAtLogin != oldValue else { return }
-            let service = launchAtLoginService
-            let action = launchAtLogin ? "register" : "unregister"
-            print("[LaunchAtLogin] \(action) — status BEFORE: \(service.status.debugLabel)")
-            do {
-                if launchAtLogin {
-                    try service.register()
-                } else {
-                    try service.unregister()
-                }
-                print("[LaunchAtLogin] \(action) returned — status AFTER: \(service.status.debugLabel)")
-                // register() can return without throwing yet still not take effect
-                let actuallyEnabled = service.status == .enabled
-                if launchAtLogin != actuallyEnabled {
-                    print("[LaunchAtLogin] ⚠️ status mismatch: toggled \(launchAtLogin) but system reports \(service.status.debugLabel)")
-                    isUpdatingLaunchAtLogin = true
-                    launchAtLogin = actuallyEnabled
-                    isUpdatingLaunchAtLogin = false
-                }
-            } catch {
-                print("[LaunchAtLogin] \(action) failed: \(error)")
-                isUpdatingLaunchAtLogin = true
-                launchAtLogin = service.status == .enabled
-                isUpdatingLaunchAtLogin = false
-            }
-        }
+    @Published private(set) var launchAtLoginState: LaunchAtLoginState
+    @Published private(set) var launchAtLoginError: String?
+
+    /// Compatibility surface for bindings and tests. The system status remains
+    /// the source of truth; requiresApproval is requested but not active.
+    var launchAtLogin: Bool {
+        get { launchAtLoginState.isRequested }
+        set { setLaunchAtLogin(newValue) }
     }
 
     var chargeLimit: Int {
@@ -124,11 +124,35 @@ final class UserSettings: ObservableObject {
 
         self.chargeLimitStorage = Self.validatedChargeLimit(defaults.integer(forKey: "chargeLimit"))
         self.heatProtectionThresholdStorage = Self.validatedHeatProtectionThreshold(defaults.double(forKey: "heatThreshold"))
-        self.launchAtLogin = launchAtLoginService.status == .enabled
+        self.launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
         self.heatProtectionEnabled = defaults.bool(forKey: "heatProtection")
         self.controlMagSafeLED = defaults.bool(forKey: "controlMagSafe")
 
         defaults.set(chargeLimitStorage, forKey: "chargeLimit")
         defaults.set(heatProtectionThresholdStorage, forKey: "heatThreshold")
+    }
+
+    func setLaunchAtLogin(_ requested: Bool) {
+        guard requested != launchAtLoginState.isRequested else { return }
+        let action = requested ? "register" : "unregister"
+        print("[LaunchAtLogin] \(action) — status BEFORE: \(launchAtLoginService.status.debugLabel)")
+        do {
+            if requested {
+                try launchAtLoginService.register()
+            } else {
+                try launchAtLoginService.unregister()
+            }
+            launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
+            launchAtLoginError = nil
+            print("[LaunchAtLogin] \(action) returned — status AFTER: \(launchAtLoginService.status.debugLabel)")
+        } catch {
+            launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
+            launchAtLoginError = error.localizedDescription
+            print("[LaunchAtLogin] \(action) failed: \(error.localizedDescription)")
+        }
+    }
+
+    func refreshLaunchAtLoginStatus() {
+        launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
     }
 }

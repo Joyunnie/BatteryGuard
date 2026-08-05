@@ -78,7 +78,7 @@ enum ChargeMode: Equatable {
 
 @MainActor
 final class ChargeController: ObservableObject {
-    static let shared = ChargeController()
+    static let shared = ChargeController(diagnostics: .shared)
     private static let shutdownCleanupTimeout: TimeInterval = 8
 
     private enum ShutdownControlPolicy: Sendable {
@@ -98,6 +98,7 @@ final class ChargeController: ObservableObject {
     private let backend: ChargeBackend
     private let monitor: BatteryMonitor
     private let settings: UserSettings
+    private let diagnostics: DiagnosticLog
 
     @Published private(set) var mode: ChargeMode = .idle
     @Published private(set) var lastError: String?
@@ -186,13 +187,15 @@ final class ChargeController: ObservableObject {
         monitor: BatteryMonitor? = nil,
         settings: UserSettings? = nil,
         initialReadiness: ChargeControllerReadiness = .initializing,
-        initialMode: ChargeMode? = nil
+        initialMode: ChargeMode? = nil,
+        diagnostics: DiagnosticLog = .disabled
     ) {
         let resolvedMonitor = monitor ?? BatteryMonitor.shared
         let resolvedSettings = settings ?? UserSettings.shared
         self.backend = backend
         self.monitor = resolvedMonitor
         self.settings = resolvedSettings
+        self.diagnostics = diagnostics
         self.readiness = initialReadiness
         self.mode = initialMode ?? (initialReadiness == .ready
             ? .maintaining(limit: UserSettings.validatedChargeLimit(resolvedSettings.chargeLimit))
@@ -230,7 +233,7 @@ final class ChargeController: ObservableObject {
                     settings.chargeLimit = desiredLimit
                 } else {
                     if temperature == nil {
-                        sensorError = "온도를 읽을 수 없어 Heat Protection이 degraded 상태입니다."
+                        setSensorError("온도를 읽을 수 없어 Heat Protection이 degraded 상태입니다.")
                     }
                     try await backend.cancelLongRunningOperation()
                     try await backend.disableCharging()
@@ -253,6 +256,12 @@ final class ChargeController: ObservableObject {
                 cleanupAfterFailedInitialization()
                 mode = .failed(previous: mode.restorableMode, message: error.localizedDescription, controlsBlocked: true)
                 readiness = .failed(error.localizedDescription)
+                recordDiagnostic(
+                    category: .lifecycle,
+                    operation: "initialize",
+                    error: error,
+                    stateAfter: String(describing: readiness)
+                )
             }
             throw error
         }
@@ -303,6 +312,7 @@ final class ChargeController: ObservableObject {
         let backend = self.backend
         let magSafeLED = self.magSafeLED
         let logger = self.logger
+        let diagnostics = self.diagnostics
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
             do {
@@ -328,11 +338,28 @@ final class ChargeController: ObservableObject {
                 try await magSafeLED.shutdown(generation: shutdownLEDGeneration)
             } catch {
                 logger.error("Shutdown cleanup failed: \(error.localizedDescription, privacy: .public)")
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .lifecycle,
+                        operation: "shutdown cleanup",
+                        termination: "failed",
+                        stderrSummary: error.localizedDescription
+                    )
+                )
             }
             semaphore.signal()
         }
         if semaphore.wait(timeout: .now() + Self.shutdownCleanupTimeout) == .timedOut {
             logger.error("Shutdown cleanup timed out")
+            Task {
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .lifecycle,
+                        operation: "shutdown cleanup",
+                        termination: "timedOut"
+                    )
+                )
+            }
         }
     }
 
@@ -369,6 +396,7 @@ final class ChargeController: ObservableObject {
 
         operationGeneration &+= 1
         let operationID = operationGeneration
+        let stateBefore = String(describing: mode)
         activeOperationID = operationID
         mode = .transitioning(transition)
         let logger = self.logger
@@ -400,6 +428,14 @@ final class ChargeController: ObservableObject {
                 }
             }
             self.refreshDisplayedError()
+            self.recordDiagnostic(
+                category: .control,
+                operationID: String(operationID),
+                operation: operation,
+                error: result.failure,
+                stateBefore: stateBefore,
+                stateAfter: String(describing: self.mode)
+            )
             completion?(result)
         }
         return true
@@ -443,7 +479,7 @@ final class ChargeController: ObservableObject {
 
     private func updateDisplayState() {
         guard let info = monitor.batteryInfo else {
-            sensorError = "배터리 상태를 읽을 수 없습니다."
+            setSensorError("배터리 상태를 읽을 수 없습니다.")
             refreshDisplayedError()
             return
         }
@@ -454,7 +490,7 @@ final class ChargeController: ObservableObject {
         if settings.heatProtectionEnabled {
             evaluateHeatProtection(using: info)
         } else {
-            sensorError = nil
+            clearSensorError()
             if case .heatBlocked(let previous) = mode {
                 restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
             } else if case .failed(let previous?, _, true) = mode {
@@ -520,7 +556,7 @@ final class ChargeController: ObservableObject {
         let temperature = measuredTemperature(using: info)
         lastTemperature = temperature
         guard let temperature else {
-            sensorError = "온도를 읽을 수 없어 Heat Protection이 degraded 상태입니다."
+            setSensorError("온도를 읽을 수 없어 Heat Protection이 degraded 상태입니다.")
             refreshDisplayedError()
             if shouldAttemptHeatProtection {
                 enterHeatProtection(previous: mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit))
@@ -528,7 +564,7 @@ final class ChargeController: ObservableObject {
             return
         }
 
-        sensorError = nil
+        clearSensorError()
         refreshDisplayedError()
         let threshold = settings.heatProtectionThreshold
         if temperature > threshold {
@@ -940,10 +976,49 @@ final class ChargeController: ObservableObject {
     private func recordLEDError(_ error: Error) {
         ledError = "MagSafe LED 제어 실패: \(error.localizedDescription)"
         logger.error("MagSafe LED failure: \(error.localizedDescription, privacy: .public)")
+        recordDiagnostic(category: .control, operation: "MagSafe LED", error: error)
         refreshDisplayedError()
+    }
+
+    private func setSensorError(_ message: String) {
+        guard sensorError != message else { return }
+        sensorError = message
+        recordDiagnostic(category: .sensor, operation: message)
+    }
+
+    private func clearSensorError() {
+        sensorError = nil
+    }
+
+    private func recordDiagnostic(
+        category: DiagnosticCategory,
+        operationID: String? = nil,
+        operation: String,
+        error: Error? = nil,
+        stateBefore: String? = nil,
+        stateAfter: String? = nil
+    ) {
+        let diagnostics = diagnostics
+        let event = DiagnosticEvent(
+            category: category,
+            operationID: operationID,
+            operation: operation,
+            termination: error == nil ? "succeeded" : "failed",
+            stderrSummary: error?.localizedDescription,
+            stateBefore: stateBefore,
+            stateAfter: stateAfter
+        )
+        Task { await diagnostics.record(event) }
     }
 
     private func refreshDisplayedError() {
         lastError = sensorError ?? commandError ?? ledError
+    }
+}
+
+private extension Result where Success == Void, Failure == Error {
+    var failure: Error? {
+        guard case .failure(let error) = self else { return nil }
+        return error
     }
 }

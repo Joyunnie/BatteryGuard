@@ -12,6 +12,23 @@ private func makeTestDefaults() -> UserDefaults {
     return defaults
 }
 
+private final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
+
+    func now() -> Date {
+        lock.withLock { value }
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.withLock { value = value.addingTimeInterval(interval) }
+    }
+}
+
 private func shellQuote(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
 }
@@ -28,12 +45,13 @@ private func makeExecutableFixture(_ contents: String) throws -> URL {
 
 private final class FakeLaunchAtLoginService: LaunchAtLoginManaging {
     var status: SMAppService.Status = .notRegistered
+    var statusAfterRegister: SMAppService.Status = .enabled
     var registerError: Error?
     var unregisterError: Error?
 
     func register() throws {
         if let registerError { throw registerError }
-        status = .enabled
+        status = statusAfterRegister
     }
 
     func unregister() throws {
@@ -312,6 +330,18 @@ final class UserSettingsTests: XCTestCase {
 
         settings.launchAtLogin = true
         XCTAssertFalse(settings.launchAtLogin)
+        XCTAssertNotNil(settings.launchAtLoginError)
+    }
+
+    func testLaunchAtLoginPreservesRequiresApprovalState() {
+        let service = FakeLaunchAtLoginService()
+        service.statusAfterRegister = .requiresApproval
+        let settings = UserSettings(defaults: makeTestDefaults(), launchAtLoginService: service)
+
+        settings.launchAtLogin = true
+
+        XCTAssertTrue(settings.launchAtLogin)
+        XCTAssertEqual(settings.launchAtLoginState, .requiresApproval)
     }
 }
 
@@ -1000,6 +1030,77 @@ final class BatteryValueTests: XCTestCase {
         XCTAssertTrue(error.localizedDescription.contains("42"))
         XCTAssertTrue(error.localizedDescription.contains("permission denied"))
     }
+
+    func testAmperageNormalizationPreservesDirectionAndRejectsImplausibleValues() {
+        XCTAssertEqual(BatteryMonitor.normalizedAmperage(NSNumber(value: 1_250)), 1_250)
+        XCTAssertEqual(BatteryMonitor.normalizedAmperage(NSNumber(value: -900)), -900)
+        XCTAssertEqual(
+            BatteryMonitor.normalizedAmperage(NSNumber(value: UInt64.max - 999)),
+            -1_000
+        )
+        XCTAssertNil(BatteryMonitor.normalizedAmperage(NSNumber(value: 100_000)))
+        XCTAssertEqual(BatteryDisplay.amperage(700), "+700 mA (충전)")
+        XCTAssertEqual(BatteryDisplay.amperage(-700), "-700 mA (방전)")
+        XCTAssertEqual(BatteryDisplay.amperage(nil), "알 수 없음")
+    }
+}
+
+final class DiagnosticLogTests: XCTestCase {
+    func testDiagnosticLogPersistsOnlyItsNewestHundredEvents() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-diagnostics-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 100)
+
+        for index in 0..<105 {
+            await log.record(
+                DiagnosticEvent(
+                    timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                    category: .control,
+                    operation: "operation-\(index)"
+                )
+            )
+        }
+
+        let events = await log.recentEvents()
+        XCTAssertEqual(events.count, 100)
+        XCTAssertEqual(events.first?.operation, "operation-5")
+        XCTAssertEqual(events.last?.operation, "operation-104")
+
+        let reloaded = DiagnosticLog(fileURL: fileURL, capacity: 100)
+        let reloadedEvents = await reloaded.recentEvents()
+        XCTAssertEqual(reloadedEvents, events)
+    }
+
+    func testCommandRunnerRecordsStructuredFailureDetails() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-command-log-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 10)
+        let runner = BatteryCommandRunner(diagnostics: log)
+
+        let result = try await runner.run(
+            .init(
+                executable: "/bin/sh",
+                arguments: ["-c", "echo diagnostic-failure >&2; exit 7"],
+                label: "diagnostic fixture"
+            )
+        )
+        XCTAssertEqual(result.exitCode, 7)
+
+        let deadline = Date().addingTimeInterval(1)
+        var events: [DiagnosticEvent] = []
+        while Date() < deadline {
+            events = await log.recentEvents()
+            if !events.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(events.last?.operation, "diagnostic fixture")
+        XCTAssertEqual(events.last?.exitCode, 7)
+        XCTAssertEqual(events.last?.stderrSummary, "diagnostic-failure")
+    }
 }
 
 @MainActor
@@ -1014,6 +1115,92 @@ final class BatteryHistoryTests: XCTestCase {
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records.first?.chargePercent, 80)
         XCTAssertEqual(records.first?.chargeLimit, 80)
+    }
+
+    func testHistoryAddsHeartbeatForAnUnchangedInterval() async {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_000_000))
+        let history = BatteryHistory(
+            inMemory: true,
+            heartbeatInterval: 900,
+            now: { clock.now() }
+        )
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        history.record(chargePercent: 80, chargeLimit: 80)
+        clock.advance(by: 899)
+        history.record(chargePercent: 80, chargeLimit: 80)
+        XCTAssertEqual(history.fetchLast24Hours().count, 1)
+
+        clock.advance(by: 2)
+        history.record(chargePercent: 80, chargeLimit: 80)
+        XCTAssertEqual(history.fetchLast24Hours().count, 2)
+    }
+
+    func testDownsamplingNeverExceedsTheConfiguredLimitAndKeepsEndpoints() {
+        let records = (0..<1_003).map {
+            BatteryHistory.ChartRecord(
+                timestamp: Date(timeIntervalSince1970: TimeInterval($0)),
+                chargePercent: $0 % 101,
+                chargeLimit: 80
+            )
+        }
+
+        let sampled = BatteryHistory.downsample(records, maxPoints: 200)
+
+        XCTAssertEqual(sampled.count, 200)
+        XCTAssertEqual(sampled.first, records.first)
+        XCTAssertEqual(sampled.last, records.last)
+        XCTAssertTrue(BatteryHistory.downsample(records, maxPoints: 0).isEmpty)
+    }
+
+    func testPersistentStoreLoadFailureIsExposed() async throws {
+        let blockingFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-history-block-\(UUID().uuidString)")
+        try Data("not a directory".utf8).write(to: blockingFile)
+        defer { try? FileManager.default.removeItem(at: blockingFile) }
+
+        let history = BatteryHistory(storeURL: blockingFile.appendingPathComponent("history.sqlite"))
+        let deadline = Date().addingTimeInterval(2)
+        while history.lastError == nil, Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertNotNil(history.lastError)
+        XCTAssertTrue(history.fetchLast24Hours().isEmpty)
+    }
+
+    func testSaveAndFetchFailuresAreExposedAndLogged() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-history-log-\(UUID().uuidString)", isDirectory: true)
+        let log = DiagnosticLog(fileURL: directory.appendingPathComponent("Diagnostics.json"), capacity: 10)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let saveFailure = BatteryHistory(
+            inMemory: true,
+            diagnostics: log,
+            failureMessage: { operation in operation == .save ? "injected save failure" : nil }
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+        saveFailure.record(chargePercent: 80, chargeLimit: 80)
+        XCTAssertTrue(saveFailure.lastError?.contains("injected save failure") == true)
+
+        let fetchFailure = BatteryHistory(
+            inMemory: true,
+            diagnostics: log,
+            failureMessage: { operation in operation == .fetch ? "injected fetch failure" : nil }
+        )
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(fetchFailure.fetchLast24Hours().isEmpty)
+        XCTAssertTrue(fetchFailure.lastError?.contains("injected fetch failure") == true)
+
+        let deadline = Date().addingTimeInterval(1)
+        var events: [DiagnosticEvent] = []
+        while Date() < deadline {
+            events = await log.recentEvents()
+            if events.filter({ $0.category == .history }).count >= 2 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(events.filter { $0.category == .history }.count, 2)
     }
 }
 

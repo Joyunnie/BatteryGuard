@@ -2,6 +2,7 @@
 // 앱 진입점 + 메뉴바 아이콘
 
 import SwiftUI
+import AppKit
 
 @main
 struct BatteryGuardApp: App {
@@ -37,8 +38,10 @@ struct BatteryGuardApp: App {
 }
 
 // MARK: - AppDelegate
-class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var initializationTask: Task<Void, Never>?
+    private var windowCloseObserver: NSObjectProtocol?
 
     private var isRunningTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
@@ -51,6 +54,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // The unit-test bundle is app-hosted. Never let launching the test host
         // initialize real battery control, history, login items, or SMC writes.
         guard !isRunningTests else { return }
+
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.restoreAccessoryPolicyIfNeeded()
+            }
+        }
 
         initializationTask = Task { @MainActor in
             do {
@@ -75,7 +89,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isRunningTests else { return }
         initializationTask?.cancel()
         initializationTask = nil
+        if let windowCloseObserver {
+            NotificationCenter.default.removeObserver(windowCloseObserver)
+            self.windowCloseObserver = nil
+        }
         ChargeController.shared.shutdown()
+    }
+
+    private func restoreAccessoryPolicyIfNeeded() {
+        let hasVisibleAppWindow = NSApp.windows.contains {
+            $0.isVisible && $0.styleMask.contains(.titled) && !($0 is NSPanel)
+        }
+        if !hasVisibleAppWindow {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 }
 

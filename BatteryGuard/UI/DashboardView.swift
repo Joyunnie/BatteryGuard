@@ -8,6 +8,7 @@ struct DashboardView: View {
     @EnvironmentObject var monitor: BatteryMonitor
     @EnvironmentObject var settings: UserSettings
     @State private var historyRecords: [BatteryHistory.ChartRecord] = []
+    @State private var historyError: String?
 
     var body: some View {
         ScrollView {
@@ -25,9 +26,19 @@ struct DashboardView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear { historyRecords = BatteryHistory.shared.fetchLast24Hours() }
+        .onAppear {
+            refreshHistory()
+            Task { @MainActor in
+                do {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                } catch {
+                    return
+                }
+                refreshHistory()
+            }
+        }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
-            historyRecords = BatteryHistory.shared.fetchLast24Hours()
+            refreshHistory()
         }
     }
 
@@ -48,13 +59,13 @@ struct DashboardView: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         DetailRow(icon: "bolt.fill", label: "상태", value: controller.currentState.rawValue)
-                        DetailRow(icon: "thermometer", label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "N/A")
-                        DetailRow(icon: "waveform.path", label: "전류", value: info.amperage.map { "\($0) mA" } ?? "N/A")
+                        DetailRow(icon: "thermometer", label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "알 수 없음")
+                        DetailRow(icon: "waveform.path", label: "전류", value: BatteryDisplay.amperage(info.amperage))
                         DetailRow(icon: "bolt.batteryblock", label: "전압", value: "\(info.voltage) mV")
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        DetailRow(icon: "heart.fill", label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "N/A")
+                        DetailRow(icon: "heart.fill", label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "알 수 없음")
                         DetailRow(icon: "arrow.2.circlepath", label: "사이클", value: "\(info.cycleCount)")
                         DetailRow(icon: "cube.box", label: "용량", value: "\(info.maxCapacity)/\(info.designCapacity) mAh")
                         DetailRow(icon: "number", label: "시리얼", value: info.serialNumber)
@@ -74,7 +85,7 @@ struct DashboardView: View {
             VStack(spacing: 16) {
                 VStack(alignment: .leading) {
                     HStack {
-                        Text("Charge Limit")
+                        Text("충전 한도")
                         Spacer()
                         Text("\(controller.displayedChargeLimit)%")
                             .font(.system(.body, design: .monospaced))
@@ -108,7 +119,7 @@ struct DashboardView: View {
                         }
                     }) {
                         Label(
-                            controller.isTopUpActive ? "Top Up 취소" : "Top Up",
+                            controller.isTopUpActive ? "추가 충전 취소" : "추가 충전",
                             systemImage: "arrow.up.to.line"
                         )
                         .frame(maxWidth: .infinity)
@@ -172,7 +183,7 @@ struct DashboardView: View {
                         }
                         .frame(width: 100, height: 100)
                     } else {
-                        Text("건강도 N/A")
+                        Text("건강도 알 수 없음")
                             .foregroundColor(.secondary)
                             .frame(width: 100, height: 100)
                     }
@@ -193,12 +204,16 @@ struct DashboardView: View {
     // MARK: - Charge History Chart
     private var chargeHistoryCard: some View {
         GroupBox("충전 이력 (24시간)") {
-            if historyRecords.count < 2 {
+            if let error = historyError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            } else if historyRecords.count < 2 {
                 Text("데이터 수집 중...")
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 120)
             } else {
-                let sampled = downsample(historyRecords, maxPoints: 200)
+                let sampled = BatteryHistory.downsample(historyRecords, maxPoints: 200)
                 VStack(alignment: .leading, spacing: 4) {
                     Chart {
                         ForEach(sampled, id: \.timestamp) { record in
@@ -265,25 +280,25 @@ struct DashboardView: View {
         }
     }
 
-    private func downsample(_ records: [BatteryHistory.ChartRecord], maxPoints: Int) -> [BatteryHistory.ChartRecord] {
-        guard records.count > maxPoints else { return records }
-        let step = records.count / maxPoints
-        var result: [BatteryHistory.ChartRecord] = []
-        result.reserveCapacity(maxPoints + 1)
-        for i in stride(from: 0, to: records.count, by: step) {
-            result.append(records[i])
-        }
-        // Always include the last point for chart continuity
-        if let last = records.last, result.last?.timestamp != last.timestamp {
-            result.append(last)
-        }
-        return result
+    private func refreshHistory() {
+        let history = BatteryHistory.shared
+        historyRecords = history.fetchLast24Hours()
+        historyError = history.lastError
     }
 
     private func healthColor(_ percent: Double) -> Color {
         if percent >= 90 { return .green }
         if percent >= 80 { return .orange }
         return .red
+    }
+}
+
+enum BatteryDisplay {
+    static func amperage(_ value: Int?) -> String {
+        guard let value else { return "알 수 없음" }
+        if value > 0 { return "+\(value) mA (충전)" }
+        if value < 0 { return "\(value) mA (방전)" }
+        return "0 mA (대기)"
     }
 }
 

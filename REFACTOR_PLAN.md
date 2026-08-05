@@ -53,6 +53,28 @@
 - monitor/history 정확성, 로컬 순환 진단 로그, native Charge Limit 충돌, periodic Terminal drift reconciliation과 별도 disable-control UX는 아직 후속 범위다.
 - hardware checklist의 sleep/wake와 Terminal drift 항목은 해당 후속 구현 뒤 다시 수행한다.
 
+### 0.5 PR #3 완료 감사와 PR #4 범위 (2026-08-06)
+
+PR #3의 실제 diff, 51개 자동 테스트, strict-concurrency 결과와 하드웨어 기록을 본문의 완료 기준과 다시 대조했다.
+
+- 3.1, 3.2, 3.3과 3.5는 PR #3에서 완료됐다.
+- 3.4는 startup/quit/crash/wake reconciliation과 안전한 long-operation 정리가 완료됐다. 저빈도 periodic reconciliation, Terminal drift 사용자 표시와 별도 `Disable BatteryGuard Control`은 남아 있다.
+- 3.6의 privileged CLI preflight는 초기화보다 먼저 수행하도록 완료됐다. macOS native Charge Limit와의 제어 소유권 안내 및 충돌 처리는 남아 있다.
+- 3.7 중 unknown 건강도/온도/전류 optional 보존과 main-actor 경계는 PR #3에서 선행 완료됐다. 저장/fetch 오류 가시성, 이력 상한, heartbeat, 로그인 승인 상태, Bundle 버전, 화면 문구·activation policy와 로컬 순환 진단 로그는 남아 있다.
+- 3.8의 안전 관련 회귀 테스트 대부분과 실제 하드웨어 항목 1~7, 10은 PR #3에서 완료됐다. 새 이력/진단 실패 경로 테스트, sleep/wake와 Terminal drift 하드웨어 확인은 남아 있다.
+
+PR #4는 3.7의 남은 모니터링·이력·UI 정확성과 로컬 진단 로그만 다룬다. 제어 상태 머신을 다시 설계하거나 하드웨어 동작을 추가하지 않는다. native Charge Limit 소유권, periodic drift reconciliation, 명시적 제어 해제 UX와 그에 필요한 하드웨어 검증은 각각 다음 PR로 분리한다.
+
+### 0.6 PR #4 구현 및 자동 검증 결과
+
+- 전류의 signed/unsigned IOKit 표현을 정규화하고 비현실적인 값은 unknown으로 처리한다. UI에는 단위, 부호와 충전/방전 방향을 함께 표시한다.
+- 이력 store 준비 전 최신 샘플을 보류하고, 15분 heartbeat를 저장하며, Core Data load/save/fetch 실패를 UI와 로컬 진단 로그에 노출한다. 차트 downsampling은 첫/마지막 점을 보존하면서 정확히 200개 이하를 반환한다.
+- 로그인 항목은 disabled, enabled, requires approval, unavailable과 unknown을 구분하고 앱이 다시 활성화될 때 실제 시스템 상태를 갱신한다.
+- 앱 버전은 Bundle metadata에서 읽고, 주요 화면 문구를 한국어로 정리하며, 일반 창을 모두 닫으면 accessory activation policy로 복귀한다.
+- 최근 100건의 command/control/history/sensor/lifecycle 이벤트를 `Application Support/BatteryGuard/Diagnostics.json`에 원자적으로 순환 저장한다. 테스트 host에서는 production logger와 store가 실제 I/O를 시작하지 않는다.
+- strict-concurrency complete와 warnings-as-errors 조건에서 59개 테스트가 모두 통과했다. Release build와 Debug analyze도 같은 조건으로 통과했다.
+- 이 단계는 하드웨어 명령 의미나 상태 전이를 변경하지 않으므로 실제 배터리 조작 검증은 실행하지 않았다. periodic reconciliation, sleep/wake, Terminal drift와 제어 소유권 후속 PR에서 통제된 하드웨어 체크를 재개한다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -83,7 +105,7 @@ IOKit readings ---+                    result + verified CLI status
 
 ## 3. 단계별 구현 계획
 
-### 3.1 즉시 위험한 동작 봉합과 안전한 테스트 기반
+### 3.1 즉시 위험한 동작 봉합과 안전한 테스트 기반 `[PR #3 완료]`
 
 대규모 리팩터링보다 먼저 현재 코드가 실제 배터리에 잘못된 명령을 전달할 수 있는 경로를 차단한다.
 
@@ -151,7 +173,7 @@ BatteryHistory(inMemory: true)
 - 성공뿐 아니라 실패, timeout과 취소 상태를 가짜 backend로 재현할 수 있다.
 - 테스트 순서와 현재 Mac의 배터리 상태가 결과에 영향을 주지 않는다.
 
-### 3.2 `BatteryCommandRunner`로 CLI 실행 통합
+### 3.2 `BatteryCommandRunner`로 CLI 실행 통합 `[PR #3 완료]`
 
 모든 CLI 실행을 하나의 actor에 모아 명령 수명주기와 동시성을 통제한다.
 
@@ -218,7 +240,7 @@ struct BatteryCommandResult {
 - 3.4의 시작/종료 정책 중 초기화 readiness gate만 선행 구현한다. launch/wake/crash reconciliation과 명시적인 제어 해제 기능은 그대로 3.4에서 구현한다.
 - process group, 원자적 검증, stderr와 출력 상한 관련 자동 테스트는 3.8에서 기다리지 않고 이 단계의 회귀 테스트로 당긴다. 3.8은 전체 상태 전이와 실제 하드웨어 검증을 계속 담당한다.
 
-### 3.3 단일 충전 상태 모델 도입
+### 3.3 단일 충전 상태 모델 도입 `[PR #3 완료]`
 
 여러 Boolean이 독립적으로 움직이는 현재 구조를 하나의 명시적인 상태로 교체한다. 별도의 Redux, 이벤트 버스나 범용 reducer 프레임워크는 도입하지 않는다.
 
@@ -259,7 +281,7 @@ enum ChargeMode: Equatable {
 - 모든 허용 전이와 거부 전이에 단위 테스트가 있다.
 - 상태 계층의 actor 격리가 코드에 표현되고 strict-concurrency 경고를 다음 단계로 새로 전파하지 않는다.
 
-### 3.4 시작, 종료, 크래시와 절전 정책 구현
+### 3.4 시작, 종료, 크래시와 절전 정책 구현 `[부분 완료]`
 
 앱의 메모리 상태가 아니라 실제 CLI와 배터리 상태를 기준으로 복구한다.
 
@@ -304,7 +326,7 @@ enum ChargeMode: Equatable {
 - 외부 CLI 변경을 영구적으로 덮어쓰거나 무시하지 않는다.
 - 상태를 확인할 수 없을 때 UI가 확정적인 성공 상태를 표시하지 않는다.
 
-### 3.5 Heat Protection, Top Up과 Discharge 재구현
+### 3.5 Heat Protection, Top Up과 Discharge 재구현 `[PR #3 완료]`
 
 각 기능을 독립 Boolean과 임시 명령 조합이 아니라 단일 상태 모델 위의 전이로 구현한다.
 
@@ -350,7 +372,7 @@ enum ChargeMode: Equatable {
 - 취소, timeout과 명령 실패 후 복귀 상태가 테스트된다.
 - 기능 종료 후 실제 상태 검증이 수행된다.
 
-### 3.6 외부 CLI 사전 검사와 macOS 기본 기능 충돌 방지
+### 3.6 외부 CLI 사전 검사와 macOS 기본 기능 충돌 방지 `[부분 완료]`
 
 자동 설치기나 거대한 업데이트 시스템은 만들지 않는다. 다만 root 권한으로 동작할 수 있는 외부 실행 파일을 단순히 존재 여부만으로 신뢰하지 않는다.
 
@@ -389,7 +411,7 @@ enum ChargeMode: Equatable {
 - preflight 실패가 충전 명령 실패와 구분되어 표시된다.
 - 두 충전 제어 시스템을 동시에 사용하는 위험이 사용자에게 명확하다.
 
-### 3.7 모니터링, 이력과 UI 정확성 개선
+### 3.7 모니터링, 이력과 UI 정확성 개선 `[PR #4 구현 완료, 리뷰 대기]`
 
 안전성과 제어 상태가 안정된 뒤 측정, 저장과 표시의 정확성을 정리한다.
 
@@ -434,7 +456,7 @@ enum ChargeMode: Equatable {
 - UI 버전과 로그인 항목 상태가 시스템의 실제 상태를 반영한다.
 - 최근 명령과 실패 원인을 로컬에서 확인할 수 있다.
 
-### 3.8 자동 테스트와 실제 하드웨어 검증
+### 3.8 자동 테스트와 실제 하드웨어 검증 `[부분 완료, 각 PR에서 누적]`
 
 자동 테스트와 실제 하드웨어 검증을 명확히 분리한다.
 
@@ -542,13 +564,14 @@ enum ChargeMode: Equatable {
 
 각 단계는 기존 사용자 변경을 섞지 않은 독립 커밋으로 저장한다.
 
-1. 즉시 안전 가드, 충돌 차단, 가짜 backend와 안전한 테스트 저장소
-2. `BatteryCommandRunner`, process group 정리, 원자적 상태 검증과 초기화 readiness gate
-3. 단일 충전 상태와 reconciliation
-4. lifecycle, Heat Protection, Top Up과 Discharge
-5. CLI preflight와 native Charge Limit 충돌 처리
-6. 모니터링, 이력, UI 정확성과 로컬 진단 로그
-7. 자동 테스트 완료와 통제된 하드웨어 검증 기록
+1. `[PR #3 완료]` 즉시 안전 가드, 가짜 backend, 안전한 테스트 저장소
+2. `[PR #3 완료]` `BatteryCommandRunner`, descendant policy, 전체 timeout과 원자적 상태 검증
+3. `[PR #3 완료]` privileged CLI preflight, 완전한 async readiness와 단일 `ChargeMode`
+4. `[PR #3 완료]` lifecycle, Heat Protection, Top Up/Discharge와 generation 기반 LED
+5. `[PR #3 완료]` 안전 실패 경로 자동 테스트와 통제된 하드웨어 검증. sleep/wake 및 Terminal drift 실기 확인은 관련 후속 구현 뒤 수행
+6. `[PR #4]` 모니터링 단위·optional 검증, 이력 오류/상한/heartbeat, 로그인 승인 상태, Bundle 버전, activation policy와 로컬 순환 진단 로그
+7. `[후속 PR]` periodic reconciliation과 Terminal drift 감지/표시, sleep/wake 및 drift 실기 검증
+8. `[후속 PR]` macOS native Charge Limit 제어 소유권 안내와 명시적 `Disable BatteryGuard Control` UX
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 

@@ -129,7 +129,7 @@ actor SMCKit: ChargeBackend {
         case testFixture
     }
 
-    static let shared = SMCKit()
+    static let shared = SMCKit(runner: BatteryCommandRunner(diagnostics: .shared))
 
     private let runner: BatteryCommandRunner
     private let controlGate = AsyncOperationGate()

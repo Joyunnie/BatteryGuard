@@ -161,10 +161,15 @@ actor BatteryCommandRunner {
     private var longRunningCommand: LongRunningCommand?
     private var lastLongRunningResult: BatteryCommandResult?
     private var terminalFailure: BatteryCommandRunnerError?
+    private let diagnostics: DiagnosticLog
 
     private let terminationGraceNanoseconds: UInt64 = 1_000_000_000
     private let cancellationAcknowledgementTimeout: TimeInterval = 4
     private static let outputLimit = 64 * 1024
+
+    init(diagnostics: DiagnosticLog = .disabled) {
+        self.diagnostics = diagnostics
+    }
 
     func run(_ command: Command) async throws -> BatteryCommandResult {
         let outcome = try await enqueue(.execute(command))
@@ -302,9 +307,19 @@ actor BatteryCommandRunner {
                     let child = try spawn(command, id: item.id)
                     lastLongRunningResult = nil
                     longRunningCommand = LongRunningCommand(child: child, requestedTermination: nil)
+                    recordDiagnostic(
+                        DiagnosticEvent(
+                            id: item.id,
+                            category: .command,
+                            operationID: item.id.uuidString,
+                            operation: command.label,
+                            termination: "launched"
+                        )
+                    )
                     item.continuation.resume(returning: .longRunningID(item.id))
                 }
             } catch {
+                recordFailure(action: item.action, id: item.id, error: error)
                 item.continuation.resume(throwing: error)
             }
         }
@@ -348,7 +363,7 @@ actor BatteryCommandRunner {
                 )
             }
             activeCommand = nil
-            return await makeResult(
+            let result = await makeResult(
                 child: child,
                 waitStatus: waitStatus ?? 0,
                 requestedTermination: requestedTermination,
@@ -356,6 +371,8 @@ actor BatteryCommandRunner {
                     ? min(deadline, monotonicDeadline(nanoseconds: 250_000_000))
                     : deadline
             )
+            recordDiagnostic(DiagnosticEvent(commandResult: result))
+            return result
         } catch {
             activeCommand = nil
             let terminalError = error as? BatteryCommandRunnerError ?? .runnerUnavailable(error.localizedDescription)
@@ -628,7 +645,31 @@ actor BatteryCommandRunner {
         )
         if longRunningCommand?.child.id == command.child.id { longRunningCommand = nil }
         lastLongRunningResult = result
+        recordDiagnostic(DiagnosticEvent(commandResult: result))
         return result
+    }
+
+    private func recordFailure(action: QueueAction, id: UUID, error: Error) {
+        let operation: String
+        switch action {
+        case .execute(let command), .launchLongRunning(let command):
+            operation = command.label
+        }
+        recordDiagnostic(
+            DiagnosticEvent(
+                id: id,
+                category: .command,
+                operationID: id.uuidString,
+                operation: operation,
+                termination: "failedBeforeResult",
+                stderrSummary: error.localizedDescription
+            )
+        )
+    }
+
+    private func recordDiagnostic(_ event: DiagnosticEvent) {
+        let diagnostics = diagnostics
+        Task { await diagnostics.record(event) }
     }
 
     private func makeResult(

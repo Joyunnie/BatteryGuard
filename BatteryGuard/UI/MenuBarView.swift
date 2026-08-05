@@ -59,7 +59,7 @@ struct MenuBarView: View {
     private var chargeLimitSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Charge Limit")
+                Text("충전 한도")
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
                 Text("\(controller.displayedChargeLimit)%")
@@ -89,7 +89,7 @@ struct MenuBarView: View {
     private var quickActions: some View {
         HStack(spacing: 8) {
             ActionButton(
-                title: "Top Up",
+                title: "추가 충전",
                 icon: "arrow.up.to.line",
                 isActive: controller.isTopUpActive,
                 isDisabled: !controller.isReady ||
@@ -107,7 +107,7 @@ struct MenuBarView: View {
             )
 
             ActionButton(
-                title: "Discharge",
+                title: "방전",
                 icon: "arrow.down.to.line",
                 isActive: controller.isDischarging,
                 isDisabled: !controller.isReady ||
@@ -130,16 +130,16 @@ struct MenuBarView: View {
     private var statusInfo: some View {
         VStack(spacing: 4) {
             if let info = monitor.batteryInfo {
-                StatusRow(label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "N/A")
-                StatusRow(label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "N/A")
+                StatusRow(label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "알 수 없음")
+                StatusRow(label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "알 수 없음")
                 StatusRow(label: "사이클", value: "\(info.cycleCount)")
-                StatusRow(label: "전류", value: info.amperage.map { "\($0)mA" } ?? "N/A")
+                StatusRow(label: "전류", value: BatteryDisplay.amperage(info.amperage))
 
                 if controller.heatProtectionTriggered {
                     HStack {
                         Image(systemName: "thermometer.sun.fill")
                             .foregroundColor(.red)
-                        Text("Heat Protection 발동")
+                        Text("열 보호 작동 중")
                             .font(.system(size: 11))
                             .foregroundColor(.red)
                     }
@@ -165,7 +165,7 @@ struct MenuBarView: View {
     // MARK: - Bottom Actions
     private var bottomActions: some View {
         HStack {
-            Button("Dashboard") {
+            Button("대시보드") {
                 openWindow(id: "dashboard")
                 NSApp.setActivationPolicy(.regular)
                 NSApp.activate(ignoringOtherApps: true)
@@ -174,7 +174,7 @@ struct MenuBarView: View {
 
             Spacer()
 
-            Button("Settings") {
+            Button("설정") {
                 openWindow(id: "settings")
                 NSApp.setActivationPolicy(.regular)
                 NSApp.activate(ignoringOtherApps: true)
@@ -183,7 +183,7 @@ struct MenuBarView: View {
 
             Spacer()
 
-            Button("Quit") {
+            Button("종료") {
                 NSApplication.shared.terminate(nil)
             }
             .font(.system(size: 11))
