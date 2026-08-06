@@ -152,9 +152,18 @@ struct DashboardView: View {
                 }
 
                 if let drift = controller.externalDriftDescription {
-                    Label(drift, systemImage: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 11))
-                        .foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(drift, systemImage: "arrow.triangle.2.circlepath")
+                        if let recovery = controller.externalDriftRecoveryDescription {
+                            Text(recovery)
+                        }
+                        Button("다시 확인") {
+                            Task { await controller.reconcileExternalState() }
+                        }
+                        .disabled(controller.isReconcilingExternalState)
+                    }
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
                 }
             }
             .padding()

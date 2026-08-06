@@ -38,10 +38,10 @@ enum ObservedChargeMode: Equatable, Sendable {
 
     var userDescription: String {
         switch self {
-        case .maintaining(let limit): return "외부에서 Maintain \(limit)%로 변경됨"
-        case .charging: return "외부 충전 명령이 활성화됨"
-        case .discharging: return "외부 방전 명령이 활성화됨"
-        case .chargingDisabled: return "외부에서 충전 제어가 비활성화됨"
+        case .maintaining(let limit): return "Maintain \(limit)%"
+        case .charging: return "충전 명령 활성"
+        case .discharging: return "방전 명령 활성"
+        case .chargingDisabled: return "충전 비활성"
         case .unavailable(let message): return "실제 충전 상태를 확인할 수 없음: \(message)"
         case .inconsistent: return "CLI가 모순된 충전 상태를 보고함"
         }
@@ -72,6 +72,15 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
             return "discharging(target:\(target),returnLimit:\(returnLimit))"
         case .chargingDisabled(let previous):
             return "chargingDisabled(previous:\(previous.diagnosticLabel))"
+        }
+    }
+
+    var userDescription: String {
+        switch self {
+        case .maintaining(let limit): return "Maintain \(limit)%"
+        case .toppingUp: return "Top Up"
+        case .discharging(let target, _): return "Discharge \(target)%"
+        case .chargingDisabled: return "충전 비활성"
         }
     }
 }

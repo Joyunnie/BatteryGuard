@@ -150,14 +150,23 @@ struct MenuBarView: View {
                 }
 
                 if let drift = controller.externalDriftDescription {
-                    Label(drift, systemImage: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 10))
-                        .foregroundColor(.orange)
-                        .padding(.top, 4)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(drift, systemImage: "arrow.triangle.2.circlepath")
+                        if let recovery = controller.externalDriftRecoveryDescription {
+                            Text(recovery)
+                        }
+                        Button("다시 확인") {
+                            Task { await controller.reconcileExternalState() }
+                        }
+                        .disabled(controller.isReconcilingExternalState)
+                    }
+                    .font(.system(size: 10))
+                    .foregroundColor(.orange)
+                    .padding(.top, 4)
                 }
             }
 
-            if let error = controller.lastError {
+            if let error = controller.lastError, !controller.hasExternalControlDrift {
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.orange)

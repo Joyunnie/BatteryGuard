@@ -50,6 +50,21 @@ struct SettingsView: View {
                         .font(.system(.body, design: .monospaced))
                         .frame(width: 45)
                 }
+
+                if let drift = controller.externalDriftDescription {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(drift, systemImage: "arrow.triangle.2.circlepath")
+                        if let recovery = controller.externalDriftRecoveryDescription {
+                            Text(recovery)
+                        }
+                        Button("다시 확인") {
+                            Task { await controller.reconcileExternalState() }
+                        }
+                        .disabled(controller.isReconcilingExternalState)
+                    }
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+                }
             }
 
             Section("정보") {
