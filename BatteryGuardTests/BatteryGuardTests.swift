@@ -204,6 +204,15 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         }
     }
 
+    func releaseBatteryGuardControl() async throws {
+        try record("release-control")
+        lock.withLock {
+            longRunning = false
+            maintainWorkerRunning = false
+            chargingStatus = .enabled
+        }
+    }
+
     func disableCharging() async throws {
         try record("disable-charging")
         let longOperationIsActive = lock.withLock {
@@ -327,6 +336,29 @@ final class ChargeStateTests: XCTestCase {
 
 @MainActor
 final class UserSettingsTests: XCTestCase {
+    func testBatteryControlOwnershipDefaultsEnabledAndPersistsExplicitRelease() {
+        let defaults = makeTestDefaults()
+        let settings = UserSettings(defaults: defaults, launchAtLoginService: FakeLaunchAtLoginService())
+
+        XCTAssertTrue(settings.batteryControlEnabled)
+        settings.setBatteryControlEnabled(false)
+
+        let reloaded = UserSettings(defaults: defaults, launchAtLoginService: FakeLaunchAtLoginService())
+        XCTAssertFalse(reloaded.batteryControlEnabled)
+    }
+
+    func testPendingControlReleaseSurvivesRestartWithoutClaimingReleasedState() {
+        let defaults = makeTestDefaults()
+        let settings = UserSettings(defaults: defaults, launchAtLoginService: FakeLaunchAtLoginService())
+
+        settings.beginBatteryControlRelease()
+
+        let reloaded = UserSettings(defaults: defaults, launchAtLoginService: FakeLaunchAtLoginService())
+        XCTAssertTrue(reloaded.batteryControlEnabled)
+        XCTAssertTrue(reloaded.batteryControlReleasePending)
+        XCTAssertTrue(reloaded.expectsReleasedBatteryControl)
+    }
+
     func testDefaultsAndPersistenceUseIsolatedDefaults() {
         let defaults = makeTestDefaults()
         let settings = UserSettings(defaults: defaults, launchAtLoginService: FakeLaunchAtLoginService())
@@ -1240,6 +1272,48 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             XCTFail("Expected incomplete charging-off verification failure")
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("fully disabled"))
+        }
+    }
+
+    func testReleaseControlRequiresEnabledChargingNoDischargeAndNoWorker() async throws {
+        let successFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,enabled,not discharging,80"
+            fi
+            """
+        )
+        let failureFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: successFixture)
+            try? FileManager.default.removeItem(at: failureFixture)
+        }
+
+        let successBackend = SMCKit(
+            batteryPath: successFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+        try await successBackend.releaseBatteryGuardControl()
+
+        let failureBackend = SMCKit(
+            batteryPath: failureFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+        do {
+            try await failureBackend.releaseBatteryGuardControl()
+            XCTFail("Expected released-control verification failure")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("released control"))
         }
     }
 
@@ -2851,6 +2925,188 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertTrue(backend.operations.contains("request-cancellation"))
         XCTAssertTrue(backend.operations.contains("maintain:80"))
         XCTAssertTrue(backend.operations.contains("read-status"))
+    }
+
+    func testDisableBatteryGuardControlReleasesVerifiedControlAndPersistsMonitoringMode() async {
+        let (controller, backend, _, settings) = makeSUT()
+        settings.heatProtectionEnabled = true
+        settings.controlMagSafeLED = true
+
+        controller.disableBatteryGuardControl()
+
+        let released = await eventually {
+            controller.mode == .controlDisabled(lastLimit: 80)
+        }
+        XCTAssertTrue(released)
+        XCTAssertTrue(backend.operations.contains("release-control"))
+        XCTAssertFalse(settings.batteryControlEnabled)
+        XCTAssertFalse(settings.heatProtectionEnabled)
+        XCTAssertFalse(settings.controlMagSafeLED)
+    }
+
+    func testDisableBatteryGuardControlFailureKeepsOwnershipPreferenceAndBlocksControls() async {
+        let (controller, backend, _, settings) = makeSUT()
+        backend.failNext("release-control")
+
+        controller.disableBatteryGuardControl()
+
+        let failed = await eventually {
+            if case .failed(_, _, let controlsBlocked) = controller.mode {
+                return controlsBlocked
+            }
+            return false
+        }
+        XCTAssertTrue(failed)
+        XCTAssertTrue(settings.batteryControlEnabled)
+        XCTAssertTrue(settings.batteryControlReleasePending)
+    }
+
+    func testEnableBatteryGuardControlEstablishesMaintainBeforePersistingOwnership() async {
+        let (controller, backend, _, settings) = makeSUT(
+            initialMode: .controlDisabled(lastLimit: 75)
+        )
+        settings.setBatteryControlEnabled(false)
+
+        controller.enableBatteryGuardControl()
+
+        let enabled = await eventually { controller.mode == .maintaining(limit: 75) }
+        XCTAssertTrue(enabled)
+        XCTAssertTrue(backend.operations.contains("maintain:75"))
+        XCTAssertTrue(settings.batteryControlEnabled)
+    }
+
+    func testInitializationPreservesReleasedControlWithoutApplyingMaintain() async throws {
+        let backend = FakeChargeBackend()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let info = makeBatteryInfo(charge: 70, isCharging: true)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { info },
+            runsMonitoringInfrastructure: false
+        )
+        monitor.batteryInfo = info
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.beginBatteryControlRelease()
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings
+        )
+
+        try await controller.initialize()
+
+        XCTAssertEqual(controller.mode, .controlDisabled(lastLimit: 80))
+        XCTAssertFalse(settings.batteryControlEnabled)
+        XCTAssertFalse(settings.batteryControlReleasePending)
+        XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("maintain:") }))
+        XCTAssertFalse(backend.operations.contains("release-control"))
+        try await controller.shutdown()
+    }
+
+    func testReleasedControlReconciliationReportsExternalMaintainAsDrift() async {
+        let expectation = ReconciledChargeExpectation.controlReleased(lastLimit: 80)
+        let (controller, backend, _, settings) = makeSUT(
+            initialMode: .controlDisabled(lastLimit: 80)
+        )
+        settings.setBatteryControlEnabled(false)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 6_060, target: 60)
+            )
+        )
+
+        await controller.reconcileExternalState()
+
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(expected: expectation, observed: .maintaining(limit: 60))
+        )
+        XCTAssertTrue(controller.isBatteryControlDisabled)
+    }
+
+    func testPendingReleaseRestartNeverReclaimsControlFromObservedMaintain() async throws {
+        let backend = FakeChargeBackend()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 6_060, target: 60)
+            )
+        )
+        let info = makeBatteryInfo(charge: 70)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { info },
+            runsMonitoringInfrastructure: false
+        )
+        monitor.batteryInfo = info
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.beginBatteryControlRelease()
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings
+        )
+
+        try await controller.initialize()
+
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(
+                expected: .controlReleased(lastLimit: 80),
+                observed: .maintaining(limit: 60)
+            )
+        )
+        XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("maintain:") }))
+        XCTAssertTrue(settings.batteryControlReleasePending)
+        backend.setControlStatus(nil)
+        controller.disableBatteryGuardControl()
+        let retrySucceeded = await eventually {
+            controller.mode == .controlDisabled(lastLimit: 80)
+        }
+        XCTAssertTrue(retrySucceeded)
+        XCTAssertFalse(settings.batteryControlReleasePending)
+        try await controller.shutdown()
+    }
+
+    func testWakeAndShutdownKeepReleasedControlReadOnly() async throws {
+        let (controller, backend, _, settings) = makeSUT(
+            initialMode: .controlDisabled(lastLimit: 80)
+        )
+        settings.setBatteryControlEnabled(false)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let maintainCount = backend.operations.filter { $0.hasPrefix("maintain:") }.count
+
+        await controller.reconcileAfterWake()
+        try await controller.shutdown()
+
+        XCTAssertEqual(
+            backend.operations.filter { $0.hasPrefix("maintain:") }.count,
+            maintainCount
+        )
+        XCTAssertFalse(backend.operations.contains("release-control"))
     }
 }
 

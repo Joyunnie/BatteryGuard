@@ -13,6 +13,8 @@ final class ChargeController: ObservableObject {
 
     private enum ShutdownControlPolicy: Sendable {
         case preserveMaintain
+        case preserveReleasedControl
+        case releaseControl
         case restoreMaintain(Int)
         case keepChargingDisabled
     }
@@ -73,8 +75,18 @@ final class ChargeController: ObservableObject {
         if case .heatBlocked = mode { return true }
         return false
     }
+    var isBatteryControlDisabled: Bool {
+        if case .controlDisabled = mode { return true }
+        if case .externalDrift(.controlReleased, _) = mode { return true }
+        return false
+    }
+    var isReleasedControlDrift: Bool {
+        if case .externalDrift(.controlReleased, _) = mode { return true }
+        return false
+    }
     var effectiveChargeLimit: Int {
         if case .externalDrift(let expected, _) = mode { return expected.restorableMode.maintainLimit }
+        if case .controlDisabled(let lastLimit) = mode { return lastLimit }
         return mode.restorableMode?.maintainLimit ?? UserSettings.validatedChargeLimit(settings.chargeLimit)
     }
     var displayedChargeLimit: Int { pendingChargeLimit ?? effectiveChargeLimit }
@@ -84,6 +96,8 @@ final class ChargeController: ObservableObject {
         guard logicallyConnected else { return .notConnected }
 
         switch mode {
+        case .controlDisabled:
+            return info.isCharging ? .charging : .chargingPaused
         case .toppingUp: return .topUp
         case .discharging: return .discharging
         case .heatBlocked: return .chargingPaused
@@ -112,6 +126,9 @@ final class ChargeController: ObservableObject {
     }
     var externalDriftRecoveryDescription: String? {
         guard case .externalDrift(let expected, _) = mode else { return nil }
+        if case .controlReleased = expected {
+            return "BatteryGuard 제어를 계속 끄려면 제어 해제를 다시 시도하거나 외부 maintain/discharge를 중지하세요."
+        }
         return "Terminal에서 실제 상태를 BatteryGuard 기대 상태(\(expected.userDescription))로 복원한 뒤 다시 확인하세요."
     }
     var isHeatProtectionBlockingControls: Bool {
@@ -206,7 +223,19 @@ final class ChargeController: ObservableObject {
             let previous: RestorableChargeMode = .maintaining(limit: observedLimit ?? desiredLimit)
 
             readiness = .establishingControl
-            if settings.heatProtectionEnabled {
+            if settings.expectsReleasedBatteryControl {
+                let expectation = ReconciledChargeExpectation.controlReleased(lastLimit: desiredLimit)
+                if observedStatus.isCompatibleWithReleasedControl {
+                    settings.setBatteryControlEnabled(false)
+                    mode = .controlDisabled(lastLimit: desiredLimit)
+                } else {
+                    mode = .externalDrift(
+                        expected: expectation,
+                        observed: Self.observedMode(from: observedStatus)
+                    )
+                    driftError = "BatteryGuard 제어는 꺼져 있지만 외부 충전 제어가 감지됐습니다."
+                }
+            } else if settings.heatProtectionEnabled {
                 let temperature = await readFreshSafetyTemperature(fallbackInfo: info)
                 if let temperature, temperature <= settings.heatProtectionThreshold {
                     try await backend.applyMaintain(level: desiredLimit)
@@ -272,17 +301,23 @@ final class ChargeController: ObservableObject {
         let requestedLimit = effectiveChargeLimit
         let requestedPolicy: ShutdownControlPolicy
         switch modeBeforeShutdown {
+        case .controlDisabled:
+            requestedPolicy = .preserveReleasedControl
         case .toppingUp(let limit), .discharging(_, let limit):
             requestedPolicy = .restoreMaintain(limit)
         case .transitioning(let transition):
             switch transition {
             case .enteringHeat, .restoringHeat:
                 requestedPolicy = .keepChargingDisabled
+            case .releasingControl:
+                requestedPolicy = .releaseControl
             default:
                 requestedPolicy = .restoreMaintain(transition.previousMode?.maintainLimit ?? requestedLimit)
             }
         case .heatBlocked, .failed(_, _, true):
-            requestedPolicy = .keepChargingDisabled
+            requestedPolicy = settings.batteryControlReleasePending
+                ? .releaseControl
+                : .keepChargingDisabled
         case .externalDrift(_, let observed):
             switch observed {
             case .maintaining:
@@ -333,13 +368,36 @@ final class ChargeController: ObservableObject {
                 switch requestedPolicy {
                 case .keepChargingDisabled:
                     shutdownPolicy = .keepChargingDisabled
+                case .preserveReleasedControl:
+                    guard freshStatus.isCompatibleWithReleasedControl else {
+                        throw BatteryError.commandFailed(
+                            "shutdown released control",
+                            -1,
+                            "BatteryGuard control was no longer released: \(freshStatus.diagnosticDescription)"
+                        )
+                    }
+                    shutdownPolicy = .preserveReleasedControl
+                case .releaseControl:
+                    shutdownPolicy = .releaseControl
                 case .preserveMaintain, .restoreMaintain:
                     shutdownPolicy = .restoreMaintain(requestedLimit)
                 }
             }
             switch shutdownPolicy {
-            case .preserveMaintain:
+            case .preserveMaintain, .preserveReleasedControl:
                 break
+            case .releaseControl:
+                try await backend.releaseBatteryGuardControl()
+                let status = try await backend.readControlStatus()
+                guard status.isVerifiedControlReleased else {
+                    throw BatteryError.commandFailed(
+                        "shutdown release control",
+                        -1,
+                        "BatteryGuard control release was not verified"
+                    )
+                }
+                settings.setBatteryControlEnabled(false)
+                settings.heatProtectionEnabled = false
             case .restoreMaintain(let limit):
                 try await backend.applyMaintain(level: limit)
                 let status = try await backend.readControlStatus()
@@ -365,11 +423,15 @@ final class ChargeController: ObservableObject {
         } catch {
             isShuttingDown = false
             readiness = .ready
-            mode = .failed(
-                previous: modeBeforeShutdown.restorableMode ?? .maintaining(limit: requestedLimit),
-                message: error.localizedDescription,
-                controlsBlocked: true
-            )
+            if case .controlDisabled(let lastLimit) = modeBeforeShutdown {
+                mode = .controlDisabled(lastLimit: lastLimit)
+            } else {
+                mode = .failed(
+                    previous: modeBeforeShutdown.restorableMode ?? .maintaining(limit: requestedLimit),
+                    message: error.localizedDescription,
+                    controlsBlocked: true
+                )
+            }
             commandError = "종료 안전 정리 실패: \(error.localizedDescription)"
             refreshDisplayedError()
             logger.error("Shutdown cleanup failed: \(error.localizedDescription, privacy: .public)")
@@ -759,7 +821,8 @@ final class ChargeController: ObservableObject {
     private var shouldAttemptHeatProtection: Bool {
         guard heatProtectionRetryAfter.map({ Date() >= $0 }) ?? true else { return false }
         switch mode {
-        case .heatBlocked, .transitioning(.enteringHeat): return false
+        case .heatBlocked, .controlDisabled, .transitioning(.enteringHeat): return false
+        case .externalDrift(.controlReleased, _): return false
         default: return true
         }
     }
@@ -866,6 +929,11 @@ final class ChargeController: ObservableObject {
 
     func setHeatProtectionEnabled(_ enabled: Bool) {
         guard enabled != settings.heatProtectionEnabled else { return }
+        guard !enabled || !isBatteryControlDisabled else {
+            commandError = "Heat Protection을 사용하려면 먼저 BatteryGuard 충전 제어를 켜세요."
+            refreshDisplayedError()
+            return
+        }
         settings.heatProtectionEnabled = enabled
         if enabled {
             if let info = monitor.batteryInfo {
@@ -885,6 +953,53 @@ final class ChargeController: ObservableObject {
         settings.controlMagSafeLED = enabled
         ledIntent = nil
         updateLED()
+    }
+
+    func disableBatteryGuardControl() {
+        let isRetryingReleasedControlDrift = isReleasedControlDrift
+        guard isReady,
+              activeOperationID == nil,
+              !isReconcilingExternalState,
+              (!hasExternalControlDrift || isRetryingReleasedControlDrift),
+              (!isBatteryControlDisabled || isRetryingReleasedControlDrift) else { return }
+        cancelPendingChargeLimit(reason: "BatteryGuard 제어 해제로 Charge Limit 변경이 취소됐습니다.")
+        let lastLimit = effectiveChargeLimit
+        let previous = mode.restorableMode
+        let backend = self.backend
+        settings.beginBatteryControlRelease()
+        _ = runBattery(
+            operation: "release BatteryGuard control",
+            transition: .releasingControl(previous: previous),
+            controlsBlockedOnFailure: true,
+            work: { try await backend.releaseBatteryGuardControl() },
+            onSuccess: { [weak self] in
+                guard let self else { return }
+                self.settings.setBatteryControlEnabled(false)
+                self.settings.heatProtectionEnabled = false
+                self.monitor.allowSleep()
+                self.mode = .controlDisabled(lastLimit: lastLimit)
+                self.setLEDControlEnabled(false)
+            }
+        )
+    }
+
+    func enableBatteryGuardControl() {
+        guard isReady,
+              activeOperationID == nil,
+              !isReconcilingExternalState,
+              case .controlDisabled(let lastLimit) = mode else { return }
+        let target = UserSettings.validatedChargeLimit(lastLimit)
+        let backend = self.backend
+        _ = runBattery(
+            operation: "enable BatteryGuard control",
+            transition: .applyingMaintain(target: target, previous: nil),
+            work: { try await backend.applyMaintain(level: target) },
+            onSuccess: { [weak self] in
+                guard let self else { return }
+                self.settings.setBatteryControlEnabled(true)
+                self.mode = .maintaining(limit: target)
+            }
+        )
     }
 
     func setChargeLimit(_ limit: Int) {
@@ -1297,6 +1412,8 @@ final class ChargeController: ObservableObject {
         switch expectation {
         case .toppingUp, .discharging:
             ownsLongRunningOperation = await backend.isLongRunningOperationActive()
+        case .controlReleased:
+            ownsLongRunningOperation = await backend.isLongRunningOperationActive()
         case .maintaining, .chargingDisabled:
             ownsLongRunningOperation = nil
         }
@@ -1308,6 +1425,7 @@ final class ChargeController: ObservableObject {
 
     private var reconciliationExpectation: ReconciledChargeExpectation? {
         switch mode {
+        case .controlDisabled(let lastLimit): return .controlReleased(lastLimit: lastLimit)
         case .maintaining(let limit): return .maintaining(limit: limit)
         case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
         case .discharging(let target, let returnLimit):
@@ -1342,6 +1460,9 @@ final class ChargeController: ObservableObject {
                 status.maintainWorker.isStopped
         case .chargingDisabled:
             return status.isVerifiedChargingDisabled
+        case .controlReleased:
+            return snapshot.ownsLongRunningOperation != true &&
+                status.isCompatibleWithReleasedControl
         }
     }
 
@@ -1371,6 +1492,7 @@ final class ChargeController: ObservableObject {
 
     private static func mode(from expectation: ReconciledChargeExpectation) -> ChargeMode {
         switch expectation {
+        case .controlReleased(let lastLimit): return .controlDisabled(lastLimit: lastLimit)
         case .maintaining(let limit): return .maintaining(limit: limit)
         case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
         case .discharging(let target, let returnLimit):
@@ -1416,6 +1538,12 @@ final class ChargeController: ObservableObject {
         guard !isShuttingDown else { return }
         if case .externalDrift(let expectation, _) = mode {
             await reconcileExternalDriftAfterWake(expectation: expectation)
+            return
+        }
+        if case .controlDisabled(let lastLimit) = mode {
+            await reconcileExternalDriftAfterWake(
+                expectation: .controlReleased(lastLimit: lastLimit)
+            )
             return
         }
         let prior = mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit)
@@ -1487,7 +1615,13 @@ final class ChargeController: ObservableObject {
             if let freshInfo {
                 monitor.batteryInfo = freshInfo
             }
-            if settings.heatProtectionEnabled {
+            let shouldEvaluateHeatProtection: Bool
+            if case .controlReleased = expectation {
+                shouldEvaluateHeatProtection = false
+            } else {
+                shouldEvaluateHeatProtection = settings.heatProtectionEnabled
+            }
+            if shouldEvaluateHeatProtection {
                 let temperature = await readFreshSafetyTemperature(fallbackInfo: freshInfo)
                 guard let temperature, temperature <= settings.heatProtectionThreshold else {
                     try await backend.disableCharging()

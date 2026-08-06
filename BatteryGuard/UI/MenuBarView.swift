@@ -80,6 +80,7 @@ struct MenuBarView: View {
                 controller.isCommandPending ||
                 controller.isDischarging ||
                 controller.isTopUpActive ||
+                controller.isBatteryControlDisabled ||
                 controller.hasExternalControlDrift ||
                 controller.isHeatProtectionBlockingControls
             )
@@ -97,6 +98,7 @@ struct MenuBarView: View {
                     controller.isCommandPending ||
                     controller.isChargeLimitPending ||
                     controller.isHeatProtectionBlockingControls ||
+                    controller.isBatteryControlDisabled ||
                     controller.hasExternalControlDrift ||
                     controller.isDischarging,
                 action: {
@@ -116,6 +118,7 @@ struct MenuBarView: View {
                     controller.isCommandPending ||
                     controller.isChargeLimitPending ||
                     controller.isHeatProtectionBlockingControls ||
+                    controller.isBatteryControlDisabled ||
                     controller.hasExternalControlDrift ||
                     controller.isTopUpActive,
                 action: {

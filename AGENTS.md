@@ -66,6 +66,10 @@ IOKit readings ---+                    result + verified CLI status
 - Show drift as expected versus observed state with an explicit read-only retry path; never hide the recovery target behind a disabled control.
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.
+- Persist control-release intent before mutating hardware so a crash cannot silently reclaim Maintain on restart; finalize the preference only after verification.
+- Releasing control must stop owned long operations and exact Maintain workers, run the CLI stop action, and verify charging restored, no discharge, and no worker.
+- In monitoring-only mode, allow known charging on or off because native Charge Limit may pause charging; still require no discharge, no Maintain worker, and no BatteryGuard-owned long operation.
+- Never claim to detect native Charge Limit from charging state alone. Require the user to choose one owner and confirm native Charge Limit is off before re-enabling BatteryGuard control.
 - Quit during Top Up or Discharge must cancel the long operation, restore the recorded maintain limit, and verify level, worker liveness, and non-discharge state before exit.
 - Delay AppKit termination until safety cleanup succeeds; a timeout or cleanup failure must cancel normal termination instead of merely logging and exiting.
 - Tear down monitoring and observers only after verified shutdown cleanup; keep failed shutdowns alive and retryable.

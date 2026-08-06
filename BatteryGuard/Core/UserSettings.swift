@@ -87,6 +87,13 @@ final class UserSettings: ObservableObject {
     private var chargeLimitStorage: Int
     private var heatProtectionThresholdStorage: Double
 
+    @Published private(set) var batteryControlEnabled: Bool
+    @Published private(set) var batteryControlReleasePending: Bool
+
+    var expectsReleasedBatteryControl: Bool {
+        batteryControlReleasePending || !batteryControlEnabled
+    }
+
     @Published private(set) var launchAtLoginState: LaunchAtLoginState
     @Published private(set) var launchAtLoginError: String?
 
@@ -137,15 +144,33 @@ final class UserSettings: ObservableObject {
         if defaults.object(forKey: "heatThreshold") == nil {
             defaults.set(40.0, forKey: "heatThreshold")
         }
+        if defaults.object(forKey: "batteryControlEnabled") == nil {
+            defaults.set(true, forKey: "batteryControlEnabled")
+        }
 
         self.chargeLimitStorage = Self.validatedChargeLimit(defaults.integer(forKey: "chargeLimit"))
         self.heatProtectionThresholdStorage = Self.validatedHeatProtectionThreshold(defaults.double(forKey: "heatThreshold"))
         self.launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
+        self.batteryControlEnabled = defaults.bool(forKey: "batteryControlEnabled")
+        self.batteryControlReleasePending = defaults.bool(forKey: "batteryControlReleasePending")
         self.heatProtectionEnabled = defaults.bool(forKey: "heatProtection")
         self.controlMagSafeLED = defaults.bool(forKey: "controlMagSafe")
 
         defaults.set(chargeLimitStorage, forKey: "chargeLimit")
         defaults.set(heatProtectionThresholdStorage, forKey: "heatThreshold")
+    }
+
+    func setBatteryControlEnabled(_ enabled: Bool) {
+        batteryControlEnabled = enabled
+        batteryControlReleasePending = false
+        defaults.set(enabled, forKey: "batteryControlEnabled")
+        defaults.set(false, forKey: "batteryControlReleasePending")
+    }
+
+    func beginBatteryControlRelease() {
+        guard !batteryControlReleasePending else { return }
+        batteryControlReleasePending = true
+        defaults.set(true, forKey: "batteryControlReleasePending")
     }
 
     func setLaunchAtLogin(_ requested: Bool) {
