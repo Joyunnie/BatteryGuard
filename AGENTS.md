@@ -47,8 +47,10 @@ IOKit readings ---+                    result + verified CLI status
 - Coalesce rapid slider changes and block conflicting or duplicate operations.
 - Validate persisted limits and thresholds at every boundary.
 - Before using the privileged CLI, validate executable path, symlink target, owner/mode, version, and required capabilities.
+- Give the privileged script a minimal PATH containing only its validated directory and fixed system directories; never search user-writable tool directories.
 - Never recommend or execute an unpinned `curl | bash` installer flow.
 - Do not report missing temperature/health/current values as plausible measurements such as `0` or `100%`; model them as unavailable.
+- Do not dump raw IOKit dictionaries or battery identifiers to stdout or diagnostics.
 - Reject nonfinite or physically implausible sensor values before any safety decision.
 
 ## State and Lifecycle Invariants
@@ -67,6 +69,10 @@ IOKit readings ---+                    result + verified CLI status
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.
 - Persist control-release intent before mutating hardware so a crash cannot silently reclaim Maintain on restart; finalize the preference only after verification.
+- Store charge-control ownership in a crash-durable journal. Model `batteryGuard`, `releasing`, and `system` separately; never infer a completed release from a pending record or a compatible read-only status.
+- A persisted `releasing` state must actively rerun and verify the release transaction on launch or explicit retry. Periodic and wake reconciliation may observe it but must not finalize it.
+- Treat a durable ownership commit as an irreversible boundary for that operation: later task cancellation or LED/UI cleanup failure must not roll the journal back or relabel it as the previous owner.
+- Use persisted ownership immediately to lock controller-owned Heat Protection, LED, and charge actions, including while the visible mode is transitioning.
 - Releasing control must stop owned long operations and exact Maintain workers, run the CLI stop action, and verify charging restored, no discharge, and no worker.
 - In monitoring-only mode, allow known charging on or off because native Charge Limit may pause charging; still require no discharge, no Maintain worker, and no BatteryGuard-owned long operation.
 - Never claim to detect native Charge Limit from charging state alone. Require the user to choose one owner and confirm native Charge Limit is off before re-enabling BatteryGuard control.

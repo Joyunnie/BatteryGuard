@@ -7,6 +7,7 @@ struct SettingsView: View {
     @EnvironmentObject var settings: UserSettings
     @EnvironmentObject var controller: ChargeController
     @State private var diagnosticLogError: String?
+    @State private var batterySettingsOpenError: String?
     @State private var showsDisableControlConfirmation = false
     @State private var showsEnableControlConfirmation = false
 
@@ -85,8 +86,17 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
 
                 Button("macOS 배터리 설정 열기") {
-                    guard let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension") else { return }
-                    NSWorkspace.shared.open(url)
+                    guard let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension"),
+                          NSWorkspace.shared.open(url) else {
+                        batterySettingsOpenError = "macOS 배터리 설정을 열지 못했습니다. 시스템 설정에서 배터리를 직접 여세요."
+                        return
+                    }
+                    batterySettingsOpenError = nil
+                }
+                if let batterySettingsOpenError {
+                    Text(batterySettingsOpenError)
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
                 }
             }
             .confirmationDialog(
@@ -99,7 +109,7 @@ struct SettingsView: View {
                 }
                 Button("취소", role: .cancel) {}
             } message: {
-                Text("실행 중인 Top Up/Discharge와 Maintain을 중지하고 기본 충전을 복원합니다. Heat Protection도 꺼집니다.")
+                Text("실행 중인 Top Up/Discharge와 Maintain을 중지하고 기본 충전을 복원합니다. Heat Protection과 MagSafe LED 제어도 꺼집니다.")
             }
             .confirmationDialog(
                 "BatteryGuard 충전 제어를 켤까요?",
@@ -195,6 +205,7 @@ struct SettingsView: View {
                         set: { controller.setLEDControlEnabled($0) }
                     )
                 )
+                .disabled(controller.isBatteryControlDisabled)
                 Text("""
                 초록: Limit 도달 / 주황: 충전 중 / 점멸: 방전 중
                 MagSafe 3 모델에서만 작동합니다.

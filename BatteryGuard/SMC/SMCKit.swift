@@ -902,7 +902,7 @@ actor SMCKit: ChargeBackend {
     private var batteryEnvironment: [String: String] {
         let batteryDirectory = URL(fileURLWithPath: batteryPath).deletingLastPathComponent().path
         return [
-            "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\(batteryDirectory)",
+            "PATH": "\(batteryDirectory):/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
             "USER": NSUserName()
         ]

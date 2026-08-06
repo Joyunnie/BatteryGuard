@@ -53,6 +53,7 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
     case toppingUp(returnLimit: Int)
     case discharging(target: Int, returnLimit: Int)
     case chargingDisabled(previous: RestorableChargeMode)
+    case controlReleasing(lastLimit: Int)
     case controlReleased(lastLimit: Int)
 
     var restorableMode: RestorableChargeMode {
@@ -62,7 +63,8 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
         case .discharging(let target, let returnLimit):
             return .discharging(target: target, returnLimit: returnLimit)
         case .chargingDisabled(let previous): return previous
-        case .controlReleased(let lastLimit): return .maintaining(limit: lastLimit)
+        case .controlReleasing(let lastLimit), .controlReleased(let lastLimit):
+            return .maintaining(limit: lastLimit)
         }
     }
 
@@ -74,6 +76,8 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
             return "discharging(target:\(target),returnLimit:\(returnLimit))"
         case .chargingDisabled(let previous):
             return "chargingDisabled(previous:\(previous.diagnosticLabel))"
+        case .controlReleasing(let lastLimit):
+            return "controlReleasing(lastLimit:\(lastLimit))"
         case .controlReleased(let lastLimit):
             return "controlReleased(lastLimit:\(lastLimit))"
         }
@@ -85,6 +89,7 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
         case .toppingUp: return "Top Up"
         case .discharging(let target, _): return "Discharge \(target)%"
         case .chargingDisabled: return "충전 비활성"
+        case .controlReleasing: return "BatteryGuard 제어 해제 미완료"
         case .controlReleased: return "BatteryGuard 제어 끔"
         }
     }
