@@ -34,12 +34,13 @@ struct BatteryInfo {
 /// - 2초 간격 폴링 + IOPowerSource notification 조합
 @MainActor
 final class BatteryMonitor: ObservableObject {
-    static let shared = BatteryMonitor()
+    static let shared = BatteryMonitor(runsMonitoringInfrastructure: !AppRuntime.isRunningTests)
 
     @Published var batteryInfo: BatteryInfo?
 
     private let batteryInfoProvider: (() -> BatteryInfo?)?
     private let runsMonitoringInfrastructure: Bool
+    var usesMonitoringInfrastructure: Bool { runsMonitoringInfrastructure }
     private var timer: Timer?
     private var runLoopSource: CFRunLoopSource?
     private var hasLoggedDictOnce = false

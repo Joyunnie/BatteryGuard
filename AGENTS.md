@@ -36,10 +36,13 @@ IOKit readings ---+                    result + verified CLI status
 - Serialize one-shot commands and long-running launches through one FIFO runner; keep each semantic control operation atomic through its status verification.
 - A spawned process is not success: await termination and capture exit code, stdout, and stderr.
 - Apply monotonic timeouts, bounded output capture, cancellation, and process-group cleanup; never use broad `pkill -f` matching.
+- Long-running timeouts must fire autonomously; status polling is not the timeout mechanism.
+- Reject truncated command/status output instead of parsing an incomplete result.
 - Treat cleanup failure as a terminal runner failure and reject later commands instead of continuing in an unknown state.
 - Verify control-changing commands with a subsequent status read before updating UI state.
 - Verify the complete expected control tuple: charging, discharging, maintain level, and exact worker state; a matching subset is not success.
-- Treat maintain as valid only when exactly one matching worker exists and the PID file points to it; stale or duplicate workers are failures.
+- Treat maintain as valid only when exactly one worker with the expected target exists and the PID file points to it; stale, mismatched, or duplicate workers are failures.
+- Read PID files without following links or blocking on special files; accept only bounded, current-user-owned regular files.
 - Stop exact maintain worker PIDs before Top Up, Discharge, or charging-off transitions. Never signal an unrelated process group.
 - Coalesce rapid slider changes and block conflicting or duplicate operations.
 - Validate persisted limits and thresholds at every boundary.
@@ -65,16 +68,19 @@ IOKit readings ---+                    result + verified CLI status
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.
 - Quit during Top Up or Discharge must cancel the long operation, restore the recorded maintain limit, and verify level, worker liveness, and non-discharge state before exit.
 - Delay AppKit termination until safety cleanup succeeds; a timeout or cleanup failure must cancel normal termination instead of merely logging and exiting.
+- Tear down monitoring and observers only after verified shutdown cleanup; keep failed shutdowns alive and retryable.
 - Reject normal quit while an externally owned charge/discharge or unknown control state is active, without tearing down the controller, so the user can correct the state and retry.
 - Re-read external drift immediately before choosing the quit policy; never trust a periodic snapshot for shutdown safety.
 - Do not expose a stop/disable command unless its result can be verified through an observable CLI state.
 - If temperature sensing is unavailable while heat protection is enabled, surface the degraded protection clearly and avoid unsafe automatic charging decisions.
+- Preserve external drift across wake with read-only reconciliation; never silently reapply Maintain over it.
 - When LED control is disabled or external power is removed, restore automatic LED behavior.
 - Route every LED intent through one generation-ordered actor/worker; stale writes and blink tasks must not outlive newer intent.
 
 ## Testing
 
 - Default automated tests must never invoke the real battery CLI, mutate real login items, or use the production Core Data store.
+- Shared objects constructed by the XCTest host must also use inert monitoring, in-memory storage, isolated defaults, and disabled diagnostics.
 - Use fake `ChargeBackend` implementations, an in-memory history store, and temporary fixture executables.
 - Cover every safety-relevant transition across success, failure, timeout, cancellation, stale completion, launch reconciliation, and wake reconciliation.
 - Keep real-hardware checks manual or opt-in and never run them without explicit user approval.

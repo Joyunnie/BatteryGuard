@@ -180,7 +180,9 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
                 charging: chargingStatus,
                 isDischarging: longRunning,
                 maintainLevel: maintainLevel,
-                maintainWorker: maintainWorkerRunning ? .running(pid: 4_242) : .stopped
+                maintainWorker: maintainWorkerRunning
+                    ? .running(pid: 4_242, target: maintainLevel)
+                    : .stopped
             )
         }
     }
@@ -525,6 +527,28 @@ final class StatusParsingTests: XCTestCase {
             ),
             .stale(pid: 123)
         )
+
+        let standaloneTokens = "123 123 /bin/echo \(batteryPath) maintain_synchronous 80"
+        XCTAssertEqual(
+            SMCKit.classifyMaintainWorkers(
+                pidFilePID: 123,
+                processTable: standaloneTokens,
+                batteryPath: batteryPath
+            ),
+            .stale(pid: 123)
+        )
+    }
+
+    func testMaintainWorkerClassificationBindsTheWorkerTarget() {
+        let batteryPath = "/usr/local/co.palokaj.battery/battery"
+        XCTAssertEqual(
+            SMCKit.classifyMaintainWorkers(
+                pidFilePID: 101,
+                processTable: "101 100 /bin/bash \(batteryPath) maintain_synchronous 60",
+                batteryPath: batteryPath
+            ),
+            .running(pid: 101, target: 60)
+        )
     }
 }
 
@@ -733,6 +757,8 @@ final class ProcessLifecycleTests: XCTestCase {
         )
 
         XCTAssertEqual(result.stdout.utf8.count, 64 * 1024)
+        XCTAssertTrue(result.stdoutWasTruncated)
+        XCTAssertFalse(result.stderrWasTruncated)
         XCTAssertEqual(result.termination, .exited)
     }
 
@@ -750,6 +776,7 @@ final class ProcessLifecycleTests: XCTestCase {
 
         XCTAssertEqual(result.stdout, "")
         XCTAssertEqual(result.stderr.utf8.count, 64 * 1024)
+        XCTAssertTrue(result.stderrWasTruncated)
     }
 
     func testStderrCaptureDoesNotWaitForADetachedDescendantToCloseThePipe() async throws {
@@ -846,6 +873,57 @@ final class ProcessLifecycleTests: XCTestCase {
         let firstIsStillActive = await runner.isLongRunningActive()
         XCTAssertTrue(firstIsStillActive)
         _ = try await runner.cancelLongRunning()
+    }
+
+    func testLongRunningCommandUsesItsMonotonicTimeout() async throws {
+        let runner = BatteryCommandRunner()
+        _ = try await runner.launchLongRunning(
+            .init(
+                executable: "/bin/sh",
+                arguments: termIgnoringShell,
+                label: "timed long fixture",
+                timeout: 0.05
+            )
+        )
+        let deadline = Date().addingTimeInterval(3)
+        var result: BatteryCommandResult?
+        while result == nil, Date() < deadline {
+            result = await runner.longRunningResult()
+            if result == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        let isActive = await runner.isLongRunningActive()
+        XCTAssertFalse(isActive)
+        XCTAssertEqual(result?.termination, .timedOut)
+    }
+
+    func testCancelAllRejectsCommandsQueuedDuringCancellation() async throws {
+        let runner = BatteryCommandRunner()
+        let arguments = termIgnoringShell
+        let active = Task {
+            try await runner.run(
+                .init(
+                    executable: "/bin/sh",
+                    arguments: arguments,
+                    label: "active cancellation fixture",
+                    timeout: 5
+                )
+            )
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let cancellation = Task { try await runner.cancelAll() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        do {
+            _ = try await runner.run(
+                .init(executable: "/bin/true", arguments: [], label: "late command")
+            )
+            XCTFail("Expected enqueue to be rejected during cancellation")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("cancellation"))
+        }
+
+        try await cancellation.value
+        _ = try await active.value
     }
 
     func testTimeoutLeavesNoFixtureProcessBehind() async throws {
@@ -1022,7 +1100,15 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         }
         let backend = SMCKit(
             batteryPath: fixture.path,
-            maintainWorkerProbe: { _, _ in .running(pid: 4_242) },
+            maintainWorkerProbe: { _, _ in
+                guard
+                    let rawTarget = try? String(contentsOf: stateFile, encoding: .utf8),
+                    let target = Int(rawTarget.trimmingCharacters(in: .whitespacesAndNewlines))
+                else {
+                    return .stopped
+                }
+                return .running(pid: 4_242, target: target)
+            },
             executableTrustPolicy: .testFixture
         )
 
@@ -1061,7 +1147,7 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         let backend = SMCKit(
             runner: runner,
             batteryPath: fixture.path,
-            maintainWorkerProbe: { _, _ in .running(pid: 4_242) },
+            maintainWorkerProbe: { _, _ in .running(pid: 4_242, target: 80) },
             executableTrustPolicy: .testFixture,
             diagnostics: log
         )
@@ -1121,7 +1207,7 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture) }
         let backend = SMCKit(
             batteryPath: fixture.path,
-            maintainWorkerProbe: { _, _ in .running(pid: 4_242) },
+            maintainWorkerProbe: { _, _ in .running(pid: 4_242, target: 80) },
             executableTrustPolicy: .testFixture
         )
 
@@ -1167,6 +1253,66 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             XCTFail("Expected production preflight failure")
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("Battery CLI preflight failed"))
+        }
+    }
+
+    func testPreflightRejectsAnUntrustedSMCBinaryBeforeExecutingBatteryCLI() async throws {
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-preflight-marker-\(UUID().uuidString)")
+        let batteryFixture = try makeExecutableFixture(
+            "#!/bin/bash\necho invoked > \(shellQuote(marker.path))\n"
+        )
+        let smcTarget = try makeExecutableFixture("#!/bin/bash\nexit 0\n")
+        let smcLink = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-smc-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: smcLink, withDestinationURL: smcTarget)
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcTarget)
+            try? FileManager.default.removeItem(at: smcLink)
+            try? FileManager.default.removeItem(at: marker)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcLink.path,
+            executableTrustPolicy: .testFixture
+        )
+
+        do {
+            try await backend.open()
+            XCTFail("Expected SMC preflight failure")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("preflight failed"))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        }
+    }
+
+    func testMaintainVerificationRejectsUnknownChargingAndMismatchedWorkerTarget() async throws {
+        let cases: [(String, MaintainWorkerStatus)] = [
+            ("unknown", .running(pid: 4_242, target: 80)),
+            ("disabled", .running(pid: 4_242, target: 60))
+        ]
+        for (chargingText, worker) in cases {
+            let fixture = try makeExecutableFixture(
+                """
+                #!/bin/bash
+                if [[ "$1" == "status_csv" ]]; then
+                  echo "80,00:10,\(chargingText),not discharging,80"
+                fi
+                """
+            )
+            defer { try? FileManager.default.removeItem(at: fixture) }
+            let backend = SMCKit(
+                batteryPath: fixture.path,
+                maintainWorkerProbe: { _, _ in worker },
+                executableTrustPolicy: .testFixture
+            )
+            do {
+                try await backend.applyMaintain(level: 80)
+                XCTFail("Expected incomplete Maintain tuple to fail")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("status_csv reported"))
+            }
         }
     }
 
@@ -1247,6 +1393,15 @@ final class SMCKitOperationSafetyTests: XCTestCase {
 }
 
 final class BatteryValueTests: XCTestCase {
+    @MainActor
+    func testAppHostedTestCompositionNeverUsesProductionState() {
+        XCTAssertTrue(AppRuntime.isRunningTests)
+        XCTAssertTrue(BatteryHistory.shared.usesInMemoryStore)
+        XCTAssertFalse(BatteryMonitor.shared.usesMonitoringInfrastructure)
+        XCTAssertFalse(UserSettings.shared.usesStandardDefaults)
+        XCTAssertNil(DiagnosticLog.shared.fileURL)
+    }
+
     func testUnavailableMeasurementsRemainUnavailable() {
         let info = makeBatteryInfo(temperature: nil, amperage: nil, health: nil)
         XCTAssertNil(info.temperature)
@@ -2073,7 +2228,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 60,
-                maintainWorker: .running(pid: 7_777)
+                maintainWorker: .running(pid: 7_777, target: 60)
             )
         )
 
@@ -2099,7 +2254,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 80,
-                maintainWorker: .running(pid: 8_888)
+                maintainWorker: .running(pid: 8_888, target: 80)
             )
         )
         await controller.reconcileExternalState()
@@ -2116,7 +2271,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .unknown,
                 isDischarging: false,
                 maintainLevel: 80,
-                maintainWorker: .running(pid: 8_080)
+                maintainWorker: .running(pid: 8_080, target: 80)
             )
         )
 
@@ -2194,7 +2349,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 65,
-                maintainWorker: .running(pid: 6_565)
+                maintainWorker: .running(pid: 6_565, target: 65)
             )
         )
 
@@ -2227,7 +2382,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 70,
-                maintainWorker: .running(pid: 7_070)
+                maintainWorker: .running(pid: 7_070, target: 70)
             )
         )
 
@@ -2263,6 +2418,17 @@ final class ChargeControllerSafetyTests: XCTestCase {
             maintainCount
         )
         XCTAssertTrue(controller.externalDriftDescription?.contains("실제: 충전 명령 활성") == true)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+        await controller.reconcileExternalState()
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
     }
 
     func testLostDischargeOwnershipSurfacesExternalDriftWithoutOverwritingIt() async {
@@ -2293,6 +2459,75 @@ final class ChargeControllerSafetyTests: XCTestCase {
             maintainCount
         )
         XCTAssertTrue(controller.externalDriftDescription?.contains("실제: 방전 명령 활성") == true)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+        await controller.reconcileExternalState()
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+    }
+
+    func testDischargeStartFailureRecordsMaintainAsPreviousAndBlocksIfRecoveryFails() async {
+        let (controller, backend, _, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        backend.failNext("discharge")
+
+        controller.startDischarge()
+        let recoveredFailure = await eventually {
+            if case .failed(let previous, _, let blocked) = controller.mode {
+                return previous == .maintaining(limit: 80) && !blocked
+            }
+            return false
+        }
+        XCTAssertTrue(recoveredFailure)
+
+        let (blockedController, blockedBackend, _, blockedSettings) = makeSUT(charge: 90)
+        blockedSettings.chargeLimit = 80
+        blockedBackend.failNext("discharge")
+        blockedBackend.failNext("maintain")
+        blockedController.startDischarge()
+        let blockedFailure = await eventually {
+            if case .failed(let previous, _, let blocked) = blockedController.mode {
+                return previous == .maintaining(limit: 80) && blocked
+            }
+            return false
+        }
+        XCTAssertTrue(blockedFailure)
+    }
+
+    func testWakePreservesExternalDriftWithoutApplyingMaintain() async {
+        let expectation = ReconciledChargeExpectation.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .externalDrift(
+                expected: expectation,
+                observed: .maintaining(limit: 60)
+            )
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 6_060, target: 60)
+            )
+        )
+        let maintainCount = backend.operations.filter { $0.hasPrefix("maintain:") }.count
+
+        await controller.reconcileAfterWake()
+
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(expected: expectation, observed: .maintaining(limit: 60))
+        )
+        XCTAssertEqual(
+            backend.operations.filter { $0.hasPrefix("maintain:") }.count,
+            maintainCount
+        )
     }
 
     func testHeatBlockedDriftRecoversOnlyAfterChargingIsVerifiedDisabled() async {
@@ -2303,7 +2538,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 80,
-                maintainWorker: .running(pid: 4_242)
+                maintainWorker: .running(pid: 4_242, target: 80)
             )
         )
 
@@ -2377,7 +2612,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 60,
-                maintainWorker: .running(pid: 6_060)
+                maintainWorker: .running(pid: 6_060, target: 60)
             )
         )
         backend.setControlStatusDelay(0.15)
@@ -2421,7 +2656,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 80,
-                maintainWorker: .running(pid: 8_080)
+                maintainWorker: .running(pid: 8_080, target: 80)
             )
         )
         await controller.reconcileExternalState()
@@ -2435,7 +2670,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 60,
-                maintainWorker: .running(pid: 6_060)
+                maintainWorker: .running(pid: 6_060, target: 60)
             )
         )
         await controller.reconcileExternalState()
@@ -2466,7 +2701,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 60,
-                maintainWorker: .running(pid: 6_060)
+                maintainWorker: .running(pid: 6_060, target: 60)
             )
         )
         await controller.reconcileExternalState()
@@ -2487,7 +2722,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 charging: .disabled,
                 isDischarging: false,
                 maintainLevel: 80,
-                maintainWorker: .running(pid: 8_080)
+                maintainWorker: .running(pid: 8_080, target: 80)
             )
         )
         await controller.reconcileExternalState()
@@ -2566,7 +2801,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertEqual(backend.operations.last(where: { $0.hasPrefix("maintain:") }), "maintain:80")
     }
 
-    func testShutdownFailureDoesNotPretendCleanupSucceeded() async {
+    func testShutdownFailureDoesNotPretendCleanupSucceeded() async throws {
         let (controller, backend, _, _) = makeSUT(charge: 70)
         controller.startTopUp()
         let topUpStarted = await eventually { controller.isTopUpActive }
@@ -2578,8 +2813,17 @@ final class ChargeControllerSafetyTests: XCTestCase {
             XCTFail("Expected shutdown cleanup failure")
         } catch {
             XCTAssertTrue(controller.lastError?.contains("종료 안전 정리 실패") == true)
-            XCTAssertEqual(controller.readiness, .shuttingDown)
+            XCTAssertEqual(controller.readiness, .ready)
+            if case .failed(_, _, let controlsBlocked) = controller.mode {
+                XCTAssertTrue(controlsBlocked)
+            } else {
+                XCTFail("Expected retryable failed state")
+            }
         }
+
+
+        try await controller.shutdown()
+        XCTAssertEqual(controller.readiness, .shuttingDown)
     }
 
     func testShutdownDuringTopUpCancelsAndRestoresVerifiedMaintain() async throws {

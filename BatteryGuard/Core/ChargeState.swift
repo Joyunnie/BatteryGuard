@@ -143,8 +143,8 @@ enum ChargeTransition: Equatable {
         case .applyingMaintain(_, let previous): return previous
         case .startingTopUp(let limit), .stoppingTopUp(let limit), .recoveringMaintain(let limit):
             return .maintaining(limit: limit)
-        case .startingDischarge(let target, let limit):
-            return .discharging(target: target, returnLimit: limit)
+        case .startingDischarge(_, let limit):
+            return .maintaining(limit: limit)
         case .stoppingDischarge(let limit):
             return .maintaining(limit: limit)
         case .enteringHeat(let previous), .restoringHeat(let previous):

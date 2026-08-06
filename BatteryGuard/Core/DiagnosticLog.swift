@@ -169,7 +169,9 @@ extension DiagnosticEvent {
 
 actor DiagnosticLog {
     static let disabled = DiagnosticLog(fileURL: nil, capacity: 0)
-    static let shared = DiagnosticLog(fileURL: productionFileURL(), capacity: 100)
+    static let shared = AppRuntime.isRunningTests
+        ? disabled
+        : DiagnosticLog(fileURL: productionFileURL(), capacity: 100)
 
     nonisolated let fileURL: URL?
 

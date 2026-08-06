@@ -18,6 +18,8 @@ struct BatteryCommandResult: Equatable, Sendable {
     let exitCode: Int32
     let stdout: String
     let stderr: String
+    let stdoutWasTruncated: Bool
+    let stderrWasTruncated: Bool
     let termination: BatteryCommandTermination
 
     var combinedOutput: String {
@@ -50,18 +52,30 @@ actor BatteryCommandRunner {
         private let lock = NSLock()
         private var data = Data()
         private var isClosed = false
+        private var wasTruncated = false
 
         func append(_ chunk: Data) {
             lock.lock()
             defer { lock.unlock() }
-            guard data.count < BatteryCommandRunner.outputLimit else { return }
-            data.append(chunk.prefix(BatteryCommandRunner.outputLimit - data.count))
+            let remaining = BatteryCommandRunner.outputLimit - data.count
+            guard remaining > 0 else {
+                wasTruncated = true
+                return
+            }
+            data.append(chunk.prefix(remaining))
+            if chunk.count > remaining { wasTruncated = true }
         }
 
         func snapshot() -> Data {
             lock.lock()
             defer { lock.unlock() }
             return data
+        }
+
+        func truncationStatus() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return wasTruncated
         }
 
         func markClosed() {
@@ -156,6 +170,7 @@ actor BatteryCommandRunner {
 
     private struct LongRunningCommand {
         let child: SpawnedChild
+        let deadline: UInt64
         var requestedTermination: BatteryCommandTermination?
     }
 
@@ -163,8 +178,11 @@ actor BatteryCommandRunner {
     private var queueWorker: Task<Void, Never>?
     private var activeCommand: ActiveCommand?
     private var longRunningCommand: LongRunningCommand?
+    private var longRunningTimeoutTask: Task<Void, Never>?
+    private var longRunningFinalizationID: UUID?
     private var lastLongRunningResult: BatteryCommandResult?
     private var terminalFailure: BatteryCommandRunnerError?
+    private var isCancelling = false
     private let diagnostics: DiagnosticLog
 
     private let terminationGraceNanoseconds: UInt64 = 1_000_000_000
@@ -194,7 +212,22 @@ actor BatteryCommandRunner {
     }
 
     func isLongRunningActive() async -> Bool {
+        if let finalizationID = longRunningFinalizationID {
+            await waitForLongRunningFinalization(commandID: finalizationID)
+            return longRunningCommand != nil
+        }
         guard let command = longRunningCommand else { return false }
+        if DispatchTime.now().uptimeNanoseconds >= command.deadline {
+            var timedOut = command
+            timedOut.requestedTermination = .timedOut
+            longRunningCommand = timedOut
+            do {
+                _ = try await finalizeLongRunning(timedOut, terminateRemainingGroup: true)
+            } catch {
+                recordTerminalFailure(error)
+            }
+            return false
+        }
         guard let waitStatus = pollWaitStatus(pid: command.child.pid) else { return true }
         do {
             _ = try await finalizeLongRunning(
@@ -209,6 +242,10 @@ actor BatteryCommandRunner {
     }
 
     func longRunningResult() async -> BatteryCommandResult? {
+        if let finalizationID = longRunningFinalizationID {
+            await waitForLongRunningFinalization(commandID: finalizationID)
+            return lastLongRunningResult
+        }
         if let command = longRunningCommand,
            let waitStatus = pollWaitStatus(pid: command.child.pid) {
             do {
@@ -226,6 +263,11 @@ actor BatteryCommandRunner {
 
     @discardableResult
     func cancelLongRunning() async throws -> BatteryCommandResult? {
+        if let finalizationID = longRunningFinalizationID {
+            await waitForLongRunningFinalization(commandID: finalizationID)
+            if let terminalFailure { throw terminalFailure }
+            return lastLongRunningResult
+        }
         guard var command = longRunningCommand else { return lastLongRunningResult }
         command.requestedTermination = .cancelled
         longRunningCommand = command
@@ -238,6 +280,11 @@ actor BatteryCommandRunner {
     }
 
     func cancelAll() async throws {
+        guard !isCancelling else {
+            throw BatteryCommandRunnerError.runnerUnavailable("cancellation is already in progress")
+        }
+        isCancelling = true
+        defer { isCancelling = false }
         let pending = queue
         queue.removeAll()
         for item in pending {
@@ -268,6 +315,9 @@ actor BatteryCommandRunner {
 
     private func enqueue(_ action: QueueAction) async throws -> QueueOutcome {
         if let terminalFailure { throw terminalFailure }
+        guard !isCancelling else {
+            throw BatteryCommandRunnerError.runnerUnavailable("command rejected while cancellation is in progress")
+        }
         let id = UUID()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -310,7 +360,15 @@ actor BatteryCommandRunner {
                     }
                     let child = try spawn(command, id: item.id)
                     lastLongRunningResult = nil
-                    longRunningCommand = LongRunningCommand(child: child, requestedTermination: nil)
+                    longRunningCommand = LongRunningCommand(
+                        child: child,
+                        deadline: monotonicDeadline(after: command.timeout),
+                        requestedTermination: nil
+                    )
+                    scheduleLongRunningTimeout(
+                        commandID: child.id,
+                        timeout: command.timeout
+                    )
                     recordDiagnostic(
                         DiagnosticEvent(
                             category: .command,
@@ -624,6 +682,28 @@ actor BatteryCommandRunner {
         terminateRemainingGroup: Bool,
         knownWaitStatus: Int32? = nil
     ) async throws -> BatteryCommandResult {
+        if longRunningFinalizationID == command.child.id {
+            let deadline = monotonicDeadline(after: cancellationAcknowledgementTimeout)
+            while longRunningFinalizationID == command.child.id,
+                  DispatchTime.now().uptimeNanoseconds < deadline {
+                await Self.pollDelay()
+            }
+            if let result = lastLongRunningResult,
+               result.commandID == command.child.id {
+                return result
+            }
+            throw BatteryCommandRunnerError.cancellationFailed(
+                command: command.child.command.label,
+                message: "long-running finalization did not complete"
+            )
+        }
+        longRunningFinalizationID = command.child.id
+        defer {
+            if longRunningFinalizationID == command.child.id {
+                longRunningFinalizationID = nil
+            }
+        }
+
         let waitStatus: Int32
         if terminateRemainingGroup, processGroupExists(command.child.pid) {
             waitStatus = try await terminateProcessGroup(
@@ -647,10 +727,44 @@ actor BatteryCommandRunner {
             requestedTermination: command.requestedTermination,
             drainDeadline: monotonicDeadline(nanoseconds: terminationGraceNanoseconds)
         )
-        if longRunningCommand?.child.id == command.child.id { longRunningCommand = nil }
+        if longRunningCommand?.child.id == command.child.id {
+            longRunningCommand = nil
+            longRunningTimeoutTask?.cancel()
+            longRunningTimeoutTask = nil
+        }
         lastLongRunningResult = result
         recordDiagnostic(DiagnosticEvent(commandResult: result))
         return result
+    }
+
+    private func scheduleLongRunningTimeout(commandID: UUID, timeout: TimeInterval) {
+        longRunningTimeoutTask?.cancel()
+        let nanoseconds = timeout > 0 ? UInt64(timeout * 1_000_000_000) : 0
+        longRunningTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            await self?.expireLongRunningCommand(commandID: commandID)
+        }
+    }
+
+    private func expireLongRunningCommand(commandID: UUID) async {
+        guard var command = longRunningCommand,
+              command.child.id == commandID else { return }
+        command.requestedTermination = .timedOut
+        longRunningCommand = command
+        do {
+            _ = try await finalizeLongRunning(command, terminateRemainingGroup: true)
+        } catch {
+            recordTerminalFailure(error)
+        }
+    }
+
+    private func waitForLongRunningFinalization(commandID: UUID) async {
+        let deadline = monotonicDeadline(after: cancellationAcknowledgementTimeout)
+        while longRunningFinalizationID == commandID,
+              DispatchTime.now().uptimeNanoseconds < deadline {
+            await Self.pollDelay()
+        }
     }
 
     private func recordFailure(action: QueueAction, id: UUID, error: Error) {
@@ -693,13 +807,13 @@ actor BatteryCommandRunner {
             await Self.pollDelay()
         }
 
-        if child.command.descendantPolicy == .requireProcessGroupExit {
-            if child.stdoutBuffer?.hasFinishedDraining() == false {
-                try? child.stdoutReadHandle?.close()
-            }
-            if child.stderrBuffer?.hasFinishedDraining() == false {
-                try? child.stderrReadHandle?.close()
-            }
+        if child.stdoutBuffer?.hasFinishedDraining() == false {
+            try? child.stdoutReadHandle?.close()
+            child.stdoutDrainTask?.cancel()
+        }
+        if child.stderrBuffer?.hasFinishedDraining() == false {
+            try? child.stderrReadHandle?.close()
+            child.stderrDrainTask?.cancel()
         }
 
         let stdout = Self.decode(child.stdoutBuffer?.snapshot())
@@ -712,6 +826,8 @@ actor BatteryCommandRunner {
             exitCode: Self.exitCode(from: waitStatus),
             stdout: stdout,
             stderr: stderr,
+            stdoutWasTruncated: child.stdoutBuffer?.truncationStatus() ?? false,
+            stderrWasTruncated: child.stderrBuffer?.truncationStatus() ?? false,
             termination: requestedTermination ?? Self.termination(from: waitStatus)
         )
     }

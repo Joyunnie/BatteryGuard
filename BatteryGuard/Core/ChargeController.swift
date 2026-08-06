@@ -29,6 +29,15 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    private struct ControlCompensationError: LocalizedError {
+        let operationError: Error
+        let compensationError: Error
+
+        var errorDescription: String? {
+            "operation failed: \(operationError.localizedDescription); verified Maintain recovery failed: \(compensationError.localizedDescription)"
+        }
+    }
+
     private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "ChargeControl")
     private let backend: ChargeBackend
     private let monitor: BatteryMonitor
@@ -259,25 +268,27 @@ final class ChargeController: ObservableObject {
             try await refreshExternalDriftBeforeShutdown(expectation: expectation)
         }
 
-        let shutdownPolicy: ShutdownControlPolicy
-        switch mode {
+        let modeBeforeShutdown = mode
+        let requestedLimit = effectiveChargeLimit
+        let requestedPolicy: ShutdownControlPolicy
+        switch modeBeforeShutdown {
         case .toppingUp(let limit), .discharging(_, let limit):
-            shutdownPolicy = .restoreMaintain(limit)
+            requestedPolicy = .restoreMaintain(limit)
         case .transitioning(let transition):
             switch transition {
             case .enteringHeat, .restoringHeat:
-                shutdownPolicy = .keepChargingDisabled
+                requestedPolicy = .keepChargingDisabled
             default:
-                shutdownPolicy = .restoreMaintain(transition.previousMode?.maintainLimit ?? effectiveChargeLimit)
+                requestedPolicy = .restoreMaintain(transition.previousMode?.maintainLimit ?? requestedLimit)
             }
         case .heatBlocked, .failed(_, _, true):
-            shutdownPolicy = .keepChargingDisabled
+            requestedPolicy = .keepChargingDisabled
         case .externalDrift(_, let observed):
             switch observed {
             case .maintaining:
-                shutdownPolicy = .preserveMaintain
+                requestedPolicy = .preserveMaintain
             case .chargingDisabled:
-                shutdownPolicy = .keepChargingDisabled
+                requestedPolicy = .keepChargingDisabled
             case .charging, .discharging, .unavailable, .inconsistent:
                 let message = "외부 CLI 변경 상태를 먼저 해결해야 안전하게 종료할 수 있습니다: \(observed.userDescription)"
                 commandError = message
@@ -294,7 +305,7 @@ final class ChargeController: ObservableObject {
                 throw BatteryError.unsupported(message)
             }
         default:
-            shutdownPolicy = .preserveMaintain
+            requestedPolicy = .preserveMaintain
         }
 
         isShuttingDown = true
@@ -302,44 +313,63 @@ final class ChargeController: ObservableObject {
         activeOperationTask?.cancel()
         activeOperationTask = nil
         activeOperationID = nil
-        controlTimer?.invalidate()
-        smcTemperatureTimer?.invalidate()
+        operationGeneration &+= 1
         chargeLimitDebounceWork?.cancel()
         chargeLimitDebounceWork = nil
         pendingChargeLimit = nil
-        monitor.stopMonitoring()
         monitor.allowSleep()
         ledGeneration &+= 1
         let shutdownLEDGeneration = ledGeneration
-        removeSleepWakeObservers()
-        stopExternalReconciliation()
 
         do {
             try await backend.requestCancellation()
+            let freshStatus = try await backend.readControlStatus()
+            let shutdownPolicy: ShutdownControlPolicy
+            if case .preserveMaintain = requestedPolicy,
+               let actualLimit = freshStatus.maintainLevel,
+               freshStatus.isVerifiedMaintain(level: actualLimit) {
+                shutdownPolicy = .preserveMaintain
+            } else {
+                switch requestedPolicy {
+                case .keepChargingDisabled:
+                    shutdownPolicy = .keepChargingDisabled
+                case .preserveMaintain, .restoreMaintain:
+                    shutdownPolicy = .restoreMaintain(requestedLimit)
+                }
+            }
             switch shutdownPolicy {
             case .preserveMaintain:
                 break
             case .restoreMaintain(let limit):
                 try await backend.applyMaintain(level: limit)
                 let status = try await backend.readControlStatus()
-                guard status.charging != .unknown,
-                      status.maintainLevel == limit,
-                      status.maintainWorker.isRunning,
-                      status.isDischarging == false else {
+                guard status.isVerifiedMaintain(level: limit) else {
                     throw BatteryError.commandFailed("shutdown maintain restore", -1, "verified maintain worker was not restored at \(limit)%")
                 }
             case .keepChargingDisabled:
                 try await backend.cancelLongRunningOperation()
                 try await backend.disableCharging()
                 let status = try await backend.readControlStatus()
-                guard status.charging == .disabled,
-                      status.isDischarging == false,
-                      !status.maintainWorker.isRunning else {
+                guard status.isVerifiedChargingDisabled else {
                     throw BatteryError.commandFailed("shutdown heat protection", -1, "charging was not fully verified disabled")
                 }
             }
             try await magSafeLED.shutdown(generation: shutdownLEDGeneration)
+            controlTimer?.invalidate()
+            controlTimer = nil
+            smcTemperatureTimer?.invalidate()
+            smcTemperatureTimer = nil
+            monitor.stopMonitoring()
+            removeSleepWakeObservers()
+            stopExternalReconciliation()
         } catch {
+            isShuttingDown = false
+            readiness = .ready
+            mode = .failed(
+                previous: modeBeforeShutdown.restorableMode ?? .maintaining(limit: requestedLimit),
+                message: error.localizedDescription,
+                controlsBlocked: true
+            )
             commandError = "종료 안전 정리 실패: \(error.localizedDescription)"
             refreshDisplayedError()
             logger.error("Shutdown cleanup failed: \(error.localizedDescription, privacy: .public)")
@@ -544,9 +574,15 @@ final class ChargeController: ObservableObject {
             case .success(let temperature):
                 self.cachedSMCTemperature = temperature
                 self.cachedSMCTemperatureAt = Date()
+                if self.monitor.batteryInfo == nil {
+                    self.evaluateHeatProtectionWithoutBatteryInfo(temperature: temperature)
+                }
             case .failure:
                 self.cachedSMCTemperature = nil
                 self.cachedSMCTemperatureAt = nil
+                if self.monitor.batteryInfo == nil {
+                    self.evaluateHeatProtectionWithoutBatteryInfo(temperature: nil)
+                }
             }
         }
     }
@@ -554,6 +590,26 @@ final class ChargeController: ObservableObject {
     private func updateDisplayState() {
         guard let info = monitor.batteryInfo else {
             setSensorError("배터리 상태를 읽을 수 없습니다.")
+            switch mode {
+            case .toppingUp, .discharging:
+                checkLongRunningOperation(
+                    expectedMode: mode,
+                    fallbackMessage: "배터리 측정값이 없는 동안 장기 실행 프로세스가 종료되었습니다."
+                )
+            default:
+                break
+            }
+            if settings.heatProtectionEnabled {
+                let recentTemperature: Double?
+                if let cachedSMCTemperature,
+                   let cachedSMCTemperatureAt,
+                   Date().timeIntervalSince(cachedSMCTemperatureAt) <= 15 {
+                    recentTemperature = cachedSMCTemperature
+                } else {
+                    recentTemperature = nil
+                }
+                evaluateHeatProtectionWithoutBatteryInfo(temperature: recentTemperature)
+            }
             refreshDisplayedError()
             return
         }
@@ -675,6 +731,31 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    private func evaluateHeatProtectionWithoutBatteryInfo(temperature: Double?) {
+        lastTemperature = temperature
+        guard let temperature else {
+            setSensorError("배터리 측정값과 SMC 온도를 읽을 수 없어 Heat Protection이 충전을 차단합니다.")
+            if shouldAttemptHeatProtection {
+                enterHeatProtection(
+                    previous: mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit)
+                )
+            }
+            return
+        }
+
+        clearSensorError()
+        if temperature > settings.heatProtectionThreshold {
+            if shouldAttemptHeatProtection {
+                enterHeatProtection(
+                    previous: mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit)
+                )
+            }
+        } else if temperature <= settings.heatProtectionThreshold - 2,
+                  case .heatBlocked(let previous) = mode {
+            restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: true)
+        }
+    }
+
     private var shouldAttemptHeatProtection: Bool {
         guard heatProtectionRetryAfter.map({ Date() >= $0 }) ?? true else { return false }
         switch mode {
@@ -783,6 +864,29 @@ final class ChargeController: ObservableObject {
 
     // MARK: - User actions
 
+    func setHeatProtectionEnabled(_ enabled: Bool) {
+        guard enabled != settings.heatProtectionEnabled else { return }
+        settings.heatProtectionEnabled = enabled
+        if enabled {
+            if let info = monitor.batteryInfo {
+                evaluateHeatProtection(using: info)
+            } else {
+                evaluateHeatProtectionWithoutBatteryInfo(temperature: cachedSMCTemperature)
+            }
+        } else if case .heatBlocked(let previous) = mode {
+            restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
+        } else if case .failed(let previous?, _, true) = mode {
+            restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
+        }
+    }
+
+    func setLEDControlEnabled(_ enabled: Bool) {
+        guard enabled != settings.controlMagSafeLED else { return }
+        settings.controlMagSafeLED = enabled
+        ledIntent = nil
+        updateLED()
+    }
+
     func setChargeLimit(_ limit: Int) {
         guard isReady,
               activeOperationID == nil,
@@ -828,9 +932,17 @@ final class ChargeController: ObservableObject {
                 do {
                     try await backend.startDischarge(to: limit)
                 } catch {
+                    let operationError = error
                     try Task.checkCancellation()
-                    try? await backend.applyMaintain(level: limit)
-                    throw error
+                    do {
+                        try await backend.applyMaintain(level: limit)
+                    } catch {
+                        throw ControlCompensationError(
+                            operationError: operationError,
+                            compensationError: error
+                        )
+                    }
+                    throw operationError
                 }
             },
             onSuccess: { [weak self] in
@@ -839,6 +951,13 @@ final class ChargeController: ObservableObject {
                 if !self.monitor.preventSleep(reason: "BatteryGuard: Discharge in progress") {
                     self.commandError = "Discharge는 시작했지만 절전 방지 설정에 실패했습니다."
                 }
+            },
+            onFailure: { [weak self] error in
+                self?.mode = .failed(
+                    previous: .maintaining(limit: limit),
+                    message: error.localizedDescription,
+                    controlsBlocked: error is ControlCompensationError
+                )
             }
         )
     }
@@ -879,12 +998,27 @@ final class ChargeController: ObservableObject {
                 do {
                     try await backend.startTopUp(to: 100)
                 } catch {
+                    let operationError = error
                     try Task.checkCancellation()
-                    try? await backend.applyMaintain(level: returnLimit)
-                    throw error
+                    do {
+                        try await backend.applyMaintain(level: returnLimit)
+                    } catch {
+                        throw ControlCompensationError(
+                            operationError: operationError,
+                            compensationError: error
+                        )
+                    }
+                    throw operationError
                 }
             },
-            onSuccess: { [weak self] in self?.mode = .toppingUp(returnLimit: returnLimit) }
+            onSuccess: { [weak self] in self?.mode = .toppingUp(returnLimit: returnLimit) },
+            onFailure: { [weak self] error in
+                self?.mode = .failed(
+                    previous: .maintaining(limit: returnLimit),
+                    message: error.localizedDescription,
+                    controlsBlocked: error is ControlCompensationError
+                )
+            }
         )
     }
 
@@ -988,7 +1122,10 @@ final class ChargeController: ObservableObject {
             return
         }
 
-        mode = .externalDrift(expected: expectation, observed: observed)
+        let recoveryExpectation = ReconciledChargeExpectation.maintaining(
+            limit: expectation.restorableMode.maintainLimit
+        )
+        mode = .externalDrift(expected: recoveryExpectation, observed: observed)
         driftError = "외부 CLI 상태 감지: \(observed.userDescription). \(message)"
         refreshDisplayedError()
         await diagnostics.record(
@@ -1192,10 +1329,7 @@ final class ChargeController: ObservableObject {
         let status = snapshot.status
         switch expectation {
         case .maintaining(let limit):
-            return status.charging != .unknown &&
-                status.maintainLevel == limit &&
-                status.maintainWorker.isRunning &&
-                status.isDischarging == false
+            return status.isVerifiedMaintain(level: limit)
         case .toppingUp:
             return snapshot.ownsLongRunningOperation == true &&
                 status.charging == .enabled &&
@@ -1207,9 +1341,7 @@ final class ChargeController: ObservableObject {
                 status.isDischarging == true &&
                 status.maintainWorker.isStopped
         case .chargingDisabled:
-            return status.charging == .disabled &&
-                status.isDischarging == false &&
-                status.maintainWorker.isStopped
+            return status.isVerifiedChargingDisabled
         }
     }
 
@@ -1226,9 +1358,7 @@ final class ChargeController: ObservableObject {
         }
         if let limit = status.maintainLevel,
            UserSettings.chargeLimitRange.contains(limit),
-           status.charging != .unknown,
-           status.isDischarging == false,
-           status.maintainWorker.isRunning {
+           status.isVerifiedMaintain(level: limit) {
             return .maintaining(limit: limit)
         }
         if status.charging == .disabled,
@@ -1284,6 +1414,10 @@ final class ChargeController: ObservableObject {
 
     func reconcileAfterWake() async {
         guard !isShuttingDown else { return }
+        if case .externalDrift(let expectation, _) = mode {
+            await reconcileExternalDriftAfterWake(expectation: expectation)
+            return
+        }
         let prior = mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit)
         activeOperationTask?.cancel()
         activeOperationTask = nil
@@ -1297,10 +1431,10 @@ final class ChargeController: ObservableObject {
         do {
             try await backend.requestCancellation()
             guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
-            guard let freshInfo = monitor.readBatteryInfo() else {
-                throw BatteryError.unsupported("Wake 후 최신 배터리 상태를 읽지 못했습니다.")
+            let freshInfo = monitor.readBatteryInfo()
+            if let freshInfo {
+                monitor.batteryInfo = freshInfo
             }
-            monitor.batteryInfo = freshInfo
             if settings.heatProtectionEnabled {
                 let temperature = await readFreshSafetyTemperature(fallbackInfo: freshInfo)
                 guard let temperature, temperature <= settings.heatProtectionThreshold else {
@@ -1328,6 +1462,65 @@ final class ChargeController: ObservableObject {
             mode = .failed(previous: prior, message: error.localizedDescription, controlsBlocked: true)
             readiness = .failed(error.localizedDescription)
             commandError = "Wake reconciliation 실패: \(error.localizedDescription)"
+            refreshDisplayedError()
+        }
+    }
+
+    private func reconcileExternalDriftAfterWake(
+        expectation: ReconciledChargeExpectation
+    ) async {
+        let prior = expectation.restorableMode
+        activeOperationTask?.cancel()
+        activeOperationTask = nil
+        operationGeneration &+= 1
+        let reconciliationID = operationGeneration
+        activeOperationID = reconciliationID
+        readiness = .reconciling
+        cachedSMCTemperature = nil
+        cachedSMCTemperatureAt = nil
+        ledIntent = nil
+
+        do {
+            try await backend.requestCancellation()
+            guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
+            let freshInfo = monitor.readBatteryInfo()
+            if let freshInfo {
+                monitor.batteryInfo = freshInfo
+            }
+            if settings.heatProtectionEnabled {
+                let temperature = await readFreshSafetyTemperature(fallbackInfo: freshInfo)
+                guard let temperature, temperature <= settings.heatProtectionThreshold else {
+                    try await backend.disableCharging()
+                    guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
+                    mode = .heatBlocked(previous: prior)
+                    readiness = .ready
+                    driftError = nil
+                    activeOperationID = nil
+                    updateLED()
+                    return
+                }
+            }
+
+            let snapshot = try await readReconciliationSnapshot(for: expectation)
+            guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
+            if Self.status(snapshot, matches: expectation) {
+                mode = Self.mode(from: expectation)
+                driftError = nil
+            } else {
+                let observed = Self.observedMode(from: snapshot.status)
+                mode = .externalDrift(expected: expectation, observed: observed)
+                driftError = "Wake 후 외부 CLI 변경 유지: \(observed.userDescription)"
+            }
+            readiness = .ready
+            activeOperationID = nil
+            refreshDisplayedError()
+            updateLED()
+        } catch {
+            guard activeOperationID == reconciliationID else { return }
+            activeOperationID = nil
+            mode = .externalDrift(expected: expectation, observed: .unavailable(error.localizedDescription))
+            readiness = .ready
+            driftError = "Wake 후 실제 충전 상태를 확인할 수 없습니다: \(error.localizedDescription)"
             refreshDisplayedError()
         }
     }

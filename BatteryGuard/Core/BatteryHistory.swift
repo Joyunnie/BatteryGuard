@@ -46,7 +46,10 @@ struct BatteryHistoryStoreOperations {
 
 @MainActor
 final class BatteryHistory {
-    static let shared = BatteryHistory(diagnostics: .shared)
+    static let shared = BatteryHistory(
+        inMemory: AppRuntime.isRunningTests,
+        diagnostics: AppRuntime.isRunningTests ? .disabled : .shared
+    )
 
     struct ChartRecord: Equatable {
         let timestamp: Date
@@ -64,6 +67,7 @@ final class BatteryHistory {
 
     private let container: NSPersistentContainer
     private let inMemory: Bool
+    var usesInMemoryStore: Bool { inMemory }
     private let diagnostics: DiagnosticLog
     private let storeOperations: BatteryHistoryStoreOperations
     private let now: @Sendable () -> Date
