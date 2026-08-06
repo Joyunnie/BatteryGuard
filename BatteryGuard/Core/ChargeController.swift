@@ -498,7 +498,7 @@ final class ChargeController: ObservableObject {
                 throw BatteryError.unsupported("종료 전 상태 확인 중 제어 상태가 변경되었습니다. 다시 종료하세요.")
             }
             if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
-                mode = ChargeReconciliationPolicy.mode(from: expectation)
+                mode = expectation.reconciledMode
                 driftError = nil
                 refreshDisplayedError()
                 return
@@ -1429,7 +1429,7 @@ final class ChargeController: ObservableObject {
                 } else {
                     recoveredFromFailure = false
                 }
-                let reconciledMode = ChargeReconciliationPolicy.mode(from: expectation)
+                let reconciledMode = expectation.reconciledMode
                 if mode != reconciledMode {
                     mode = reconciledMode
                     if recoveredFromFailure { commandError = nil }
@@ -1495,18 +1495,22 @@ final class ChargeController: ObservableObject {
         for expectation: ReconciledChargeExpectation
     ) async throws -> ChargeReconciliationSnapshot {
         let status = try await backend.readControlStatus()
-        let ownsLongRunningOperation: Bool?
+        let ownedLongRunningOperation: OwnedLongRunningOperationObservation
         switch expectation {
         case .toppingUp, .discharging:
-            ownsLongRunningOperation = await backend.isLongRunningOperationActive()
+            ownedLongRunningOperation = await backend.isLongRunningOperationActive()
+                ? .active
+                : .inactive
         case .controlReleasing, .controlReleased:
-            ownsLongRunningOperation = await backend.isLongRunningOperationActive()
+            ownedLongRunningOperation = await backend.isLongRunningOperationActive()
+                ? .active
+                : .inactive
         case .maintaining, .chargingDisabled:
-            ownsLongRunningOperation = nil
+            ownedLongRunningOperation = .notRequired
         }
         return ChargeReconciliationSnapshot(
             status: status,
-            ownsLongRunningOperation: ownsLongRunningOperation
+            ownedLongRunningOperation: ownedLongRunningOperation
         )
     }
 
@@ -1655,7 +1659,7 @@ final class ChargeController: ObservableObject {
             let snapshot = try await readReconciliationSnapshot(for: expectation)
             guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
             if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
-                mode = ChargeReconciliationPolicy.mode(from: expectation)
+                mode = expectation.reconciledMode
                 driftError = nil
             } else {
                 let observed = ChargeReconciliationPolicy.observedMode(from: snapshot.status)

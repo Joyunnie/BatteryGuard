@@ -174,10 +174,10 @@ checkpoint 8까지의 기능 구현은 완료됐다. 남은 필수 작업은 승
 
 ### 0.13 PR #7 책임 경계 분리 결과
 
-- `BatteryControlOwnership`과 crash-durable journal 구현을 `UserSettings.swift`에서 `BatteryControlOwnership.swift`로 옮겼다. 설정 객체는 preference와 ownership transition 요청만 담당하고 POSIX 파일 저장 세부사항을 소유하지 않는다.
-- reconciliation의 full-tuple 일치 판정, observed mode 해석과 expectation/mode 매핑을 I/O 없는 `ChargeReconciliationPolicy`로 추출했다. `ChargeController`는 status/process ownership을 읽고 published state와 task generation을 관리하는 orchestration에 집중한다.
-- 여러 파일의 extension이 controller private 상태에 접근하도록 access level을 넓히지 않았다. 새 policy 경계는 controller 없이 직접 테스트하며 pending release 비승격, released-control process ownership, exact Maintain worker와 restorable mode 매핑을 검증한다.
-- strict-concurrency complete 및 warnings-as-errors 조건에서 전체 128개 테스트와 Debug analyze가 통과했다. 파일 이동과 순수 policy 추출뿐이며 실제 battery/SMC 명령과 제어 의미는 변경하지 않았다.
+- `BatteryControlOwnership`과 crash-durable POSIX journal 구현을 `UserSettings.swift`에서 `BatteryControlOwnership.swift`로 옮겼다. `UserSettings`는 journal의 위치 결정, 초기 load/migration, ownership transition과 persistence error를 계속 소유하지만 POSIX 파일 I/O 세부사항은 소유하지 않는다.
+- reconciliation의 full-tuple 일치 판정과 observed mode 해석을 I/O 없는 `ChargeReconciliationPolicy`로 추출했다. expectation의 UI state 매핑은 `ChargeState`에 남기고, `ChargeController`는 status/process ownership을 읽고 published state와 task generation을 관리하는 orchestration에 집중한다.
+- 여러 파일의 extension이 controller private 상태에 접근하도록 access level을 넓히지 않았다. PR #7 리뷰 보완에서 optional process ownership을 명시적 `notRequired`/`active`/`inactive` 관측으로 교체해 미관측 상태가 released control 성공으로 통과하지 못하게 했다. UI mode/문구 매핑은 `ChargeState`로 옮기고 charge-limit constraint와 policy 테스트도 독립 파일로 분리했으며, 모든 expectation tuple, worker 실패 상태와 mode 매핑을 직접 검증한다.
+- strict-concurrency complete 및 warnings-as-errors 조건에서 전체 135개 테스트, Release build와 Debug analyze가 통과했다. 파일 이동과 순수 policy 추출뿐이며 실제 battery/SMC 명령과 제어 의미는 변경하지 않았다.
 
 PR #7 이후에도 `ChargeController`는 lifecycle, Heat Protection, 사용자 intent와 LED orchestration을 함께 가진 큰 타입이다. 추가 분리는 실제 하드웨어 checklist가 통과한 뒤 각 subsystem의 명시적 input/output 계약을 먼저 정의해 별도 PR로 진행한다. 단일 테스트 파일의 물리적 분리도 그때 production 경계와 같은 단위로 수행한다.
 

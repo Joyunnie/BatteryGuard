@@ -2,14 +2,6 @@
 
 import Foundation
 
-enum ChargeControlConstraints {
-    nonisolated static let limitRange = 20...100
-
-    nonisolated static func validatedLimit(_ value: Int) -> Int {
-        min(max(value, limitRange.lowerBound), limitRange.upperBound)
-    }
-}
-
 enum ChargeState: String {
     case unknown = "상태 확인 필요"
     case charging = "충전 중"
@@ -99,6 +91,22 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
         case .chargingDisabled: return "충전 비활성"
         case .controlReleasing: return "BatteryGuard 제어 해제 미완료"
         case .controlReleased: return "BatteryGuard 제어 끔"
+        }
+    }
+
+    var reconciledMode: ChargeMode {
+        switch self {
+        case .controlReleasing:
+            return .externalDrift(
+                expected: self,
+                observed: .unavailable("BatteryGuard control release is still pending")
+            )
+        case .controlReleased(let lastLimit): return .controlDisabled(lastLimit: lastLimit)
+        case .maintaining(let limit): return .maintaining(limit: limit)
+        case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
+        case .discharging(let target, let returnLimit):
+            return .discharging(target: target, returnLimit: returnLimit)
+        case .chargingDisabled(let previous): return .heatBlocked(previous: previous)
         }
     }
 }

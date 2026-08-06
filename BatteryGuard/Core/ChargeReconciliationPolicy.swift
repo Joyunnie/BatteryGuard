@@ -1,8 +1,12 @@
-import Foundation
+enum OwnedLongRunningOperationObservation: Equatable, Sendable {
+    case notRequired
+    case active
+    case inactive
+}
 
 struct ChargeReconciliationSnapshot: Sendable {
     let status: BatteryControlStatus
-    let ownsLongRunningOperation: Bool?
+    let ownedLongRunningOperation: OwnedLongRunningOperationObservation
 }
 
 enum ChargeReconciliationPolicy {
@@ -15,12 +19,12 @@ enum ChargeReconciliationPolicy {
         case .maintaining(let limit):
             return status.isVerifiedMaintain(level: limit)
         case .toppingUp:
-            return snapshot.ownsLongRunningOperation == true &&
+            return snapshot.ownedLongRunningOperation == .active &&
                 status.charging == .enabled &&
                 status.isDischarging == false &&
                 status.maintainWorker.isStopped
         case .discharging:
-            return snapshot.ownsLongRunningOperation == true &&
+            return snapshot.ownedLongRunningOperation == .active &&
                 status.charging == .disabled &&
                 status.isDischarging == true &&
                 status.maintainWorker.isStopped
@@ -29,7 +33,7 @@ enum ChargeReconciliationPolicy {
         case .controlReleasing:
             return false
         case .controlReleased:
-            return snapshot.ownsLongRunningOperation != true &&
+            return snapshot.ownedLongRunningOperation == .inactive &&
                 status.isCompatibleWithReleasedControl
         }
     }
@@ -56,22 +60,6 @@ enum ChargeReconciliationPolicy {
             return .chargingDisabled
         }
         return .inconsistent(status.diagnosticDescription)
-    }
-
-    static func mode(from expectation: ReconciledChargeExpectation) -> ChargeMode {
-        switch expectation {
-        case .controlReleasing:
-            return .externalDrift(
-                expected: expectation,
-                observed: .unavailable("BatteryGuard control release is still pending")
-            )
-        case .controlReleased(let lastLimit): return .controlDisabled(lastLimit: lastLimit)
-        case .maintaining(let limit): return .maintaining(limit: limit)
-        case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
-        case .discharging(let target, let returnLimit):
-            return .discharging(target: target, returnLimit: returnLimit)
-        case .chargingDisabled(let previous): return .heatBlocked(previous: previous)
-        }
     }
 
     static func expectation(fromActiveMode mode: ChargeMode) -> ReconciledChargeExpectation? {
