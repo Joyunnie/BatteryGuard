@@ -26,19 +26,11 @@ struct DashboardView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear {
-            refreshHistory()
-            Task { @MainActor in
-                do {
-                    try await Task.sleep(nanoseconds: 100_000_000)
-                } catch {
-                    return
-                }
-                refreshHistory()
-            }
+        .task {
+            await refreshHistory()
         }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
-            refreshHistory()
+            Task { await refreshHistory() }
         }
     }
 
@@ -280,25 +272,17 @@ struct DashboardView: View {
         }
     }
 
-    private func refreshHistory() {
+    @MainActor
+    private func refreshHistory() async {
         let history = BatteryHistory.shared
-        historyRecords = history.fetchLast24Hours()
-        historyError = history.lastError
+        historyRecords = await history.loadLast24Hours()
+        historyError = history.visibleError
     }
 
     private func healthColor(_ percent: Double) -> Color {
         if percent >= 90 { return .green }
         if percent >= 80 { return .orange }
         return .red
-    }
-}
-
-enum BatteryDisplay {
-    static func amperage(_ value: Int?) -> String {
-        guard let value else { return "알 수 없음" }
-        if value > 0 { return "+\(value) mA (충전)" }
-        if value < 0 { return "\(value) mA (방전)" }
-        return "0 mA (대기)"
     }
 }
 

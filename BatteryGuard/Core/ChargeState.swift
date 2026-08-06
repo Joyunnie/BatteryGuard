@@ -10,3 +10,12 @@ enum ChargeState: String {
     case notConnected = "전원 미연결"
     case topUp = "Top Up 중"
 }
+
+enum BatteryDisplay {
+    static func amperage(_ value: Int?) -> String {
+        guard let value else { return "알 수 없음" }
+        if value > 0 { return "+\(value) mA (충전)" }
+        if value < 0 { return "\(value) mA (방전)" }
+        return "0 mA (대기)"
+    }
+}

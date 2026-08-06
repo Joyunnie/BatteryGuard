@@ -142,9 +142,16 @@ final class UserSettings: ObservableObject {
             } else {
                 try launchAtLoginService.unregister()
             }
-            launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
-            launchAtLoginError = nil
-            print("[LaunchAtLogin] \(action) returned — status AFTER: \(launchAtLoginService.status.debugLabel)")
+            let observedStatus = launchAtLoginService.status
+            launchAtLoginState = LaunchAtLoginState(observedStatus)
+            if launchAtLoginState.isRequested == requested {
+                launchAtLoginError = nil
+            } else {
+                launchAtLoginError = requested
+                    ? "로그인 항목 등록 요청 후에도 시스템 상태가 활성화되지 않았습니다."
+                    : "로그인 항목 해제 요청 후에도 시스템 상태가 활성 상태입니다."
+            }
+            print("[LaunchAtLogin] \(action) returned — status AFTER: \(observedStatus.debugLabel)")
         } catch {
             launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
             launchAtLoginError = error.localizedDescription
@@ -154,5 +161,6 @@ final class UserSettings: ObservableObject {
 
     func refreshLaunchAtLoginStatus() {
         launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
+        launchAtLoginError = nil
     }
 }

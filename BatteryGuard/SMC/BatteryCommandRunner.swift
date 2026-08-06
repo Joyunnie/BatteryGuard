@@ -13,6 +13,7 @@ enum BatteryCommandTermination: Equatable, Sendable {
 
 struct BatteryCommandResult: Equatable, Sendable {
     let commandID: UUID
+    let operationID: UUID
     let command: String
     let exitCode: Int32
     let stdout: String
@@ -94,6 +95,7 @@ actor BatteryCommandRunner {
         let arguments: [String]
         let environment: [String: String]?
         let label: String
+        let operationID: UUID?
         let timeout: TimeInterval
         let outputPolicy: OutputPolicy
         let descendantPolicy: DescendantPolicy
@@ -103,6 +105,7 @@ actor BatteryCommandRunner {
             arguments: [String],
             environment: [String: String]? = nil,
             label: String,
+            operationID: UUID? = nil,
             timeout: TimeInterval = 30,
             outputPolicy: OutputPolicy = .capture,
             descendantPolicy: DescendantPolicy = .requireProcessGroupExit
@@ -111,6 +114,7 @@ actor BatteryCommandRunner {
             self.arguments = arguments
             self.environment = environment
             self.label = label
+            self.operationID = operationID ?? DiagnosticContext.operationID
             self.timeout = timeout
             self.outputPolicy = outputPolicy
             self.descendantPolicy = descendantPolicy
@@ -309,11 +313,11 @@ actor BatteryCommandRunner {
                     longRunningCommand = LongRunningCommand(child: child, requestedTermination: nil)
                     recordDiagnostic(
                         DiagnosticEvent(
-                            id: item.id,
                             category: .command,
-                            operationID: item.id.uuidString,
+                            operationID: command.operationID ?? item.id,
+                            commandID: item.id,
                             operation: command.label,
-                            termination: "launched"
+                            outcome: .launched
                         )
                     )
                     item.continuation.resume(returning: .longRunningID(item.id))
@@ -657,14 +661,21 @@ actor BatteryCommandRunner {
         }
         recordDiagnostic(
             DiagnosticEvent(
-                id: id,
                 category: .command,
-                operationID: id.uuidString,
+                operationID: operationID(for: action) ?? id,
+                commandID: id,
                 operation: operation,
-                termination: "failedBeforeResult",
-                stderrSummary: error.localizedDescription
+                outcome: .failed,
+                message: error.localizedDescription
             )
         )
+    }
+
+    private func operationID(for action: QueueAction) -> UUID? {
+        switch action {
+        case .execute(let command), .launchLongRunning(let command):
+            return command.operationID
+        }
     }
 
     private func recordDiagnostic(_ event: DiagnosticEvent) {
@@ -696,6 +707,7 @@ actor BatteryCommandRunner {
 
         return BatteryCommandResult(
             commandID: child.id,
+            operationID: child.command.operationID ?? child.id,
             command: child.command.label,
             exitCode: Self.exitCode(from: waitStatus),
             stdout: stdout,

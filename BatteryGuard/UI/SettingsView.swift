@@ -6,6 +6,7 @@ import AppKit
 struct SettingsView: View {
     @EnvironmentObject var settings: UserSettings
     @EnvironmentObject var controller: ChargeController
+    @State private var diagnosticLogError: String?
 
     var body: some View {
         TabView {
@@ -131,8 +132,20 @@ struct SettingsView: View {
 
             Section("진단") {
                 Button("진단 로그 보기") {
-                    guard let fileURL = DiagnosticLog.shared.fileURL else { return }
-                    NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                    Task {
+                        do {
+                            let fileURL = try await DiagnosticLog.shared.prepareForViewing()
+                            diagnosticLogError = nil
+                            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                        } catch {
+                            diagnosticLogError = error.localizedDescription
+                        }
+                    }
+                }
+                if let diagnosticLogError {
+                    Text(diagnosticLogError)
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
                 }
                 if let fileURL = DiagnosticLog.shared.fileURL {
                     Text(fileURL.path)
@@ -170,16 +183,5 @@ struct SettingsView: View {
         case .unknown(let value):
             return "로그인 항목 상태를 확인할 수 없습니다 (\(value))."
         }
-    }
-}
-
-enum AppMetadata {
-    static var version: String {
-        guard let value = Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String, !value.isEmpty else {
-            return "알 수 없음"
-        }
-        return value
     }
 }

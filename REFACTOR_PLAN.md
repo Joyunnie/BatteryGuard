@@ -75,6 +75,18 @@ PR #4는 3.7의 남은 모니터링·이력·UI 정확성과 로컬 진단 로�
 - strict-concurrency complete와 warnings-as-errors 조건에서 59개 테스트가 모두 통과했다. Release build와 Debug analyze도 같은 조건으로 통과했다.
 - 이 단계는 하드웨어 명령 의미나 상태 전이를 변경하지 않으므로 실제 배터리 조작 검증은 실행하지 않았다. periodic reconciliation, sleep/wake, Terminal drift와 제어 소유권 후속 PR에서 통제된 하드웨어 체크를 재개한다.
 
+### 0.7 PR #4 리뷰 수정 결과
+
+- Core Data 준비를 고정 sleep으로 추측하지 않고 `loading -> ready/failed` 상태와 async waiter로 노출한다. Dashboard와 테스트는 store 준비 완료를 await한 뒤 fetch한다.
+- controller의 semantic operation UUID를 Task-local context로 `SMCKit`과 `BatteryCommandRunner`까지 전달한다. command ID와 event ID는 별도로 유지하고, 같은 제어 작업의 command/status/verified before-after 기록은 하나의 operation ID로 연관된다.
+- 오래된 비동기 완료는 조용히 버리지 않고 `superseded` 진단 이벤트로 기록한다. `ChargeMode`와 readiness의 진단 문자열은 `String(describing:)` 대신 명시적이고 안정적인 label을 사용한다.
+- 진단 outcome을 typed enum으로 바꾸고 event ID 중복을 제거했다. 이전 로컬 JSON schema는 읽을 때 새 schema로 호환하며, 로그 저장 실패 시 Finder를 열지 않고 Settings에 오류를 표시한다.
+- history의 load/save/fetch 오류를 분리해 성공한 작업이 다른 오류를 지우지 않게 했다. production 코드 안의 문자열 기반 failure hook은 최소 Core Data operation seam으로 교체했다.
+- 로그인 항목 register/unregister 반환 뒤 실제 status 불일치를 오류로 표시하고, 새 시스템 상태 refresh가 오래된 action 오류를 제거하게 했다.
+- activation policy 변경을 한 coordinator에 모아 반환값을 확인한다. regular policy가 거부되면 앱 활성화를 성공처럼 진행하지 않고, 마지막 일반 창이 닫힌 경우에만 accessory policy를 복원한다.
+- strict-concurrency complete와 warnings-as-errors 조건에서 전체 70개 테스트가 통과했다. 실제 battery CLI, 로그인 항목과 production Core Data store는 테스트 중 사용하지 않았다.
+- 위 수정은 관측·초기화·진단 경계를 강화하며 실제 충전 명령의 의미는 바꾸지 않는다. 따라서 PR #4의 후속 단계 순서와 하드웨어 검증 보류 조건은 변경하지 않는다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -569,7 +581,7 @@ enum ChargeMode: Equatable {
 3. `[PR #3 완료]` privileged CLI preflight, 완전한 async readiness와 단일 `ChargeMode`
 4. `[PR #3 완료]` lifecycle, Heat Protection, Top Up/Discharge와 generation 기반 LED
 5. `[PR #3 완료]` 안전 실패 경로 자동 테스트와 통제된 하드웨어 검증. sleep/wake 및 Terminal drift 실기 확인은 관련 후속 구현 뒤 수행
-6. `[PR #4]` 모니터링 단위·optional 검증, 이력 오류/상한/heartbeat, 로그인 승인 상태, Bundle 버전, activation policy와 로컬 순환 진단 로그
+6. `[PR #4 수정 완료, 누적 리뷰 대상]` 모니터링 단위·optional 검증, 명시적 이력 readiness/오류/상한/heartbeat, 로그인 승인 상태, Bundle 버전, 검증된 activation policy와 correlated 로컬 순환 진단 로그
 7. `[후속 PR]` periodic reconciliation과 Terminal drift 감지/표시, sleep/wake 및 drift 실기 검증
 8. `[후속 PR]` macOS native Charge Limit 제어 소유권 안내와 명시적 `Disable BatteryGuard Control` UX
 

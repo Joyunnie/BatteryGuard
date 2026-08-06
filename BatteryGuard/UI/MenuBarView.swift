@@ -167,8 +167,7 @@ struct MenuBarView: View {
         HStack {
             Button("대시보드") {
                 openWindow(id: "dashboard")
-                NSApp.setActivationPolicy(.regular)
-                NSApp.activate(ignoringOtherApps: true)
+                AppActivationController.shared.showAppWindow()
             }
             .font(.system(size: 11))
 
@@ -176,8 +175,7 @@ struct MenuBarView: View {
 
             Button("설정") {
                 openWindow(id: "settings")
-                NSApp.setActivationPolicy(.regular)
-                NSApp.activate(ignoringOtherApps: true)
+                AppActivationController.shared.showAppWindow()
             }
             .font(.system(size: 11))
 

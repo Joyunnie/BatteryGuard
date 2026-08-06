@@ -24,7 +24,9 @@ IOKit readings ---+                    result + verified CLI status
 - IOKit is the source of truth for measurements; verified CLI status is the source of truth for charge control; UI state is derived from both.
 - Represent charge control with one mutually exclusive state enum, not independent booleans.
 - Use operation IDs/generations so stale async completions cannot overwrite newer intent.
+- Carry one semantic operation ID through controller transitions, CLI commands, verified status reads, and diagnostics; command/event IDs remain independently unique.
 - Give shared observable UI state explicit main-actor isolation; keep Core Data work on its configured context/queue.
+- Model asynchronous store readiness explicitly and await it; never use fixed sleeps as an initialization contract.
 - Keep abstractions minimal: use `ChargeBackend` plus an in-memory Core Data configuration; add a `BatteryHistoryStore` protocol only if a second implementation becomes necessary.
 - Reuse existing views, IOKit monitoring, and history code. Replace unsafe process/state internals incrementally; do not rewrite the app wholesale.
 
@@ -49,6 +51,7 @@ IOKit readings ---+                    result + verified CLI status
 - Enter a state only after its command succeeds and the resulting state is verified.
 - Keep charge controls disabled until initialization, initial reconciliation, and the initial maintain operation finish.
 - On failure, preserve an actionable error instead of silently falling back to a misleading state.
+- Treat persistence and `NSApplication` policy return failures as observable failures; never open a missing diagnostic file or report a rejected policy as applied.
 - Reconcile actual CLI and battery state on launch, wake, and after command completion; tolerate changes made from Terminal.
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.
@@ -65,6 +68,7 @@ IOKit readings ---+                    result + verified CLI status
 - Cover every safety-relevant transition across success, failure, timeout, cancellation, stale completion, launch reconciliation, and wake reconciliation.
 - Keep real-hardware checks manual or opt-in and never run them without explicit user approval.
 - Assert outcomes and state; “does not crash” is not a sufficient test.
+- Keep persisted diagnostic fields stable and typed, give every event a unique ID, and test migration of the previous local schema.
 - Prefer safety-path completeness over superficial coverage percentages or trivial view tests.
 
 ## Verification

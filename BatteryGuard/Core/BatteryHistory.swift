@@ -3,6 +3,7 @@
 
 import Foundation
 import CoreData
+import OSLog
 
 final class BatteryRecord: NSManagedObject {
     @NSManaged var timestamp: Date
@@ -12,21 +13,35 @@ final class BatteryRecord: NSManagedObject {
 
 private enum BatteryHistoryError: LocalizedError {
     case missingEntity
-    case injected(String)
 
     var errorDescription: String? {
         switch self {
         case .missingEntity:
             return "BatteryRecord entity is missing from the persistent store model."
-        case .injected(let message):
-            return message
         }
     }
 }
 
-enum BatteryHistoryOperation: Equatable, Sendable {
-    case save
-    case fetch
+enum BatteryHistoryReadiness: Equatable {
+    case loading
+    case ready
+    case failed(String)
+}
+
+@MainActor
+struct BatteryHistoryStoreOperations {
+    let save: (NSManagedObjectContext) throws -> Void
+    let fetch: (NSManagedObjectContext, NSFetchRequest<BatteryRecord>) throws -> [BatteryRecord]
+
+    init(
+        save: @escaping (NSManagedObjectContext) throws -> Void = { try $0.save() },
+        fetch: @escaping (NSManagedObjectContext, NSFetchRequest<BatteryRecord>) throws -> [BatteryRecord] = {
+            try $0.fetch($1)
+        }
+    ) {
+        self.save = save
+        self.fetch = fetch
+    }
 }
 
 @MainActor
@@ -39,15 +54,22 @@ final class BatteryHistory {
         let chargeLimit: Int
     }
 
-    private(set) var lastError: String?
+    private(set) var readiness: BatteryHistoryReadiness = .loading
+    private(set) var saveError: String?
+    private(set) var fetchError: String?
+    var visibleError: String? {
+        if case .failed(let message) = readiness { return message }
+        return fetchError ?? saveError
+    }
 
     private let container: NSPersistentContainer
     private let inMemory: Bool
     private let diagnostics: DiagnosticLog
+    private let storeOperations: BatteryHistoryStoreOperations
     private let now: @Sendable () -> Date
     private let heartbeatInterval: TimeInterval
-    private let failureMessage: @Sendable (BatteryHistoryOperation) -> String?
-    private var isStoreReady = false
+    private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "History")
+    private var readinessWaiters: [CheckedContinuation<BatteryHistoryReadiness, Never>] = []
     private var pendingRecord: (chargePercent: Int, chargeLimit: Int)?
     private var lastChargePercent: Int?
     private var lastChargeLimit: Int?
@@ -59,14 +81,14 @@ final class BatteryHistory {
         storeURL: URL? = nil,
         heartbeatInterval: TimeInterval = 15 * 60,
         diagnostics: DiagnosticLog = .disabled,
-        failureMessage: @escaping @Sendable (BatteryHistoryOperation) -> String? = { _ in nil },
+        storeOperations: BatteryHistoryStoreOperations = BatteryHistoryStoreOperations(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.inMemory = inMemory
         self.diagnostics = diagnostics
         self.now = now
         self.heartbeatInterval = heartbeatInterval
-        self.failureMessage = failureMessage
+        self.storeOperations = storeOperations
 
         let model = NSManagedObjectModel()
         let entity = NSEntityDescription()
@@ -111,7 +133,7 @@ final class BatteryHistory {
                     withIntermediateDirectories: true
                 )
             } catch {
-                lastError = "이력 저장 폴더를 만들지 못했습니다: \(error.localizedDescription)"
+                readiness = .failed("이력 저장 폴더를 만들지 못했습니다: \(error.localizedDescription)")
             }
         }
         description.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
@@ -124,10 +146,16 @@ final class BatteryHistory {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if let errorMessage {
-                    self.reportError("Core Data store load failed: \(errorMessage)")
+                    self.setReadinessFailure("Core Data store load failed: \(errorMessage)")
                     return
                 }
-                self.isStoreReady = true
+                if case .failed(let message) = self.readiness {
+                    self.resolveReadinessWaiters()
+                    self.reportDiagnostic(message, operation: "load history store")
+                    return
+                }
+                self.readiness = .ready
+                self.resolveReadinessWaiters()
                 if let pending = self.pendingRecord {
                     self.pendingRecord = nil
                     self.record(chargePercent: pending.chargePercent, chargeLimit: pending.chargeLimit)
@@ -136,9 +164,21 @@ final class BatteryHistory {
         }
     }
 
+    func waitUntilReady() async -> BatteryHistoryReadiness {
+        guard readiness == .loading else { return readiness }
+        return await withCheckedContinuation { readinessWaiters.append($0) }
+    }
+
+    func loadLast24Hours() async -> [ChartRecord] {
+        guard await waitUntilReady() == .ready else { return [] }
+        return fetchLast24Hours()
+    }
+
     func record(chargePercent: Int, chargeLimit: Int) {
-        guard isStoreReady else {
-            pendingRecord = (chargePercent, chargeLimit)
+        guard readiness == .ready else {
+            if readiness == .loading {
+                pendingRecord = (chargePercent, chargeLimit)
+            }
             return
         }
 
@@ -162,23 +202,20 @@ final class BatteryHistory {
             record.timestamp = timestamp
             record.chargePercent = Int16(chargePercent)
             record.chargeLimit = Int16(chargeLimit)
-            if let message = failureMessage(.save) {
-                throw BatteryHistoryError.injected(message)
-            }
-            try context.save()
+            try storeOperations.save(context)
 
             lastChargePercent = chargePercent
             lastChargeLimit = chargeLimit
             lastRecordDate = timestamp
-            lastError = nil
+            saveError = nil
         } catch {
             context.rollback()
-            reportError("Core Data save failed: \(error.localizedDescription)")
+            reportError("Core Data save failed: \(error.localizedDescription)", operation: "save history")
         }
     }
 
     func fetchLast24Hours() -> [ChartRecord] {
-        guard isStoreReady else { return [] }
+        guard readiness == .ready else { return [] }
         let request = NSFetchRequest<BatteryRecord>(entityName: "BatteryRecord")
         request.predicate = NSPredicate(
             format: "timestamp >= %@",
@@ -187,10 +224,8 @@ final class BatteryHistory {
         request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
 
         do {
-            if let message = failureMessage(.fetch) {
-                throw BatteryHistoryError.injected(message)
-            }
-            let records = try container.viewContext.fetch(request)
+            let records = try storeOperations.fetch(container.viewContext, request)
+            fetchError = nil
             return records.map {
                 ChartRecord(
                     timestamp: $0.timestamp,
@@ -199,7 +234,7 @@ final class BatteryHistory {
                 )
             }
         } catch {
-            reportError("Core Data fetch failed: \(error.localizedDescription)")
+            reportError("Core Data fetch failed: \(error.localizedDescription)", operation: "fetch history")
             return []
         }
     }
@@ -238,17 +273,37 @@ final class BatteryHistory {
         }
     }
 
-    private func reportError(_ message: String) {
-        lastError = message
-        print("[BatteryHistory] \(message)")
+    private func setReadinessFailure(_ message: String) {
+        readiness = .failed(message)
+        resolveReadinessWaiters()
+        reportDiagnostic(message, operation: "load history store")
+    }
+
+    private func resolveReadinessWaiters() {
+        let waiters = readinessWaiters
+        readinessWaiters.removeAll()
+        waiters.forEach { $0.resume(returning: readiness) }
+    }
+
+    private func reportError(_ message: String, operation: String) {
+        if operation == "save history" {
+            saveError = message
+        } else {
+            fetchError = message
+        }
+        reportDiagnostic(message, operation: operation)
+    }
+
+    private func reportDiagnostic(_ message: String, operation: String) {
+        logger.error("\(message, privacy: .public)")
         let diagnostics = diagnostics
         Task {
             await diagnostics.record(
                 DiagnosticEvent(
                     category: .history,
-                    operation: "battery history",
-                    termination: "failed",
-                    stderrSummary: message
+                    operation: operation,
+                    outcome: .failed,
+                    message: message
                 )
             )
         }

@@ -100,6 +100,32 @@ struct BatteryControlStatus: Equatable, Sendable {
         self.maintainLevel = maintainLevel
         self.maintainWorker = maintainWorker
     }
+
+    var diagnosticDescription: String {
+        "charging=\(charging.diagnosticLabel),discharging=\(isDischarging.map(String.init) ?? "unknown"),maintain=\(maintainLevel.map(String.init) ?? "unknown"),worker=\(maintainWorker.diagnosticLabel)"
+    }
+}
+
+private extension BatteryChargingStatus {
+    var diagnosticLabel: String {
+        switch self {
+        case .enabled: return "enabled"
+        case .disabled: return "disabled"
+        case .unknown: return "unknown"
+        }
+    }
+}
+
+private extension MaintainWorkerStatus {
+    var diagnosticLabel: String {
+        switch self {
+        case .running(let pid): return "running(\(pid))"
+        case .stopped: return "stopped"
+        case .stale(let pid): return "stale(\(pid.map(String.init) ?? "unknown"))"
+        case .duplicate(let pids): return "duplicate(\(pids.map(String.init).joined(separator: ",")))"
+        case .unknown: return "unknown"
+        }
+    }
 }
 
 /// Hardware-facing seam. Production delegates all child processes to
@@ -129,7 +155,10 @@ actor SMCKit: ChargeBackend {
         case testFixture
     }
 
-    static let shared = SMCKit(runner: BatteryCommandRunner(diagnostics: .shared))
+    static let shared = SMCKit(
+        runner: BatteryCommandRunner(diagnostics: .shared),
+        diagnostics: .shared
+    )
 
     private let runner: BatteryCommandRunner
     private let controlGate = AsyncOperationGate()
@@ -140,6 +169,7 @@ actor SMCKit: ChargeBackend {
     private let maintainPIDFilePath: String
     private let maintainWorkerProbe: MaintainWorkerProbe?
     private let executableTrustPolicy: ExecutableTrustPolicy
+    private let diagnostics: DiagnosticLog
     private let statusCommandTimeout: TimeInterval = 2
     private let longRunningVerificationTimeoutNanoseconds: UInt64 = 3_000_000_000
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
@@ -159,7 +189,8 @@ actor SMCKit: ChargeBackend {
         usesSudoForSMCWrites: Bool = true,
         maintainPIDFilePath: String? = nil,
         maintainWorkerProbe: MaintainWorkerProbe? = nil,
-        executableTrustPolicy: ExecutableTrustPolicy = .production
+        executableTrustPolicy: ExecutableTrustPolicy = .production,
+        diagnostics: DiagnosticLog = .disabled
     ) {
         self.runner = runner
         self.batteryPath = batteryPath
@@ -171,6 +202,7 @@ actor SMCKit: ChargeBackend {
                 .path
         self.maintainWorkerProbe = maintainWorkerProbe
         self.executableTrustPolicy = executableTrustPolicy
+        self.diagnostics = diagnostics
     }
 
     func open() async throws {
@@ -292,18 +324,23 @@ actor SMCKit: ChargeBackend {
     // MARK: - Verified charge operations
 
     func applyMaintain(level: Int) async throws {
-        try await withGate(controlGate) {
-            try await applyMaintainUnlocked(level: level)
+        let operationID = DiagnosticContext.operationID ?? UUID()
+        try await DiagnosticContext.$operationID.withValue(operationID) {
+            try await withGate(controlGate) {
+                try await applyMaintainUnlocked(level: level)
+            }
         }
     }
 
     private func applyMaintainUnlocked(level: Int) async throws {
         try validateChargeLevel(level)
+        let before = await readPreOperationStatus()
         if executableTrustPolicy == .production,
-           let current = try? await readControlStatusUnlocked(),
+           let current = before,
            current.maintainLevel == level,
            current.maintainWorker.isRunning,
            current.isDischarging != true {
+            await recordVerifiedOperation("maintain \(level)", before: current, after: current)
             return
         }
         try await terminateMaintainWorkersUnlocked()
@@ -321,15 +358,20 @@ actor SMCKit: ChargeBackend {
                 "status_csv reported maintain=\(status.maintainLevel.map(String.init) ?? "unknown"), worker=\(status.maintainWorker)"
             )
         }
+        await recordVerifiedOperation("maintain \(level)", before: before, after: status)
     }
 
     func disableCharging() async throws {
-        try await withGate(controlGate) {
-            try await disableChargingUnlocked()
+        let operationID = DiagnosticContext.operationID ?? UUID()
+        try await DiagnosticContext.$operationID.withValue(operationID) {
+            try await withGate(controlGate) {
+                try await disableChargingUnlocked()
+            }
         }
     }
 
     private func disableChargingUnlocked() async throws {
+        let before = await readPreOperationStatus()
         try await terminateMaintainWorkersUnlocked()
         _ = try await batteryCommand(["charging", "off"])
         let status = try await readControlStatusUnlocked()
@@ -340,25 +382,36 @@ actor SMCKit: ChargeBackend {
                 "status_csv did not confirm disabled charging"
             )
         }
+        await recordVerifiedOperation("disable charging", before: before, after: status)
     }
 
     func startDischarge(to level: Int) async throws {
-        try await withGate(controlGate) {
-            try validateChargeLevel(level)
-            try await terminateMaintainWorkersUnlocked()
-            let label = "battery discharge \(level)"
-            try await launchLongRunning(["discharge", "\(level)"], label: label)
-            try await verifyLongRunningStart(command: label) { $0.isDischarging == true }
+        let operationID = DiagnosticContext.operationID ?? UUID()
+        try await DiagnosticContext.$operationID.withValue(operationID) {
+            try await withGate(controlGate) {
+                try validateChargeLevel(level)
+                let before = await readPreOperationStatus()
+                try await terminateMaintainWorkersUnlocked()
+                let label = "battery discharge \(level)"
+                try await launchLongRunning(["discharge", "\(level)"], label: label)
+                let after = try await verifyLongRunningStart(command: label) { $0.isDischarging == true }
+                await recordVerifiedOperation("start discharge \(level)", before: before, after: after)
+            }
         }
     }
 
     func startTopUp(to level: Int) async throws {
-        try await withGate(controlGate) {
-            try validateChargeLevel(level)
-            try await terminateMaintainWorkersUnlocked()
-            let label = "battery charge \(level)"
-            try await launchLongRunning(["charge", "\(level)"], label: label)
-            try await verifyLongRunningStart(command: label) { $0.charging == .enabled }
+        let operationID = DiagnosticContext.operationID ?? UUID()
+        try await DiagnosticContext.$operationID.withValue(operationID) {
+            try await withGate(controlGate) {
+                try validateChargeLevel(level)
+                let before = await readPreOperationStatus()
+                try await terminateMaintainWorkersUnlocked()
+                let label = "battery charge \(level)"
+                try await launchLongRunning(["charge", "\(level)"], label: label)
+                let after = try await verifyLongRunningStart(command: label) { $0.charging == .enabled }
+                await recordVerifiedOperation("start Top Up \(level)", before: before, after: after)
+            }
         }
     }
 
@@ -695,7 +748,7 @@ actor SMCKit: ChargeBackend {
     private func verifyLongRunningStart(
         command: String,
         statusMatches: (BatteryControlStatus) -> Bool
-    ) async throws {
+    ) async throws -> BatteryControlStatus {
         do {
             let now = DispatchTime.now().uptimeNanoseconds
             let deadlineResult = now.addingReportingOverflow(longRunningVerificationTimeoutNanoseconds)
@@ -716,7 +769,7 @@ actor SMCKit: ChargeBackend {
 
                 do {
                     let status = try await readControlStatusUnlocked()
-                    if statusMatches(status), await runner.isLongRunningActive() { return }
+                    if statusMatches(status), await runner.isLongRunningActive() { return status }
                     lastVerificationFailure = "status_csv did not confirm the requested operation"
                 } catch {
                     lastVerificationFailure = error.localizedDescription
@@ -783,6 +836,27 @@ actor SMCKit: ChargeBackend {
             }
             return result
         }
+    }
+
+    private func recordVerifiedOperation(
+        _ operation: String,
+        before: BatteryControlStatus?,
+        after: BatteryControlStatus
+    ) async {
+        await diagnostics.record(
+            DiagnosticEvent(
+                category: .control,
+                operation: operation,
+                outcome: .succeeded,
+                stateBefore: before?.diagnosticDescription ?? "unavailable",
+                stateAfter: after.diagnosticDescription
+            )
+        )
+    }
+
+    private func readPreOperationStatus() async -> BatteryControlStatus? {
+        guard executableTrustPolicy == .production else { return nil }
+        return try? await readControlStatusUnlocked()
     }
 
     #if DEBUG

@@ -12,6 +12,17 @@ enum ChargeControllerReadiness: Equatable {
     case ready
     case failed(String)
     case shuttingDown
+
+    var diagnosticLabel: String {
+        switch self {
+        case .initializing: return "initializing"
+        case .reconciling: return "reconciling"
+        case .establishingControl: return "establishingControl"
+        case .ready: return "ready"
+        case .failed(let message): return "failed(\(message))"
+        case .shuttingDown: return "shuttingDown"
+        }
+    }
 }
 
 enum RestorableChargeMode: Equatable {
@@ -24,6 +35,15 @@ enum RestorableChargeMode: Equatable {
         case .maintaining(let limit): return limit
         case .toppingUp(let returnLimit): return returnLimit
         case .discharging(_, let returnLimit): return returnLimit
+        }
+    }
+
+    var diagnosticLabel: String {
+        switch self {
+        case .maintaining(let limit): return "maintaining(limit:\(limit))"
+        case .toppingUp(let returnLimit): return "toppingUp(returnLimit:\(returnLimit))"
+        case .discharging(let target, let returnLimit):
+            return "discharging(target:\(target),returnLimit:\(returnLimit))"
         }
     }
 }
@@ -51,6 +71,21 @@ enum ChargeTransition: Equatable {
             return previous
         }
     }
+
+    var diagnosticLabel: String {
+        switch self {
+        case .applyingMaintain(let target, let previous):
+            return "applyingMaintain(target:\(target),previous:\(previous?.diagnosticLabel ?? "none"))"
+        case .startingTopUp(let returnLimit): return "startingTopUp(returnLimit:\(returnLimit))"
+        case .stoppingTopUp(let returnLimit): return "stoppingTopUp(returnLimit:\(returnLimit))"
+        case .startingDischarge(let target, let returnLimit):
+            return "startingDischarge(target:\(target),returnLimit:\(returnLimit))"
+        case .stoppingDischarge(let returnLimit): return "stoppingDischarge(returnLimit:\(returnLimit))"
+        case .enteringHeat(let previous): return "enteringHeat(previous:\(previous.diagnosticLabel))"
+        case .restoringHeat(let previous): return "restoringHeat(previous:\(previous.diagnosticLabel))"
+        case .recoveringMaintain(let limit): return "recoveringMaintain(limit:\(limit))"
+        }
+    }
 }
 
 enum ChargeMode: Equatable {
@@ -72,6 +107,20 @@ enum ChargeMode: Equatable {
         case .transitioning(let transition): return transition.previousMode
         case .failed(let previous, _, _): return previous
         case .idle: return nil
+        }
+    }
+
+    var diagnosticLabel: String {
+        switch self {
+        case .idle: return "idle"
+        case .maintaining(let limit): return "maintaining(limit:\(limit))"
+        case .toppingUp(let returnLimit): return "toppingUp(returnLimit:\(returnLimit))"
+        case .discharging(let target, let returnLimit):
+            return "discharging(target:\(target),returnLimit:\(returnLimit))"
+        case .heatBlocked(let previous): return "heatBlocked(previous:\(previous.diagnosticLabel))"
+        case .transitioning(let transition): return "transitioning(\(transition.diagnosticLabel))"
+        case .failed(let previous, let message, let controlsBlocked):
+            return "failed(previous:\(previous?.diagnosticLabel ?? "none"),blocked:\(controlsBlocked),message:\(message))"
         }
     }
 }
@@ -260,7 +309,7 @@ final class ChargeController: ObservableObject {
                     category: .lifecycle,
                     operation: "initialize",
                     error: error,
-                    stateAfter: String(describing: readiness)
+                    stateAfter: readiness.diagnosticLabel
                 )
             }
             throw error
@@ -342,8 +391,8 @@ final class ChargeController: ObservableObject {
                     DiagnosticEvent(
                         category: .lifecycle,
                         operation: "shutdown cleanup",
-                        termination: "failed",
-                        stderrSummary: error.localizedDescription
+                        outcome: .failed,
+                        message: error.localizedDescription
                     )
                 )
             }
@@ -356,7 +405,7 @@ final class ChargeController: ObservableObject {
                     DiagnosticEvent(
                         category: .lifecycle,
                         operation: "shutdown cleanup",
-                        termination: "timedOut"
+                        outcome: .timedOut
                     )
                 )
             }
@@ -396,7 +445,8 @@ final class ChargeController: ObservableObject {
 
         operationGeneration &+= 1
         let operationID = operationGeneration
-        let stateBefore = String(describing: mode)
+        let diagnosticOperationID = UUID()
+        let stateBefore = mode.diagnosticLabel
         activeOperationID = operationID
         mode = .transitioning(transition)
         let logger = self.logger
@@ -404,15 +454,31 @@ final class ChargeController: ObservableObject {
         Task { [weak self] in
             let result: Result<Void, Error>
             do {
-                if preemptCurrentOperation { try await self?.backend.requestCancellation() }
-                try Task.checkCancellation()
-                try await work()
+                try await DiagnosticContext.$operationID.withValue(diagnosticOperationID) {
+                    if preemptCurrentOperation { try await self?.backend.requestCancellation() }
+                    try Task.checkCancellation()
+                    try await work()
+                }
                 result = .success(())
             } catch {
                 result = .failure(error)
             }
 
-            guard let self, self.activeOperationID == operationID else { return }
+            guard let self else { return }
+            guard self.activeOperationID == operationID else {
+                await self.diagnostics.record(
+                    DiagnosticEvent(
+                        category: .control,
+                        operationID: diagnosticOperationID,
+                        operation: operation,
+                        outcome: .superseded,
+                        message: result.failure?.localizedDescription,
+                        stateBefore: stateBefore,
+                        stateAfter: self.mode.diagnosticLabel
+                    )
+                )
+                return
+            }
             self.activeOperationID = nil
             switch result {
             case .success:
@@ -430,11 +496,11 @@ final class ChargeController: ObservableObject {
             self.refreshDisplayedError()
             self.recordDiagnostic(
                 category: .control,
-                operationID: String(operationID),
+                operationID: diagnosticOperationID,
                 operation: operation,
                 error: result.failure,
                 stateBefore: stateBefore,
-                stateAfter: String(describing: self.mode)
+                stateAfter: self.mode.diagnosticLabel
             )
             completion?(result)
         }
@@ -992,7 +1058,7 @@ final class ChargeController: ObservableObject {
 
     private func recordDiagnostic(
         category: DiagnosticCategory,
-        operationID: String? = nil,
+        operationID: UUID? = DiagnosticContext.operationID,
         operation: String,
         error: Error? = nil,
         stateBefore: String? = nil,
@@ -1003,8 +1069,8 @@ final class ChargeController: ObservableObject {
             category: category,
             operationID: operationID,
             operation: operation,
-            termination: error == nil ? "succeeded" : "failed",
-            stderrSummary: error?.localizedDescription,
+            outcome: error == nil ? .succeeded : .failed,
+            message: error?.localizedDescription,
             stateBefore: stateBefore,
             stateAfter: stateAfter
         )

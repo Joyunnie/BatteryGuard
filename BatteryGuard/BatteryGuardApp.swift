@@ -4,6 +4,79 @@
 import SwiftUI
 import AppKit
 
+enum AppMetadata {
+    static var version: String {
+        guard let value = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String, !value.isEmpty else {
+            return "알 수 없음"
+        }
+        return value
+    }
+}
+
+@MainActor
+final class AppActivationController {
+    static let shared = AppActivationController()
+
+    private let setPolicy: (NSApplication.ActivationPolicy) -> Bool
+    private let activate: () -> Void
+    private let hasVisibleAppWindow: () -> Bool
+    private let diagnostics: DiagnosticLog
+
+    init(
+        setPolicy: @escaping (NSApplication.ActivationPolicy) -> Bool = { NSApp.setActivationPolicy($0) },
+        activate: @escaping () -> Void = { NSApp.activate(ignoringOtherApps: true) },
+        hasVisibleAppWindow: @escaping () -> Bool = {
+            NSApp.windows.contains {
+                $0.isVisible && $0.styleMask.contains(.titled) && !($0 is NSPanel)
+            }
+        },
+        diagnostics: DiagnosticLog = .shared
+    ) {
+        self.setPolicy = setPolicy
+        self.activate = activate
+        self.hasVisibleAppWindow = hasVisibleAppWindow
+        self.diagnostics = diagnostics
+    }
+
+    @discardableResult
+    func setInitialAccessoryPolicy() -> Bool {
+        apply(.accessory, operation: "set initial accessory activation policy")
+    }
+
+    @discardableResult
+    func showAppWindow() -> Bool {
+        guard apply(.regular, operation: "set regular activation policy") else { return false }
+        activate()
+        return true
+    }
+
+    @discardableResult
+    func restoreAccessoryPolicyIfNeeded() -> Bool {
+        guard !hasVisibleAppWindow() else { return true }
+        return apply(.accessory, operation: "restore accessory activation policy")
+    }
+
+    private func apply(_ policy: NSApplication.ActivationPolicy, operation: String) -> Bool {
+        guard setPolicy(policy) else {
+            let diagnostics = diagnostics
+            Task {
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .lifecycle,
+                        operation: operation,
+                        outcome: .failed,
+                        message: "NSApplication rejected activation policy \(policy.rawValue)"
+                    )
+                )
+            }
+            return false
+        }
+        return true
+    }
+}
+
 @main
 struct BatteryGuardApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -42,6 +115,7 @@ struct BatteryGuardApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var initializationTask: Task<Void, Never>?
     private var windowCloseObserver: NSObjectProtocol?
+    private let activationController = AppActivationController.shared
 
     private var isRunningTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
@@ -49,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        activationController.setInitialAccessoryPolicy()
 
         // The unit-test bundle is app-hosted. Never let launching the test host
         // initialize real battery control, history, login items, or SMC writes.
@@ -62,7 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await Task.yield()
-                self?.restoreAccessoryPolicyIfNeeded()
+                self?.activationController.restoreAccessoryPolicyIfNeeded()
             }
         }
 
@@ -96,14 +170,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ChargeController.shared.shutdown()
     }
 
-    private func restoreAccessoryPolicyIfNeeded() {
-        let hasVisibleAppWindow = NSApp.windows.contains {
-            $0.isVisible && $0.styleMask.contains(.titled) && !($0 is NSPanel)
-        }
-        if !hasVisibleAppWindow {
-            NSApp.setActivationPolicy(.accessory)
-        }
-    }
 }
 
 // MARK: - MenuBarLabel (Live Status Icons)

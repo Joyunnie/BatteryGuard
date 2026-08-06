@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 enum DiagnosticCategory: String, Codable, Sendable {
     case command
@@ -8,15 +9,31 @@ enum DiagnosticCategory: String, Codable, Sendable {
     case lifecycle
 }
 
+enum DiagnosticOutcome: Codable, Equatable, Sendable {
+    case launched
+    case succeeded
+    case failed
+    case exited
+    case signaled(Int32)
+    case timedOut
+    case cancelled
+    case superseded
+}
+
+enum DiagnosticContext {
+    @TaskLocal static var operationID: UUID?
+}
+
 struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
     let id: UUID
     let timestamp: Date
     let category: DiagnosticCategory
-    let operationID: String?
+    let operationID: UUID?
+    let commandID: UUID?
     let operation: String
     let exitCode: Int32?
-    let termination: String?
-    let stderrSummary: String?
+    let outcome: DiagnosticOutcome
+    let message: String?
     let stateBefore: String?
     let stateAfter: String?
 
@@ -24,11 +41,12 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         id: UUID = UUID(),
         timestamp: Date = Date(),
         category: DiagnosticCategory,
-        operationID: String? = nil,
+        operationID: UUID? = DiagnosticContext.operationID,
+        commandID: UUID? = nil,
         operation: String,
         exitCode: Int32? = nil,
-        termination: String? = nil,
-        stderrSummary: String? = nil,
+        outcome: DiagnosticOutcome = .succeeded,
+        message: String? = nil,
         stateBefore: String? = nil,
         stateAfter: String? = nil
     ) {
@@ -36,10 +54,11 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         self.timestamp = timestamp
         self.category = category
         self.operationID = operationID
+        self.commandID = commandID
         self.operation = operation
         self.exitCode = exitCode
-        self.termination = termination
-        self.stderrSummary = stderrSummary.map(Self.summarize)
+        self.outcome = outcome
+        self.message = message.map(Self.summarize)
         self.stateBefore = stateBefore
         self.stateAfter = stateAfter
     }
@@ -48,25 +67,97 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return String(normalized.prefix(500))
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case timestamp
+        case category
+        case operationID
+        case commandID
+        case operation
+        case exitCode
+        case outcome
+        case message
+        case stateBefore
+        case stateAfter
+        case termination
+        case stderrSummary
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        category = try container.decode(DiagnosticCategory.self, forKey: .category)
+        operation = try container.decode(String.self, forKey: .operation)
+        exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode)
+        stateBefore = try container.decodeIfPresent(String.self, forKey: .stateBefore)
+        stateAfter = try container.decodeIfPresent(String.self, forKey: .stateAfter)
+
+        let operationIDText = try container.decodeIfPresent(String.self, forKey: .operationID)
+        operationID = operationIDText.flatMap(UUID.init(uuidString:))
+        commandID = try container.decodeIfPresent(UUID.self, forKey: .commandID)
+            ?? (category == .command ? id : nil)
+        message = try container.decodeIfPresent(String.self, forKey: .message)
+            ?? container.decodeIfPresent(String.self, forKey: .stderrSummary)
+
+        if let decodedOutcome = try container.decodeIfPresent(DiagnosticOutcome.self, forKey: .outcome) {
+            outcome = decodedOutcome
+        } else {
+            let legacy = try container.decodeIfPresent(String.self, forKey: .termination)
+            outcome = Self.outcome(fromLegacyValue: legacy)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(timestamp, forKey: .timestamp)
+        try container.encode(category, forKey: .category)
+        try container.encodeIfPresent(operationID, forKey: .operationID)
+        try container.encodeIfPresent(commandID, forKey: .commandID)
+        try container.encode(operation, forKey: .operation)
+        try container.encodeIfPresent(exitCode, forKey: .exitCode)
+        try container.encode(outcome, forKey: .outcome)
+        try container.encodeIfPresent(message, forKey: .message)
+        try container.encodeIfPresent(stateBefore, forKey: .stateBefore)
+        try container.encodeIfPresent(stateAfter, forKey: .stateAfter)
+    }
+
+    private static func outcome(fromLegacyValue value: String?) -> DiagnosticOutcome {
+        switch value {
+        case "launched": return .launched
+        case "succeeded": return .succeeded
+        case "exited": return .exited
+        case "timedOut": return .timedOut
+        case "cancelled": return .cancelled
+        case "superseded": return .superseded
+        case let value? where value.hasPrefix("signal(") && value.hasSuffix(")"):
+            let raw = value.dropFirst("signal(".count).dropLast()
+            return Int32(raw).map(DiagnosticOutcome.signaled) ?? .failed
+        case .some: return .failed
+        case .none: return .succeeded
+        }
+    }
 }
 
 extension DiagnosticEvent {
     init(commandResult result: BatteryCommandResult) {
-        let termination: String
+        let outcome: DiagnosticOutcome
         switch result.termination {
-        case .exited: termination = "exited"
-        case .uncaughtSignal(let signal): termination = "signal(\(signal))"
-        case .timedOut: termination = "timedOut"
-        case .cancelled: termination = "cancelled"
+        case .exited: outcome = .exited
+        case .uncaughtSignal(let signal): outcome = .signaled(signal)
+        case .timedOut: outcome = .timedOut
+        case .cancelled: outcome = .cancelled
         }
         self.init(
-            id: result.commandID,
             category: .command,
-            operationID: result.commandID.uuidString,
+            operationID: result.operationID,
+            commandID: result.commandID,
             operation: result.command,
             exitCode: result.exitCode,
-            termination: termination,
-            stderrSummary: result.stderr,
+            outcome: outcome,
+            message: result.stderr,
             stateAfter: result.command.contains("status_csv")
                 ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
                 : nil
@@ -84,6 +175,7 @@ actor DiagnosticLog {
     private var events: [DiagnosticEvent]
     private var hasLoadedFromDisk = false
     private(set) var persistenceError: String?
+    private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "Diagnostics")
 
     init(fileURL: URL?, capacity: Int = 100) {
         self.fileURL = fileURL
@@ -102,12 +194,39 @@ actor DiagnosticLog {
         if events.count > capacity {
             events.removeFirst(events.count - capacity)
         }
-        persist()
+        do {
+            try persist()
+        } catch {
+            persistenceError = error.localizedDescription
+            logger.error("Write failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     func recentEvents() -> [DiagnosticEvent] {
         loadFromDiskIfNeeded()
         return events
+    }
+
+    func prepareForViewing() throws -> URL {
+        guard let fileURL else {
+            throw CocoaError(.fileNoSuchFile, userInfo: [
+                NSLocalizedDescriptionKey: "진단 로그 경로를 사용할 수 없습니다."
+            ])
+        }
+        loadFromDiskIfNeeded()
+        if let persistenceError {
+            throw CocoaError(.fileWriteUnknown, userInfo: [
+                NSLocalizedDescriptionKey: "진단 로그를 저장하지 못했습니다: \(persistenceError)"
+            ])
+        }
+        do {
+            try persist()
+            return fileURL
+        } catch {
+            persistenceError = error.localizedDescription
+            logger.error("Prepare for viewing failed: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
     }
 
     private func loadFromDiskIfNeeded() {
@@ -123,23 +242,18 @@ actor DiagnosticLog {
             events = Array(decoded.suffix(capacity))
         } catch {
             persistenceError = error.localizedDescription
-            print("[DiagnosticLog] Read failed: \(error.localizedDescription)")
+            logger.error("Read failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    private func persist() {
+    private func persist() throws {
         guard let fileURL else { return }
-        do {
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try Self.encode(events, to: fileURL)
-            persistenceError = nil
-        } catch {
-            persistenceError = error.localizedDescription
-            print("[DiagnosticLog] Write failed: \(error.localizedDescription)")
-        }
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Self.encode(events, to: fileURL)
+        persistenceError = nil
     }
 
     private nonisolated static func encode(_ events: [DiagnosticEvent], to fileURL: URL) throws {
