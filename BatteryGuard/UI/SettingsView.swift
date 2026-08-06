@@ -43,6 +43,7 @@ struct SettingsView: View {
                         controller.isCommandPending ||
                         controller.isDischarging ||
                         controller.isTopUpActive ||
+                        controller.hasExternalControlDrift ||
                         controller.isHeatProtectionBlockingControls
                     )
                     Text("\(controller.displayedChargeLimit)%")

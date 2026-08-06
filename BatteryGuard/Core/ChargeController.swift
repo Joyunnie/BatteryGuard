@@ -28,14 +28,17 @@ final class ChargeController: ObservableObject {
     private let settings: UserSettings
     private let history: BatteryHistory?
     private let diagnostics: DiagnosticLog
+    private let reconciliationInterval: TimeInterval
 
     @Published private(set) var mode: ChargeMode = .idle
     @Published private(set) var lastError: String?
     @Published private(set) var pendingChargeLimit: Int?
     @Published private(set) var readiness: ChargeControllerReadiness
+    @Published private(set) var isReconcilingExternalState = false
 
     var isReady: Bool { readiness == .ready }
     var isCommandPending: Bool {
+        if isReconcilingExternalState { return true }
         if activeOperationID != nil { return true }
         if case .transitioning = mode { return true }
         return false
@@ -43,6 +46,7 @@ final class ChargeController: ObservableObject {
     var isChargeLimitPending: Bool { pendingChargeLimit != nil }
     var isDischarging: Bool {
         if case .discharging = mode { return true }
+        if case .externalDrift(_, .discharging) = mode { return true }
         return false
     }
     var isTopUpActive: Bool {
@@ -54,7 +58,8 @@ final class ChargeController: ObservableObject {
         return false
     }
     var effectiveChargeLimit: Int {
-        mode.restorableMode?.maintainLimit ?? UserSettings.validatedChargeLimit(settings.chargeLimit)
+        if case .externalDrift(_, .maintaining(let limit)) = mode { return limit }
+        return mode.restorableMode?.maintainLimit ?? UserSettings.validatedChargeLimit(settings.chargeLimit)
     }
     var displayedChargeLimit: Int { pendingChargeLimit ?? effectiveChargeLimit }
     var currentState: ChargeState {
@@ -69,8 +74,25 @@ final class ChargeController: ObservableObject {
         case .maintaining(let limit):
             return info.isCharging && info.currentCharge < limit ? .charging : .chargingPaused
         case .transitioning: return .chargingPaused
+        case .externalDrift(_, let observed):
+            switch observed {
+            case .maintaining(let limit):
+                return info.isCharging && info.currentCharge < limit ? .charging : .chargingPaused
+            case .charging: return .charging
+            case .discharging: return .discharging
+            case .chargingDisabled: return .chargingPaused
+            case .unavailable, .inconsistent: return .unknown
+            }
         case .failed, .idle: return .unknown
         }
+    }
+    var hasExternalControlDrift: Bool {
+        if case .externalDrift = mode { return true }
+        return false
+    }
+    var externalDriftDescription: String? {
+        guard case .externalDrift(_, let observed) = mode else { return nil }
+        return observed.userDescription
     }
     var isHeatProtectionBlockingControls: Bool {
         switch mode {
@@ -93,10 +115,13 @@ final class ChargeController: ObservableObject {
     private var commandError: String?
     private var sensorError: String?
     private var ledError: String?
+    private var driftError: String?
     private var controlTimer: Timer?
     private var smcTemperatureTimer: Timer?
+    private var reconciliationTimer: Timer?
     private var sleepObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
+    private var activationObserver: NSObjectProtocol?
     private var chargeLimitDebounceWork: DispatchWorkItem?
     private var isShuttingDown = false
     private var operationGeneration: UInt64 = 0
@@ -119,6 +144,7 @@ final class ChargeController: ObservableObject {
         initialReadiness: ChargeControllerReadiness = .initializing,
         initialMode: ChargeMode? = nil,
         history: BatteryHistory? = nil,
+        reconciliationInterval: TimeInterval = 60,
         diagnostics: DiagnosticLog = .disabled
     ) {
         let resolvedMonitor = monitor ?? BatteryMonitor.shared
@@ -128,6 +154,9 @@ final class ChargeController: ObservableObject {
         self.settings = resolvedSettings
         self.history = history
         self.diagnostics = diagnostics
+        self.reconciliationInterval = reconciliationInterval.isFinite
+            ? max(0.01, reconciliationInterval)
+            : 60
         self.readiness = initialReadiness
         self.mode = initialMode ?? (initialReadiness == .ready
             ? .maintaining(limit: UserSettings.validatedChargeLimit(resolvedSettings.chargeLimit))
@@ -182,6 +211,7 @@ final class ChargeController: ObservableObject {
             startSMCTemperatureLoop()
             setupSleepWakeObservers()
             readiness = .ready
+            startExternalReconciliation()
             refreshDisplayedError()
         } catch {
             if !isShuttingDown, !Task.isCancelled {
@@ -206,13 +236,13 @@ final class ChargeController: ObservableObject {
         smcTemperatureTimer = nil
         monitor.stopMonitoring()
         removeSleepWakeObservers()
+        stopExternalReconciliation()
     }
 
     func shutdown() async throws {
         guard !isShuttingDown else {
             throw BatteryError.unsupported("종료 정리가 이미 진행됐거나 실패했습니다.")
         }
-        isShuttingDown = true
 
         let shutdownPolicy: ShutdownControlPolicy
         switch mode {
@@ -227,10 +257,32 @@ final class ChargeController: ObservableObject {
             }
         case .heatBlocked, .failed(_, _, true):
             shutdownPolicy = .keepChargingDisabled
+        case .externalDrift(_, let observed):
+            switch observed {
+            case .maintaining:
+                shutdownPolicy = .preserveMaintain
+            case .chargingDisabled:
+                shutdownPolicy = .keepChargingDisabled
+            case .charging, .discharging, .unavailable, .inconsistent:
+                let message = "외부 CLI 변경 상태를 먼저 해결해야 안전하게 종료할 수 있습니다: \(observed.userDescription)"
+                commandError = message
+                refreshDisplayedError()
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .lifecycle,
+                        operation: "shutdown rejected",
+                        outcome: .failed,
+                        message: message,
+                        stateBefore: mode.diagnosticLabel
+                    )
+                )
+                throw BatteryError.unsupported(message)
+            }
         default:
             shutdownPolicy = .preserveMaintain
         }
 
+        isShuttingDown = true
         readiness = .shuttingDown
         activeOperationTask?.cancel()
         activeOperationTask = nil
@@ -245,6 +297,7 @@ final class ChargeController: ObservableObject {
         ledGeneration &+= 1
         let shutdownLEDGeneration = ledGeneration
         removeSleepWakeObservers()
+        stopExternalReconciliation()
 
         do {
             try await backend.requestCancellation()
@@ -362,6 +415,7 @@ final class ChargeController: ObservableObject {
             switch result {
             case .success:
                 self.commandError = nil
+                self.driftError = nil
                 onSuccess()
             case .failure(let error):
                 self.commandError = "\(operation): \(error.localizedDescription)"
@@ -439,7 +493,15 @@ final class ChargeController: ObservableObject {
     }
 
     func processBatteryInfo(_ info: BatteryInfo) {
-        if let limit = mode.restorableMode?.maintainLimit {
+        let historyLimit: Int?
+        if case .externalDrift(_, .maintaining(let limit)) = mode {
+            historyLimit = limit
+        } else if case .externalDrift = mode {
+            historyLimit = nil
+        } else {
+            historyLimit = mode.restorableMode?.maintainLimit
+        }
+        if let limit = historyLimit {
             history?.record(chargePercent: info.currentCharge, chargeLimit: limit)
         }
         if settings.heatProtectionEnabled {
@@ -654,7 +716,13 @@ final class ChargeController: ObservableObject {
     // MARK: - User actions
 
     func setChargeLimit(_ limit: Int) {
-        guard isReady, activeOperationID == nil, !isTopUpActive, !isDischarging, !isHeatProtectionBlockingControls else {
+        guard isReady,
+              activeOperationID == nil,
+              !isReconcilingExternalState,
+              !isTopUpActive,
+              !isDischarging,
+              !isHeatProtectionBlockingControls,
+              case .maintaining = mode else {
             commandError = "현재 실행 중인 배터리 작업이 끝난 뒤 Charge Limit을 변경하세요."
             refreshDisplayedError()
             return
@@ -780,6 +848,7 @@ final class ChargeController: ObservableObject {
     private func canStartExclusiveAction(named action: String) -> Bool {
         guard isReady,
               activeOperationID == nil,
+              !isReconcilingExternalState,
               pendingChargeLimit == nil,
               !isHeatProtectionBlockingControls,
               case .maintaining = mode else {
@@ -853,6 +922,187 @@ final class ChargeController: ObservableObject {
         refreshDisplayedError()
     }
 
+    // MARK: - External reconciliation
+
+    private func startExternalReconciliation() {
+        stopExternalReconciliation()
+        reconciliationTimer = Timer.scheduledTimer(withTimeInterval: reconciliationInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.reconcileExternalState(trigger: .periodic)
+            }
+        }
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.reconcileExternalState(trigger: .appActivation)
+            }
+        }
+    }
+
+    private func stopExternalReconciliation() {
+        reconciliationTimer?.invalidate()
+        reconciliationTimer = nil
+        if let activationObserver {
+            NotificationCenter.default.removeObserver(activationObserver)
+            self.activationObserver = nil
+        }
+        isReconcilingExternalState = false
+    }
+
+    func reconcileExternalState(trigger: ReconciliationTrigger = .manual) async {
+        guard readiness == .ready,
+              !isShuttingDown,
+              activeOperationID == nil,
+              pendingChargeLimit == nil,
+              !isReconcilingExternalState,
+              let expectation = reconciliationExpectation else {
+            return
+        }
+
+        isReconcilingExternalState = true
+        defer { isReconcilingExternalState = false }
+        let stateBefore = mode.diagnosticLabel
+        let generation = operationGeneration
+        do {
+            let status = try await backend.readControlStatus()
+            guard readiness == .ready,
+                  !isShuttingDown,
+                  activeOperationID == nil,
+                  pendingChargeLimit == nil,
+                  operationGeneration == generation,
+                  reconciliationExpectation == expectation else {
+                return
+            }
+
+            if Self.status(status, matches: expectation) {
+                if case .externalDrift = mode {
+                    mode = Self.mode(from: expectation)
+                    driftError = nil
+                    refreshDisplayedError()
+                    recordDiagnostic(
+                        category: .control,
+                        operation: "\(trigger.rawValue) reconciliation restored",
+                        outcome: .succeeded,
+                        stateBefore: stateBefore,
+                        stateAfter: mode.diagnosticLabel
+                    )
+                }
+                return
+            }
+
+            let observed = Self.observedMode(from: status)
+            let driftMode = ChargeMode.externalDrift(expected: expectation, observed: observed)
+            guard mode != driftMode else { return }
+            mode = driftMode
+            driftError = "외부 CLI 변경 감지: \(observed.userDescription). BatteryGuard 제어를 잠갔습니다."
+            refreshDisplayedError()
+            recordDiagnostic(
+                category: .control,
+                operation: "\(trigger.rawValue) reconciliation",
+                outcome: .drifted,
+                message: status.diagnosticDescription,
+                stateBefore: stateBefore,
+                stateAfter: mode.diagnosticLabel
+            )
+        } catch {
+            guard readiness == .ready,
+                  !isShuttingDown,
+                  activeOperationID == nil,
+                  operationGeneration == generation,
+                  reconciliationExpectation == expectation else {
+                return
+            }
+            let observed = ObservedChargeMode.unavailable(error.localizedDescription)
+            let driftMode = ChargeMode.externalDrift(expected: expectation, observed: observed)
+            guard mode != driftMode else { return }
+            mode = driftMode
+            driftError = observed.userDescription
+            refreshDisplayedError()
+            recordDiagnostic(
+                category: .control,
+                operation: "\(trigger.rawValue) reconciliation",
+                outcome: .failed,
+                message: error.localizedDescription,
+                stateBefore: stateBefore,
+                stateAfter: mode.diagnosticLabel
+            )
+        }
+    }
+
+    private var reconciliationExpectation: ReconciledChargeExpectation? {
+        switch mode {
+        case .maintaining(let limit): return .maintaining(limit: limit)
+        case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
+        case .discharging(let target, let returnLimit):
+            return .discharging(target: target, returnLimit: returnLimit)
+        case .heatBlocked(let previous): return .chargingDisabled(previous: previous)
+        case .externalDrift(let expected, _): return expected
+        case .idle, .transitioning, .failed: return nil
+        }
+    }
+
+    private static func status(
+        _ status: BatteryControlStatus,
+        matches expectation: ReconciledChargeExpectation
+    ) -> Bool {
+        switch expectation {
+        case .maintaining(let limit):
+            return status.maintainLevel == limit &&
+                status.maintainWorker.isRunning &&
+                status.isDischarging == false
+        case .toppingUp:
+            return status.charging == .enabled &&
+                status.isDischarging == false &&
+                status.maintainWorker.isStopped
+        case .discharging:
+            return status.charging == .disabled &&
+                status.isDischarging == true &&
+                status.maintainWorker.isStopped
+        case .chargingDisabled:
+            return status.charging == .disabled &&
+                status.isDischarging == false &&
+                status.maintainWorker.isStopped
+        }
+    }
+
+    private static func observedMode(from status: BatteryControlStatus) -> ObservedChargeMode {
+        if status.isDischarging == true,
+           status.charging == .disabled,
+           status.maintainWorker.isStopped {
+            return .discharging
+        }
+        if status.charging == .enabled,
+           status.isDischarging == false,
+           status.maintainWorker.isStopped {
+            return .charging
+        }
+        if let limit = status.maintainLevel,
+           UserSettings.chargeLimitRange.contains(limit),
+           status.isDischarging == false,
+           status.maintainWorker.isRunning {
+            return .maintaining(limit: limit)
+        }
+        if status.charging == .disabled,
+           status.isDischarging == false,
+           status.maintainWorker.isStopped {
+            return .chargingDisabled
+        }
+        return .inconsistent(status.diagnosticDescription)
+    }
+
+    private static func mode(from expectation: ReconciledChargeExpectation) -> ChargeMode {
+        switch expectation {
+        case .maintaining(let limit): return .maintaining(limit: limit)
+        case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
+        case .discharging(let target, let returnLimit):
+            return .discharging(target: target, returnLimit: returnLimit)
+        case .chargingDisabled(let previous): return .heatBlocked(previous: previous)
+        }
+    }
+
     // MARK: - Sleep / Wake
 
     private func setupSleepWakeObservers() {
@@ -898,6 +1148,7 @@ final class ChargeController: ObservableObject {
                     guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
                     mode = .heatBlocked(previous: prior)
                     readiness = .ready
+                    driftError = nil
                     activeOperationID = nil
                     updateLED()
                     return
@@ -908,6 +1159,7 @@ final class ChargeController: ObservableObject {
             guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
             mode = .maintaining(limit: limit)
             readiness = .ready
+            driftError = nil
             activeOperationID = nil
             updateLED()
         } catch {
@@ -992,7 +1244,7 @@ final class ChargeController: ObservableObject {
     }
 
     private func refreshDisplayedError() {
-        lastError = sensorError ?? commandError ?? ledError
+        lastError = sensorError ?? driftError ?? commandError ?? ledError
     }
 }
 

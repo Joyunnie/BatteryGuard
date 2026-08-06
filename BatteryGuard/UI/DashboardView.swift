@@ -96,6 +96,7 @@ struct DashboardView: View {
                         controller.isCommandPending ||
                         controller.isDischarging ||
                         controller.isTopUpActive ||
+                        controller.hasExternalControlDrift ||
                         controller.isHeatProtectionBlockingControls
                     )
                 }
@@ -122,6 +123,7 @@ struct DashboardView: View {
                         controller.isCommandPending ||
                         controller.isChargeLimitPending ||
                         controller.isHeatProtectionBlockingControls ||
+                        controller.hasExternalControlDrift ||
                         controller.isDischarging
                     )
 
@@ -144,8 +146,15 @@ struct DashboardView: View {
                         controller.isCommandPending ||
                         controller.isChargeLimitPending ||
                         controller.isHeatProtectionBlockingControls ||
+                        controller.hasExternalControlDrift ||
                         controller.isTopUpActive
                     )
+                }
+
+                if let drift = controller.externalDriftDescription {
+                    Label(drift, systemImage: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
                 }
             }
             .padding()

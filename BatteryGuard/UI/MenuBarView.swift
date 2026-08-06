@@ -80,6 +80,7 @@ struct MenuBarView: View {
                 controller.isCommandPending ||
                 controller.isDischarging ||
                 controller.isTopUpActive ||
+                controller.hasExternalControlDrift ||
                 controller.isHeatProtectionBlockingControls
             )
         }
@@ -96,6 +97,7 @@ struct MenuBarView: View {
                     controller.isCommandPending ||
                     controller.isChargeLimitPending ||
                     controller.isHeatProtectionBlockingControls ||
+                    controller.hasExternalControlDrift ||
                     controller.isDischarging,
                 action: {
                     if controller.isTopUpActive {
@@ -114,6 +116,7 @@ struct MenuBarView: View {
                     controller.isCommandPending ||
                     controller.isChargeLimitPending ||
                     controller.isHeatProtectionBlockingControls ||
+                    controller.hasExternalControlDrift ||
                     controller.isTopUpActive,
                 action: {
                     if controller.isDischarging {
@@ -144,6 +147,13 @@ struct MenuBarView: View {
                             .foregroundColor(.red)
                     }
                     .padding(.top, 4)
+                }
+
+                if let drift = controller.externalDriftDescription {
+                    Label(drift, systemImage: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                        .padding(.top, 4)
                 }
             }
 

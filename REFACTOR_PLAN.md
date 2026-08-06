@@ -103,6 +103,19 @@ PR #4 수정본을 `main`부터 누적으로 다시 검토한 결과, 기존 완
 
 이 수정으로 후속 순서 자체는 바뀌지 않는다. 다음 PR은 checkpoint 7의 periodic reconciliation과 Terminal drift 감지/표시를 구현한다. 다만 이전의 “PR #3에서 lifecycle/Heat/wake 완료” 표기는 이 누적 보완까지 포함해야 정확하다.
 
+### 0.9 PR #5 periodic reconciliation 구현 결과
+
+- 최초 초기화가 끝난 뒤 60초 저빈도 timer와 앱 활성화 시점에 실제 CLI status를 읽는다. 이 경로는 관찰만 수행하며 외부에서 바꾼 상태를 자동으로 덮어쓰지 않는다.
+- 마지막 verified expectation과 charging, discharging, maintain level 및 exact worker 상태의 전체 tuple을 비교한다. 불일치는 단일 `ChargeMode.externalDrift` 상태로 표현하고 실제 관찰 상태를 UI와 진단 로그에 표시한다.
+- drift 중에는 Charge Limit, Top Up과 Discharge 제어를 잠근다. status 조회 실패나 모순된 tuple은 이전 상태를 확정 상태처럼 유지하지 않고 unknown으로 표시한다.
+- 외부 상태가 다시 expectation과 일치하면 다음 reconciliation에서 drift를 해제한다. reconciliation 도중 wake나 더 최신 제어 전이가 시작되면 generation과 expectation을 다시 비교해 오래된 조회 결과를 폐기한다.
+- 외부에서 시작된 charge/discharge 또는 확인 불가능한 상태에서는 정상 종료를 거부하되 controller를 종료 상태로 만들지 않아 상태 수정 후 다시 종료할 수 있다. verified external maintain은 그대로 보존하고 charging-off는 차단 상태로 정리한다.
+- fake backend로 periodic/app-activation trigger, maintain/discharge/status-failure drift, 자동 복귀, stale 결과와 종료 거부/재시도를 검증한다. 전체 자동 테스트 89개가 통과했고 실제 CLI와 배터리 상태는 변경하지 않았다.
+- 저장된 strict-concurrency complete 및 warnings-as-errors 설정으로 Debug test, Release build와 Debug analyze가 모두 통과했다.
+- sleep/wake와 Terminal drift 실제 하드웨어 검증은 명시적 승인 전까지 보류한다.
+
+이 구현으로 계획 순서는 바뀌지 않는다. checkpoint 7의 코드와 자동 검증은 PR #5에서 완료하고 실기 검증만 남긴다. 다음 구현은 checkpoint 8의 macOS native Charge Limit 제어 소유권 안내와 명시적 `Disable BatteryGuard Control` UX다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -309,7 +322,7 @@ enum ChargeMode: Equatable {
 - 모든 허용 전이와 거부 전이에 단위 테스트가 있다.
 - 상태 계층의 actor 격리가 코드에 표현되고 strict-concurrency 경고를 다음 단계로 새로 전파하지 않는다.
 
-### 3.4 시작, 종료, 크래시와 절전 정책 구현 `[부분 완료]`
+### 3.4 시작, 종료, 크래시와 절전 정책 구현 `[PR #5 구현 완료, 제어 해제 UX 및 실기 검증 대기]`
 
 앱의 메모리 상태가 아니라 실제 CLI와 배터리 상태를 기준으로 복구한다.
 
@@ -598,7 +611,7 @@ enum ChargeMode: Equatable {
 4. `[PR #3 완료]` lifecycle, Heat Protection, Top Up/Discharge와 generation 기반 LED
 5. `[PR #3 완료]` 안전 실패 경로 자동 테스트와 통제된 하드웨어 검증. sleep/wake 및 Terminal drift 실기 확인은 관련 후속 구현 뒤 수행
 6. `[PR #4 누적 리뷰 보완 완료, 실기 재검증 필요]` 모니터링 단위·optional 검증, verified-limit 이력, 명시적 readiness/오류/상한/heartbeat, 로그인 승인 상태, Bundle 버전, 검증된 activation policy, correlated 로컬 순환 진단 로그, stale task/Heat rollback/wake/정상 종료 안전성 보완
-7. `[후속 PR]` periodic reconciliation과 Terminal drift 감지/표시, sleep/wake 및 drift 실기 검증
+7. `[PR #5 구현 및 자동 검증 완료, 실기 검증 대기]` read-only periodic/app-activation reconciliation과 Terminal drift 감지/표시. sleep/wake 및 drift 실기 검증은 명시적 승인 후 수행
 8. `[후속 PR]` macOS native Charge Limit 제어 소유권 안내와 명시적 `Disable BatteryGuard Control` UX
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.

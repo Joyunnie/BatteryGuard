@@ -56,10 +56,14 @@ IOKit readings ---+                    result + verified CLI status
 - On failure, preserve an actionable error instead of silently falling back to a misleading state.
 - Treat persistence and `NSApplication` policy return failures as observable failures; never open a missing diagnostic file or report a rejected policy as applied.
 - Reconcile actual CLI and battery state on launch, wake, and after command completion; tolerate changes made from Terminal.
+- Run low-frequency and app-activation reconciliation as read-only observation. Never silently overwrite a Terminal change.
+- Compare the complete expected tuple after every reconciliation read. Surface mismatch as external drift, show the observed state, and lock conflicting controls; a failed or inconsistent status read is unknown, not stale success.
+- Revalidate the operation generation and expected mode after an async status read so stale reconciliation cannot overwrite wake or newer safety intent.
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.
 - Quit during Top Up or Discharge must cancel the long operation, restore the recorded maintain limit, and verify level, worker liveness, and non-discharge state before exit.
 - Delay AppKit termination until safety cleanup succeeds; a timeout or cleanup failure must cancel normal termination instead of merely logging and exiting.
+- Reject normal quit while an externally owned charge/discharge or unknown control state is active, without tearing down the controller, so the user can correct the state and retry.
 - Do not expose a stop/disable command unless its result can be verified through an observable CLI state.
 - If temperature sensing is unavailable while heat protection is enabled, surface the degraded protection clearly and avoid unsafe automatic charging decisions.
 - When LED control is disabled or external power is removed, restore automatic LED behavior.
