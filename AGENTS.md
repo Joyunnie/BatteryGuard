@@ -24,6 +24,7 @@ IOKit readings ---+                    result + verified CLI status
 - IOKit is the source of truth for measurements; verified CLI status is the source of truth for charge control; UI state is derived from both.
 - Represent charge control with one mutually exclusive state enum, not independent booleans.
 - Use operation IDs/generations so stale async completions cannot overwrite newer intent.
+- Cancel the owning Swift task when preempting; stale work must not issue compensation or cleanup commands after newer safety intent starts.
 - Carry one semantic operation ID through controller transitions, CLI commands, verified status reads, and diagnostics; command/event IDs remain independently unique.
 - Give shared observable UI state explicit main-actor isolation; keep Core Data work on its configured context/queue.
 - Model asynchronous store readiness explicitly and await it; never use fixed sleeps as an initialization contract.
@@ -37,6 +38,7 @@ IOKit readings ---+                    result + verified CLI status
 - Apply monotonic timeouts, bounded output capture, cancellation, and process-group cleanup; never use broad `pkill -f` matching.
 - Treat cleanup failure as a terminal runner failure and reject later commands instead of continuing in an unknown state.
 - Verify control-changing commands with a subsequent status read before updating UI state.
+- Verify the complete expected control tuple: charging, discharging, maintain level, and exact worker state; a matching subset is not success.
 - Treat maintain as valid only when exactly one matching worker exists and the PID file points to it; stale or duplicate workers are failures.
 - Stop exact maintain worker PIDs before Top Up, Discharge, or charging-off transitions. Never signal an unrelated process group.
 - Coalesce rapid slider changes and block conflicting or duplicate operations.
@@ -44,6 +46,7 @@ IOKit readings ---+                    result + verified CLI status
 - Before using the privileged CLI, validate executable path, symlink target, owner/mode, version, and required capabilities.
 - Never recommend or execute an unpinned `curl | bash` installer flow.
 - Do not report missing temperature/health/current values as plausible measurements such as `0` or `100%`; model them as unavailable.
+- Reject nonfinite or physically implausible sensor values before any safety decision.
 
 ## State and Lifecycle Invariants
 
@@ -56,6 +59,7 @@ IOKit readings ---+                    result + verified CLI status
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.
 - Quit during Top Up or Discharge must cancel the long operation, restore the recorded maintain limit, and verify level, worker liveness, and non-discharge state before exit.
+- Delay AppKit termination until safety cleanup succeeds; a timeout or cleanup failure must cancel normal termination instead of merely logging and exiting.
 - Do not expose a stop/disable command unless its result can be verified through an observable CLI state.
 - If temperature sensing is unavailable while heat protection is enabled, surface the degraded protection clearly and avoid unsafe automatic charging decisions.
 - When LED control is disabled or external power is removed, restore automatic LED behavior.
@@ -69,6 +73,7 @@ IOKit readings ---+                    result + verified CLI status
 - Keep real-hardware checks manual or opt-in and never run them without explicit user approval.
 - Assert outcomes and state; “does not crash” is not a sufficient test.
 - Keep persisted diagnostic fields stable and typed, give every event a unique ID, and test migration of the previous local schema.
+- Record history from the verified effective control state, not directly from the stored preference.
 - Prefer safety-path completeness over superficial coverage percentages or trivial view tests.
 
 ## Verification

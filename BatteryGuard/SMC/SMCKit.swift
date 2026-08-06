@@ -81,6 +81,8 @@ enum MaintainWorkerStatus: Equatable, Sendable {
         if case .running = self { return true }
         return false
     }
+
+    var isStopped: Bool { self == .stopped }
 }
 
 struct BatteryControlStatus: Equatable, Sendable {
@@ -196,10 +198,17 @@ actor SMCKit: ChargeBackend {
         self.batteryPath = batteryPath
         self.smcBinaryPath = smcBinaryPath
         self.usesSudoForSMCWrites = usesSudoForSMCWrites
-        self.maintainPIDFilePath = maintainPIDFilePath
-            ?? FileManager.default.homeDirectoryForCurrentUser
+        if let maintainPIDFilePath {
+            self.maintainPIDFilePath = maintainPIDFilePath
+        } else if executableTrustPolicy == .testFixture {
+            self.maintainPIDFilePath = FileManager.default.temporaryDirectory
+                .appendingPathComponent("batteryguard-test-\(UUID().uuidString).pid")
+                .path
+        } else {
+            self.maintainPIDFilePath = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".battery/battery.pid")
                 .path
+        }
         self.maintainWorkerProbe = maintainWorkerProbe
         self.executableTrustPolicy = executableTrustPolicy
         self.diagnostics = diagnostics
@@ -351,11 +360,14 @@ actor SMCKit: ChargeBackend {
         )
 
         let status = try await readControlStatusUnlocked()
-        guard status.maintainLevel == level, status.maintainWorker.isRunning else {
+        guard status.maintainLevel == level,
+              status.maintainWorker.isRunning,
+              status.isDischarging == false else {
+            try? await terminateMaintainWorkersUnlocked()
             throw BatteryError.commandFailed(
                 "battery maintain \(level)",
                 -1,
-                "status_csv reported maintain=\(status.maintainLevel.map(String.init) ?? "unknown"), worker=\(status.maintainWorker)"
+                "status_csv reported \(status.diagnosticDescription)"
             )
         }
         await recordVerifiedOperation("maintain \(level)", before: before, after: status)
@@ -375,11 +387,13 @@ actor SMCKit: ChargeBackend {
         try await terminateMaintainWorkersUnlocked()
         _ = try await batteryCommand(["charging", "off"])
         let status = try await readControlStatusUnlocked()
-        guard status.charging == .disabled else {
+        guard status.charging == .disabled,
+              status.isDischarging == false,
+              status.maintainWorker.isStopped else {
             throw BatteryError.commandFailed(
                 "battery charging off",
                 -1,
-                "status_csv did not confirm disabled charging"
+                "status_csv did not confirm fully disabled control: \(status.diagnosticDescription)"
             )
         }
         await recordVerifiedOperation("disable charging", before: before, after: status)
@@ -394,7 +408,11 @@ actor SMCKit: ChargeBackend {
                 try await terminateMaintainWorkersUnlocked()
                 let label = "battery discharge \(level)"
                 try await launchLongRunning(["discharge", "\(level)"], label: label)
-                let after = try await verifyLongRunningStart(command: label) { $0.isDischarging == true }
+                let after = try await verifyLongRunningStart(command: label) {
+                    $0.isDischarging == true &&
+                        $0.charging == .disabled &&
+                        $0.maintainWorker.isStopped
+                }
                 await recordVerifiedOperation("start discharge \(level)", before: before, after: after)
             }
         }
@@ -409,7 +427,11 @@ actor SMCKit: ChargeBackend {
                 try await terminateMaintainWorkersUnlocked()
                 let label = "battery charge \(level)"
                 try await launchLongRunning(["charge", "\(level)"], label: label)
-                let after = try await verifyLongRunningStart(command: label) { $0.charging == .enabled }
+                let after = try await verifyLongRunningStart(command: label) {
+                    $0.charging == .enabled &&
+                        $0.isDischarging == false &&
+                        $0.maintainWorker.isStopped
+                }
                 await recordVerifiedOperation("start Top Up \(level)", before: before, after: after)
             }
         }
@@ -503,13 +525,18 @@ actor SMCKit: ChargeBackend {
                   let pid = Int32(fields[0]),
                   let pgid = Int32(fields[1]),
                   pid > 1,
-                  String(fields[2]).contains(batteryPath),
-                  String(fields[2]).contains("maintain_synchronous") ||
-                    String(fields[2]).contains("maintain_voltage_synchronous") else {
+                  Self.isExactMaintainCommand(String(fields[2]), batteryPath: batteryPath) else {
                 return nil
             }
             return MaintainWorkerProcess(pid: pid, processGroupID: pgid, command: String(fields[2]))
         }
+    }
+
+    private static func isExactMaintainCommand(_ command: String, batteryPath: String) -> Bool {
+        let arguments = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard arguments.contains(batteryPath) else { return false }
+        return arguments.contains("maintain_synchronous") ||
+            arguments.contains("maintain_voltage_synchronous")
     }
 
     private func terminateMaintainWorkersUnlocked() async throws {
@@ -523,11 +550,17 @@ actor SMCKit: ChargeBackend {
             processTable: result.stdout,
             batteryPath: batteryPath
         )
-        guard !workers.isEmpty else { return }
+        guard !workers.isEmpty else {
+            if readMaintainPIDFile() != nil {
+                try? FileManager.default.removeItem(atPath: maintainPIDFilePath)
+            }
+            return
+        }
 
         for worker in workers { _ = Darwin.kill(worker.pid, SIGTERM) }
         try await Task.sleep(nanoseconds: 250_000_000)
-        for worker in workers where Darwin.kill(worker.pid, 0) == 0 {
+        let remainingAfterTerm = try await currentMaintainWorkersUnlocked()
+        for worker in remainingAfterTerm where workers.contains(where: { $0.pid == worker.pid && $0.command == worker.command }) {
             guard Darwin.kill(worker.pid, SIGKILL) == 0 || errno == ESRCH else {
                 throw BatteryError.commandFailed(
                     "stop maintain worker \(worker.pid)",
@@ -537,7 +570,10 @@ actor SMCKit: ChargeBackend {
             }
         }
         try await Task.sleep(nanoseconds: 100_000_000)
-        let survivors = workers.filter { Darwin.kill($0.pid, 0) == 0 }
+        let currentWorkers = try await currentMaintainWorkersUnlocked()
+        let survivors = currentWorkers.filter { current in
+            workers.contains { $0.pid == current.pid && $0.command == current.command }
+        }
         guard survivors.isEmpty else {
             throw BatteryError.commandFailed(
                 "stop maintain workers",
@@ -545,9 +581,22 @@ actor SMCKit: ChargeBackend {
                 "workers survived termination: \(survivors.map(\.pid))"
             )
         }
-        if let pidFilePID = readMaintainPIDFile(), workers.contains(where: { $0.pid == pidFilePID }) {
+        if readMaintainPIDFile() != nil {
             try? FileManager.default.removeItem(atPath: maintainPIDFilePath)
         }
+    }
+
+    private func currentMaintainWorkersUnlocked() async throws -> [MaintainWorkerProcess] {
+        let result = try await runProcess(
+            executable: "/bin/ps",
+            arguments: ["-axo", "pid=,pgid=,command="],
+            label: "revalidate maintain workers",
+            timeout: statusCommandTimeout
+        )
+        return Self.parseMaintainWorkerProcesses(
+            processTable: result.stdout,
+            batteryPath: batteryPath
+        )
     }
 
     private func readMaintainPIDFile() -> Int32? {
@@ -614,8 +663,9 @@ actor SMCKit: ChargeBackend {
                        let bytesStart = line.range(of: "(bytes") {
                         let text = line[bracketEnd.upperBound..<bytesStart.lowerBound]
                             .trimmingCharacters(in: .whitespaces)
-                        if let value = Float(text) {
-                            maximum = max(maximum, value)
+                        if let rawValue = Float(text),
+                           let value = BatteryMonitor.validatedTemperature(Double(rawValue)) {
+                            maximum = max(maximum, Float(value))
                             foundValue = true
                         }
                     }

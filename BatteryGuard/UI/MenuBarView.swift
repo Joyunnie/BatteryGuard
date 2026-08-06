@@ -132,7 +132,7 @@ struct MenuBarView: View {
             if let info = monitor.batteryInfo {
                 StatusRow(label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "알 수 없음")
                 StatusRow(label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "알 수 없음")
-                StatusRow(label: "사이클", value: "\(info.cycleCount)")
+                StatusRow(label: "사이클", value: BatteryDisplay.measurement(info.cycleCount))
                 StatusRow(label: "전류", value: BatteryDisplay.amperage(info.amperage))
 
                 if controller.heatProtectionTriggered {

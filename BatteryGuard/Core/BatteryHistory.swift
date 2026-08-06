@@ -175,6 +175,14 @@ final class BatteryHistory {
     }
 
     func record(chargePercent: Int, chargeLimit: Int) {
+        guard (0...100).contains(chargePercent),
+              UserSettings.chargeLimitRange.contains(chargeLimit) else {
+            reportError(
+                "History rejected invalid values: charge=\(chargePercent), limit=\(chargeLimit)",
+                operation: "validate history sample"
+            )
+            return
+        }
         guard readiness == .ready else {
             if readiness == .loading {
                 pendingRecord = (chargePercent, chargeLimit)

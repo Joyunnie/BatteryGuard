@@ -114,6 +114,8 @@ struct BatteryGuardApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var initializationTask: Task<Void, Never>?
+    private var terminationTask: Task<Void, Never>?
+    private var terminationApproved = false
     private var windowCloseObserver: NSObjectProtocol?
     private let activationController = AppActivationController.shared
 
@@ -159,15 +161,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        guard !isRunningTests else { return }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isRunningTests else { return .terminateNow }
+        if terminationApproved { return .terminateNow }
+        if terminationTask != nil { return .terminateLater }
+
         initializationTask?.cancel()
         initializationTask = nil
+        terminationTask = Task { @MainActor [weak self, weak sender] in
+            guard let self, let sender else { return }
+            do {
+                try await ChargeController.shared.shutdown()
+                self.terminationApproved = true
+                self.terminationTask = nil
+                sender.reply(toApplicationShouldTerminate: true)
+            } catch {
+                self.terminationTask = nil
+                let alert = NSAlert()
+                alert.messageText = "안전한 종료 실패"
+                alert.informativeText = "\(error.localizedDescription)\n\n배터리 제어 상태를 확인하기 위해 앱을 종료하지 않았습니다."
+                alert.alertStyle = .critical
+                alert.runModal()
+                sender.reply(toApplicationShouldTerminate: false)
+            }
+        }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        guard !isRunningTests else { return }
         if let windowCloseObserver {
             NotificationCenter.default.removeObserver(windowCloseObserver)
             self.windowCloseObserver = nil
         }
-        ChargeController.shared.shutdown()
     }
 
 }

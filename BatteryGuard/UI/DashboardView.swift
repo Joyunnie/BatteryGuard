@@ -53,14 +53,14 @@ struct DashboardView: View {
                         DetailRow(icon: "bolt.fill", label: "상태", value: controller.currentState.rawValue)
                         DetailRow(icon: "thermometer", label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "알 수 없음")
                         DetailRow(icon: "waveform.path", label: "전류", value: BatteryDisplay.amperage(info.amperage))
-                        DetailRow(icon: "bolt.batteryblock", label: "전압", value: "\(info.voltage) mV")
+                        DetailRow(icon: "bolt.batteryblock", label: "전압", value: BatteryDisplay.measurement(info.voltage, unit: "mV"))
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
                         DetailRow(icon: "heart.fill", label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "알 수 없음")
-                        DetailRow(icon: "arrow.2.circlepath", label: "사이클", value: "\(info.cycleCount)")
-                        DetailRow(icon: "cube.box", label: "용량", value: "\(info.maxCapacity)/\(info.designCapacity) mAh")
-                        DetailRow(icon: "number", label: "시리얼", value: info.serialNumber)
+                        DetailRow(icon: "arrow.2.circlepath", label: "사이클", value: BatteryDisplay.measurement(info.cycleCount))
+                        DetailRow(icon: "cube.box", label: "용량", value: BatteryDisplay.capacity(maximum: info.maxCapacity, design: info.designCapacity))
+                        DetailRow(icon: "number", label: "시리얼", value: info.serialNumber ?? "알 수 없음")
                     }
                 }
                 .padding()
@@ -180,11 +180,11 @@ struct DashboardView: View {
                             .frame(width: 100, height: 100)
                     }
 
-                    Text("사이클 카운트: \(info.cycleCount)")
+                    Text("사이클 카운트: \(BatteryDisplay.measurement(info.cycleCount))")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
 
-                    Text("설계 용량: \(info.designCapacity) mAh")
+                    Text("설계 용량: \(BatteryDisplay.measurement(info.designCapacity, unit: "mAh"))")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 }

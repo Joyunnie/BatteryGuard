@@ -14,17 +14,17 @@ struct BatteryInfo {
     let currentCharge: Int           // 현재 충전 퍼센트 (0-100)
     let isCharging: Bool             // 충전 중 여부
     let isPluggedIn: Bool            // 전원 연결 여부
-    let maxCapacity: Int             // 최대 용량 (mAh)
-    let designCapacity: Int          // 설계 용량 (mAh)
-    let cycleCount: Int              // 충방전 사이클 수
+    let maxCapacity: Int?            // 최대 용량 (mAh)
+    let designCapacity: Int?         // 설계 용량 (mAh)
+    let cycleCount: Int?             // 충방전 사이클 수
     let temperature: Double?         // 온도 (°C), 센서 값이 없으면 nil
     let amperage: Int?               // 전류 (mA, 양수=충전, 음수=방전), 값이 없으면 nil
-    let voltage: Int                 // 전압 (mV)
+    let voltage: Int?                // 전압 (mV)
     let timeToFull: Int              // 완충까지 남은 시간 (분), -1이면 N/A
     let timeToEmpty: Int             // 방전까지 남은 시간 (분), -1이면 N/A
     let healthPercent: Double?       // 배터리 건강도 (%), 계산할 수 없으면 nil
     let isPresent: Bool              // 배터리 존재 여부
-    let serialNumber: String         // 배터리 시리얼 번호
+    let serialNumber: String?        // 배터리 시리얼 번호
 }
 
 // MARK: - BatteryMonitor
@@ -41,7 +41,6 @@ final class BatteryMonitor: ObservableObject {
     private let batteryInfoProvider: (() -> BatteryInfo?)?
     private let runsMonitoringInfrastructure: Bool
     private var timer: Timer?
-    private var historyTimer: Timer?
     private var runLoopSource: CFRunLoopSource?
     private var hasLoggedDictOnce = false
 
@@ -56,7 +55,7 @@ final class BatteryMonitor: ObservableObject {
     // MARK: - Helper
 
     /// IOKit 딕셔너리에서 Bool 읽기. CFBoolean / NSNumber 모두 처리.
-    private func readBool(_ dict: [String: Any], key: String, default defaultVal: Bool = false) -> Bool {
+    private nonisolated static func readBool(_ dict: [String: Any], key: String, default defaultVal: Bool = false) -> Bool {
         if let b = dict[key] as? Bool { return b }
         if let n = dict[key] as? NSNumber { return n.boolValue }
         if let n = dict[key] as? Int { return n != 0 }
@@ -115,12 +114,19 @@ final class BatteryMonitor: ObservableObject {
         }
         #endif
 
+        return Self.parseBatteryInfo(dict)
+    }
+
+    nonisolated static func parseBatteryInfo(_ dict: [String: Any]) -> BatteryInfo? {
         // CurrentCapacity: macOS 표시 % (0-100)
-        let currentCharge = dict["CurrentCapacity"] as? Int ?? 0
+        guard let currentCharge = dict["CurrentCapacity"] as? Int,
+              (0...100).contains(currentCharge) else {
+            return nil
+        }
 
         // AppleRawMaxCapacity: 실제 최대 용량 (mAh). MaxCapacity는 %라서 사용 불가.
-        let rawMaxCapacity = dict["AppleRawMaxCapacity"] as? Int ?? 0
-        let designCapacity = dict["DesignCapacity"] as? Int ?? 0
+        let rawMaxCapacity = Self.positiveMeasurement(dict["AppleRawMaxCapacity"] as? Int)
+        let designCapacity = Self.positiveMeasurement(dict["DesignCapacity"] as? Int)
 
         let isCharging = readBool(dict, key: "IsCharging")
         let externalConnected = readBool(dict, key: "ExternalConnected")
@@ -128,13 +134,12 @@ final class BatteryMonitor: ObservableObject {
         // ExternalChargeCapable / AppleRawExternalConnected는 물리적 연결 상태를 반영.
         let externalChargeCapable = readBool(dict, key: "ExternalChargeCapable")
         let rawExternalConnected = readBool(dict, key: "AppleRawExternalConnected")
-        let cycleCount = dict["CycleCount"] as? Int ?? 0
+        let cycleCount = Self.nonnegativeMeasurement(dict["CycleCount"] as? Int)
 
         // Temperature: 데시켈빈 (K × 10). 예: 2969 → 296.9K → 23.75°C
         let rawTemp = dict["Temperature"] as? Int
-        let tempCelsius = rawTemp.flatMap { rawValue -> Double? in
-            guard rawValue > 0 else { return nil }
-            return Double(rawValue) / 10.0 - 273.15
+        let tempCelsius = rawTemp.flatMap {
+            Self.validatedTemperature(Double($0) / 10.0 - 273.15)
         }
 
         // Amperage is documented as mA, but IOKit can bridge a negative value
@@ -142,15 +147,15 @@ final class BatteryMonitor: ObservableObject {
         // values instead of displaying a wrapped integer as a real current.
         let amperage = Self.normalizedAmperage(dict["Amperage"] as? NSNumber)
 
-        let voltage = dict["Voltage"] as? Int ?? 0
+        let voltage = Self.positiveMeasurement(dict["Voltage"] as? Int)
         let timeToFull = dict["AvgTimeToFull"] as? Int ?? -1
         let timeToEmpty = dict["AvgTimeToEmpty"] as? Int ?? -1
         let batteryPresent = readBool(dict, key: "BatteryInstalled", default: true)
-        let serialNumber = dict["Serial"] as? String ?? "N/A"
+        let serialNumber = (dict["Serial"] as? String).flatMap { $0.isEmpty ? nil : $0 }
 
         // 건강도: AppleRawMaxCapacity / DesignCapacity (둘 다 mAh)
         let health: Double?
-        if designCapacity > 0 && rawMaxCapacity > 0 {
+        if let designCapacity, let rawMaxCapacity {
             health = (Double(rawMaxCapacity) / Double(designCapacity)) * 100.0
         } else {
             health = nil
@@ -200,6 +205,21 @@ final class BatteryMonitor: ObservableObject {
         return Int(recovered)
     }
 
+    nonisolated static func validatedTemperature(_ value: Double) -> Double? {
+        guard value.isFinite, (-20.0...100.0).contains(value) else { return nil }
+        return value
+    }
+
+    private nonisolated static func positiveMeasurement(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return value
+    }
+
+    private nonisolated static func nonnegativeMeasurement(_ value: Int?) -> Int? {
+        guard let value, value >= 0 else { return nil }
+        return value
+    }
+
     // MARK: - 모니터링 시작/중지
 
     func startMonitoring(interval: TimeInterval = 2.0) {
@@ -215,25 +235,12 @@ final class BatteryMonitor: ObservableObject {
             }
         }
 
-        // 60초마다 배터리 이력 기록 (Core Data)
-        recordHistory()
-        historyTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.recordHistory() }
-        }
-
         registerPowerSourceNotification()
-    }
-
-    private func recordHistory() {
-        guard let info = batteryInfo else { return }
-        BatteryHistory.shared.record(chargePercent: info.currentCharge, chargeLimit: UserSettings.shared.chargeLimit)
     }
 
     func stopMonitoring() {
         timer?.invalidate()
         timer = nil
-        historyTimer?.invalidate()
-        historyTimer = nil
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
             runLoopSource = nil

@@ -85,7 +85,23 @@ PR #4는 3.7의 남은 모니터링·이력·UI 정확성과 로컬 진단 로�
 - 로그인 항목 register/unregister 반환 뒤 실제 status 불일치를 오류로 표시하고, 새 시스템 상태 refresh가 오래된 action 오류를 제거하게 했다.
 - activation policy 변경을 한 coordinator에 모아 반환값을 확인한다. regular policy가 거부되면 앱 활성화를 성공처럼 진행하지 않고, 마지막 일반 창이 닫힌 경우에만 accessory policy를 복원한다.
 - strict-concurrency complete와 warnings-as-errors 조건에서 전체 70개 테스트가 통과했다. 실제 battery CLI, 로그인 항목과 production Core Data store는 테스트 중 사용하지 않았다.
-- 위 수정은 관측·초기화·진단 경계를 강화하며 실제 충전 명령의 의미는 바꾸지 않는다. 따라서 PR #4의 후속 단계 순서와 하드웨어 검증 보류 조건은 변경하지 않는다.
+- 이 시점에는 실제 충전 명령 의미가 바뀌지 않았다고 판단했으나, 아래 0.8 누적 리뷰에서 lifecycle/Heat 안전 결함을 발견해 이 판단과 하드웨어 검증 조건을 수정했다.
+
+### 0.8 PR #1~4 누적 리뷰 수정 결과
+
+PR #4 수정본을 `main`부터 누적으로 다시 검토한 결과, 기존 완료 기록보다 강한 보완이 필요했다. 특히 stale 작업의 보상 명령, Heat 복원 rollback, wake와 정상 종료가 실제 안전 불변식을 끝까지 보장하지 못했다.
+
+- controller가 실행 중인 Swift task를 직접 소유하고 preemption 시 task와 backend를 함께 취소한다. 취소된 Top Up/Discharge 시작 작업은 최신 Heat Protection 전이 뒤에 maintain 보상 명령을 실행하지 않는다.
+- Heat 복원 rollback은 새 long operation을 먼저 취소한 뒤 charging-off를 적용한다. 모든 semantic control 명령은 charging, discharge, maintain level과 exact worker 상태의 전체 tuple을 검증한다.
+- wake reconciliation은 새 generation으로 기존 작업을 무효화하며, stale 완료가 wake 결과를 덮어쓰지 못한다.
+- 정상 종료는 `applicationShouldTerminate`의 delayed reply를 사용한다. verified cleanup이 실패하면 정상 종료를 취소하고 앱을 남겨 실제 상태 확인을 요구한다.
+- IOKit charge percent는 0...100이 아니거나 없으면 전체 측정을 사용할 수 없는 것으로 처리한다. 용량, cycle, voltage와 serial은 optional을 유지하고, IOKit/SMC 온도는 finite 및 보수적인 물리 범위를 통과해야 안전 판단에 사용한다.
+- history는 저장된 preference가 아니라 controller의 마지막 verified effective limit를 기록한다. 센서 실패는 진단 로그에서 명시적인 failure outcome으로 저장한다.
+- worker command는 경로와 mode의 exact token을 요구하고 SIGKILL 직전에 identity를 다시 조회한다. fixture policy는 실제 사용자 PID 파일을 사용하지 않는다.
+- strict concurrency와 warnings-as-errors를 Xcode target 설정에 저장했다. 상태 모델 타입은 `ChargeState.swift`로 분리해 controller의 책임 경계를 조금 줄였다.
+- 전체 자동 테스트는 83개로 증가했고 실제 battery CLI, 로그인 항목, production Core Data store를 사용하지 않는다. 실제 하드웨어 동작은 변경됐으므로 PR #4 merge 전 Top Up/Discharge, Heat rollback, wake와 정상 종료 수동 검증이 다시 필요하다.
+
+이 수정으로 후속 순서 자체는 바뀌지 않는다. 다음 PR은 checkpoint 7의 periodic reconciliation과 Terminal drift 감지/표시를 구현한다. 다만 이전의 “PR #3에서 lifecycle/Heat/wake 완료” 표기는 이 누적 보완까지 포함해야 정확하다.
 
 ## 1. 프로젝트 전제
 
@@ -338,7 +354,7 @@ enum ChargeMode: Equatable {
 - 외부 CLI 변경을 영구적으로 덮어쓰거나 무시하지 않는다.
 - 상태를 확인할 수 없을 때 UI가 확정적인 성공 상태를 표시하지 않는다.
 
-### 3.5 Heat Protection, Top Up과 Discharge 재구현 `[PR #3 완료]`
+### 3.5 Heat Protection, Top Up과 Discharge 재구현 `[PR #3 구현, PR #4 누적 리뷰 보완 완료]`
 
 각 기능을 독립 Boolean과 임시 명령 조합이 아니라 단일 상태 모델 위의 전이로 구현한다.
 
@@ -423,7 +439,7 @@ enum ChargeMode: Equatable {
 - preflight 실패가 충전 명령 실패와 구분되어 표시된다.
 - 두 충전 제어 시스템을 동시에 사용하는 위험이 사용자에게 명확하다.
 
-### 3.7 모니터링, 이력과 UI 정확성 개선 `[PR #4 구현 완료, 리뷰 대기]`
+### 3.7 모니터링, 이력과 UI 정확성 개선 `[PR #4 구현 및 누적 리뷰 보완 완료]`
 
 안전성과 제어 상태가 안정된 뒤 측정, 저장과 표시의 정확성을 정리한다.
 
@@ -581,7 +597,7 @@ enum ChargeMode: Equatable {
 3. `[PR #3 완료]` privileged CLI preflight, 완전한 async readiness와 단일 `ChargeMode`
 4. `[PR #3 완료]` lifecycle, Heat Protection, Top Up/Discharge와 generation 기반 LED
 5. `[PR #3 완료]` 안전 실패 경로 자동 테스트와 통제된 하드웨어 검증. sleep/wake 및 Terminal drift 실기 확인은 관련 후속 구현 뒤 수행
-6. `[PR #4 수정 완료, 누적 리뷰 대상]` 모니터링 단위·optional 검증, 명시적 이력 readiness/오류/상한/heartbeat, 로그인 승인 상태, Bundle 버전, 검증된 activation policy와 correlated 로컬 순환 진단 로그
+6. `[PR #4 누적 리뷰 보완 완료, 실기 재검증 필요]` 모니터링 단위·optional 검증, verified-limit 이력, 명시적 readiness/오류/상한/heartbeat, 로그인 승인 상태, Bundle 버전, 검증된 activation policy, correlated 로컬 순환 진단 로그, stale task/Heat rollback/wake/정상 종료 안전성 보완
 7. `[후속 PR]` periodic reconciliation과 Terminal drift 감지/표시, sleep/wake 및 drift 실기 검증
 8. `[후속 PR]` macOS native Charge Limit 제어 소유권 안내와 명시적 `Disable BatteryGuard Control` UX
 
