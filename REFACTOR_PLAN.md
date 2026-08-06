@@ -172,6 +172,15 @@ PR #7은 동작을 추가하지 않는 maintainability 단계다. 1,800줄을 �
 
 checkpoint 8까지의 기능 구현은 완료됐다. 남은 필수 작업은 승인된 실제 하드웨어 checklist이고, 다음 코드 작업은 checkpoint 9의 책임 분리다.
 
+### 0.13 PR #7 책임 경계 분리 결과
+
+- `BatteryControlOwnership`과 crash-durable journal 구현을 `UserSettings.swift`에서 `BatteryControlOwnership.swift`로 옮겼다. 설정 객체는 preference와 ownership transition 요청만 담당하고 POSIX 파일 저장 세부사항을 소유하지 않는다.
+- reconciliation의 full-tuple 일치 판정, observed mode 해석과 expectation/mode 매핑을 I/O 없는 `ChargeReconciliationPolicy`로 추출했다. `ChargeController`는 status/process ownership을 읽고 published state와 task generation을 관리하는 orchestration에 집중한다.
+- 여러 파일의 extension이 controller private 상태에 접근하도록 access level을 넓히지 않았다. 새 policy 경계는 controller 없이 직접 테스트하며 pending release 비승격, released-control process ownership, exact Maintain worker와 restorable mode 매핑을 검증한다.
+- strict-concurrency complete 및 warnings-as-errors 조건에서 전체 128개 테스트와 Debug analyze가 통과했다. 파일 이동과 순수 policy 추출뿐이며 실제 battery/SMC 명령과 제어 의미는 변경하지 않았다.
+
+PR #7 이후에도 `ChargeController`는 lifecycle, Heat Protection, 사용자 intent와 LED orchestration을 함께 가진 큰 타입이다. 추가 분리는 실제 하드웨어 checklist가 통과한 뒤 각 subsystem의 명시적 input/output 계약을 먼저 정의해 별도 PR로 진행한다. 단일 테스트 파일의 물리적 분리도 그때 production 경계와 같은 단위로 수행한다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -669,7 +678,7 @@ enum ChargeMode: Equatable {
 6. `[PR #4 누적 리뷰 보완 완료, 실기 재검증 필요]` 모니터링 단위·optional 검증, verified-limit 이력, 명시적 readiness/오류/상한/heartbeat, 로그인 승인 상태, Bundle 버전, 검증된 activation policy, correlated 로컬 순환 진단 로그, stale task/Heat rollback/wake/정상 종료 안전성 보완
 7. `[PR #5 구현·누적 리뷰 보완 및 자동 검증 완료, 실기 검증 대기]` target이 일치하는 exact worker와 process ownership을 포함한 read-only periodic/app-activation reconciliation, 종료 직전 fresh 검증, 재시도 가능한 종료 cleanup과 기대/실제 Terminal drift 복구 UI. sleep/wake 및 drift 실기 검증은 명시적 승인 후 수행
 8. `[PR #6 구현 및 자동 검증 완료, 실기 검증 대기]` macOS native Charge Limit 제어 소유권 안내, crash-safe release intent와 명시적 `Disable BatteryGuard Control` UX
-9. `[PR #7 다음 작업]` 동작 변경 없이 durable ownership journal과 순수 reconciliation policy를 각각 독립 파일/타입으로 분리하고 policy 경계 테스트 추가
+9. `[PR #7 구현 및 자동 검증 완료]` 동작 변경 없이 durable ownership journal과 순수 reconciliation policy를 각각 독립 파일/타입으로 분리하고 policy 경계 테스트 추가
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 

@@ -20,6 +20,8 @@
 		AA000020 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100020 /* SettingsView.swift */; };
 		AA000021 /* BatteryCommandRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100021 /* BatteryCommandRunner.swift */; };
 		AA000022 /* DiagnosticLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100022 /* DiagnosticLog.swift */; };
+		AA000023 /* BatteryControlOwnership.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100023 /* BatteryControlOwnership.swift */; };
+		AA000024 /* ChargeReconciliationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100024 /* ChargeReconciliationPolicy.swift */; };
 		BB000001 /* BatteryGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* BatteryGuardTests.swift */; };
 		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -51,6 +53,8 @@
 		AA100020 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		AA100021 /* BatteryCommandRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryCommandRunner.swift; sourceTree = "<group>"; };
 		AA100022 /* DiagnosticLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLog.swift; sourceTree = "<group>"; };
+		AA100023 /* BatteryControlOwnership.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryControlOwnership.swift; sourceTree = "<group>"; };
+		AA100024 /* ChargeReconciliationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeReconciliationPolicy.swift; sourceTree = "<group>"; };
 		BB100001 /* BatteryGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardTests.swift; sourceTree = "<group>"; };
 		BB100002 /* BatteryGuardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BatteryGuardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -109,9 +113,11 @@
 		AA300004 /* Core */ = {
 			isa = PBXGroup;
 			children = (
+				AA100023 /* BatteryControlOwnership.swift */,
 				AA100009 /* BatteryHistory.swift */,
 				AA100010 /* BatteryMonitor.swift */,
 				AA100011 /* ChargeController.swift */,
+				AA100024 /* ChargeReconciliationPolicy.swift */,
 				AA100014 /* ChargeState.swift */,
 				AA100022 /* DiagnosticLog.swift */,
 				AA100016 /* UserSettings.swift */,
@@ -232,6 +238,8 @@
 				AA000001 /* BatteryGuardApp.swift in Sources */,
 				AA000021 /* BatteryCommandRunner.swift in Sources */,
 				AA000022 /* DiagnosticLog.swift in Sources */,
+				AA000023 /* BatteryControlOwnership.swift in Sources */,
+				AA000024 /* ChargeReconciliationPolicy.swift in Sources */,
 				AA000002 /* SMCKit.swift in Sources */,
 				AA000009 /* BatteryHistory.swift in Sources */,
 				AA000010 /* BatteryMonitor.swift in Sources */,

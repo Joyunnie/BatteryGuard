@@ -19,11 +19,6 @@ final class ChargeController: ObservableObject {
         case keepChargingDisabled
     }
 
-    private struct ReconciliationSnapshot: Sendable {
-        let status: BatteryControlStatus
-        let ownsLongRunningOperation: Bool?
-    }
-
     private struct HeatRestoreReblockedError: LocalizedError {
         let underlying: Error
         var errorDescription: String? {
@@ -252,7 +247,7 @@ final class ChargeController: ObservableObject {
                 } else {
                     mode = .externalDrift(
                         expected: .controlReleased(lastLimit: lastLimit),
-                        observed: Self.observedMode(from: observedStatus)
+                        observed: ChargeReconciliationPolicy.observedMode(from: observedStatus)
                     )
                     driftError = "BatteryGuard 제어는 꺼져 있지만 외부 충전 제어가 감지됐습니다."
                 }
@@ -502,13 +497,13 @@ final class ChargeController: ObservableObject {
                   currentExpectation == expectation else {
                 throw BatteryError.unsupported("종료 전 상태 확인 중 제어 상태가 변경되었습니다. 다시 종료하세요.")
             }
-            if Self.status(snapshot, matches: expectation) {
-                mode = Self.mode(from: expectation)
+            if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
+                mode = ChargeReconciliationPolicy.mode(from: expectation)
                 driftError = nil
                 refreshDisplayedError()
                 return
             }
-            observed = Self.observedMode(from: snapshot.status)
+            observed = ChargeReconciliationPolicy.observedMode(from: snapshot.status)
         } catch {
             guard case .externalDrift(let currentExpectation, _) = mode,
                   currentExpectation == expectation else {
@@ -1309,7 +1304,7 @@ final class ChargeController: ObservableObject {
     private func handleUnexpectedLongRunningExit(expectedMode: ChargeMode, message: String) async {
         guard mode == expectedMode,
               activeOperationID == nil,
-              let expectation = Self.expectation(from: expectedMode) else {
+              let expectation = ChargeReconciliationPolicy.expectation(fromActiveMode: expectedMode) else {
             return
         }
 
@@ -1317,7 +1312,7 @@ final class ChargeController: ObservableObject {
         do {
             let status = try await backend.readControlStatus()
             guard mode == expectedMode, activeOperationID == nil else { return }
-            observed = Self.observedMode(from: status)
+            observed = ChargeReconciliationPolicy.observedMode(from: status)
         } catch {
             guard mode == expectedMode, activeOperationID == nil else { return }
             observed = .unavailable(error.localizedDescription)
@@ -1427,14 +1422,14 @@ final class ChargeController: ObservableObject {
                 return
             }
 
-            if Self.status(snapshot, matches: expectation) {
+            if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
                 let recoveredFromFailure: Bool
                 if case .failed = mode {
                     recoveredFromFailure = true
                 } else {
                     recoveredFromFailure = false
                 }
-                let reconciledMode = Self.mode(from: expectation)
+                let reconciledMode = ChargeReconciliationPolicy.mode(from: expectation)
                 if mode != reconciledMode {
                     mode = reconciledMode
                     if recoveredFromFailure { commandError = nil }
@@ -1453,7 +1448,7 @@ final class ChargeController: ObservableObject {
                 return
             }
 
-            let observed = Self.observedMode(from: snapshot.status)
+            let observed = ChargeReconciliationPolicy.observedMode(from: snapshot.status)
             let driftMode = ChargeMode.externalDrift(expected: expectation, observed: observed)
             guard mode != driftMode else { return }
             mode = driftMode
@@ -1498,7 +1493,7 @@ final class ChargeController: ObservableObject {
 
     private func readReconciliationSnapshot(
         for expectation: ReconciledChargeExpectation
-    ) async throws -> ReconciliationSnapshot {
+    ) async throws -> ChargeReconciliationSnapshot {
         let status = try await backend.readControlStatus()
         let ownsLongRunningOperation: Bool?
         switch expectation {
@@ -1509,7 +1504,7 @@ final class ChargeController: ObservableObject {
         case .maintaining, .chargingDisabled:
             ownsLongRunningOperation = nil
         }
-        return ReconciliationSnapshot(
+        return ChargeReconciliationSnapshot(
             status: status,
             ownsLongRunningOperation: ownsLongRunningOperation
         )
@@ -1530,90 +1525,8 @@ final class ChargeController: ObservableObject {
         case .failed(let previous?, _, let controlsBlocked):
             return controlsBlocked
                 ? .chargingDisabled(previous: previous)
-                : Self.expectation(from: previous)
+                : ChargeReconciliationPolicy.expectation(from: previous)
         case .idle, .transitioning, .failed(previous: nil, message: _, controlsBlocked: _): return nil
-        }
-    }
-
-    private static func status(
-        _ snapshot: ReconciliationSnapshot,
-        matches expectation: ReconciledChargeExpectation
-    ) -> Bool {
-        let status = snapshot.status
-        switch expectation {
-        case .maintaining(let limit):
-            return status.isVerifiedMaintain(level: limit)
-        case .toppingUp:
-            return snapshot.ownsLongRunningOperation == true &&
-                status.charging == .enabled &&
-                status.isDischarging == false &&
-                status.maintainWorker.isStopped
-        case .discharging:
-            return snapshot.ownsLongRunningOperation == true &&
-                status.charging == .disabled &&
-                status.isDischarging == true &&
-                status.maintainWorker.isStopped
-        case .chargingDisabled:
-            return status.isVerifiedChargingDisabled
-        case .controlReleasing:
-            return false
-        case .controlReleased:
-            return snapshot.ownsLongRunningOperation != true &&
-                status.isCompatibleWithReleasedControl
-        }
-    }
-
-    private static func observedMode(from status: BatteryControlStatus) -> ObservedChargeMode {
-        if status.isDischarging == true,
-           status.charging == .disabled,
-           status.maintainWorker.isStopped {
-            return .discharging
-        }
-        if status.charging == .enabled,
-           status.isDischarging == false,
-           status.maintainWorker.isStopped {
-            return .charging
-        }
-        if let limit = status.maintainLevel,
-           UserSettings.chargeLimitRange.contains(limit),
-           status.isVerifiedMaintain(level: limit) {
-            return .maintaining(limit: limit)
-        }
-        if status.charging == .disabled,
-           status.isDischarging == false,
-           status.maintainWorker.isStopped {
-            return .chargingDisabled
-        }
-        return .inconsistent(status.diagnosticDescription)
-    }
-
-    private static func mode(from expectation: ReconciledChargeExpectation) -> ChargeMode {
-        switch expectation {
-        case .controlReleasing:
-            return .externalDrift(
-                expected: expectation,
-                observed: .unavailable("BatteryGuard control release is still pending")
-            )
-        case .controlReleased(let lastLimit): return .controlDisabled(lastLimit: lastLimit)
-        case .maintaining(let limit): return .maintaining(limit: limit)
-        case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
-        case .discharging(let target, let returnLimit):
-            return .discharging(target: target, returnLimit: returnLimit)
-        case .chargingDisabled(let previous): return .heatBlocked(previous: previous)
-        }
-    }
-
-    private static func expectation(from mode: ChargeMode) -> ReconciledChargeExpectation? {
-        guard let restorable = mode.restorableMode else { return nil }
-        return expectation(from: restorable)
-    }
-
-    private static func expectation(from mode: RestorableChargeMode) -> ReconciledChargeExpectation {
-        switch mode {
-        case .maintaining(let limit): return .maintaining(limit: limit)
-        case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
-        case .discharging(let target, let returnLimit):
-            return .discharging(target: target, returnLimit: returnLimit)
         }
     }
 
@@ -1741,11 +1654,11 @@ final class ChargeController: ObservableObject {
 
             let snapshot = try await readReconciliationSnapshot(for: expectation)
             guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
-            if Self.status(snapshot, matches: expectation) {
-                mode = Self.mode(from: expectation)
+            if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
+                mode = ChargeReconciliationPolicy.mode(from: expectation)
                 driftError = nil
             } else {
-                let observed = Self.observedMode(from: snapshot.status)
+                let observed = ChargeReconciliationPolicy.observedMode(from: snapshot.status)
                 mode = .externalDrift(expected: expectation, observed: observed)
                 driftError = "Wake 후 외부 CLI 변경 유지: \(observed.userDescription)"
             }

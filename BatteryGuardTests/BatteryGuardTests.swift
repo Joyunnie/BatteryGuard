@@ -362,6 +362,101 @@ final class ChargeStateTests: XCTestCase {
     }
 }
 
+final class ChargeReconciliationPolicyTests: XCTestCase {
+    private let releasedStatus = BatteryControlStatus(
+        charging: .disabled,
+        isDischarging: false,
+        maintainLevel: 80,
+        maintainWorker: .stopped
+    )
+
+    func testPendingReleaseCannotBeCompletedByReadOnlyStatus() {
+        let snapshot = ChargeReconciliationSnapshot(
+            status: releasedStatus,
+            ownsLongRunningOperation: false
+        )
+
+        XCTAssertFalse(
+            ChargeReconciliationPolicy.status(
+                snapshot,
+                matches: .controlReleasing(lastLimit: 80)
+            )
+        )
+    }
+
+    func testReleasedControlRequiresNoOwnedLongOperation() {
+        XCTAssertTrue(
+            ChargeReconciliationPolicy.status(
+                ChargeReconciliationSnapshot(
+                    status: releasedStatus,
+                    ownsLongRunningOperation: false
+                ),
+                matches: .controlReleased(lastLimit: 80)
+            )
+        )
+        XCTAssertFalse(
+            ChargeReconciliationPolicy.status(
+                ChargeReconciliationSnapshot(
+                    status: releasedStatus,
+                    ownsLongRunningOperation: true
+                ),
+                matches: .controlReleased(lastLimit: 80)
+            )
+        )
+    }
+
+    func testObservedMaintainRequiresMatchingLiveWorker() {
+        let verified = BatteryControlStatus(
+            charging: .disabled,
+            isDischarging: false,
+            maintainLevel: 75,
+            maintainWorker: .running(pid: 7_575, target: 75)
+        )
+        let deadWorker = BatteryControlStatus(
+            charging: .disabled,
+            isDischarging: false,
+            maintainLevel: 75,
+            maintainWorker: .stopped
+        )
+
+        XCTAssertEqual(
+            ChargeReconciliationPolicy.observedMode(from: verified),
+            .maintaining(limit: 75)
+        )
+        XCTAssertEqual(
+            ChargeReconciliationPolicy.observedMode(from: deadWorker),
+            .chargingDisabled
+        )
+    }
+
+    func testPolicyMapsRestorableModesWithoutControllerState() {
+        let mode = RestorableChargeMode.discharging(target: 65, returnLimit: 80)
+        let expectation = ChargeReconciliationPolicy.expectation(from: mode)
+
+        XCTAssertEqual(expectation, .discharging(target: 65, returnLimit: 80))
+        XCTAssertEqual(
+            ChargeReconciliationPolicy.mode(from: expectation),
+            .discharging(target: 65, returnLimit: 80)
+        )
+    }
+
+    func testActiveModeExpectationRejectsDriftAndTransitionWrappers() {
+        XCTAssertNil(
+            ChargeReconciliationPolicy.expectation(
+                fromActiveMode: .externalDrift(
+                    expected: .controlReleased(lastLimit: 80),
+                    observed: .charging
+                )
+            )
+        )
+        XCTAssertNil(
+            ChargeReconciliationPolicy.expectation(
+                fromActiveMode: .transitioning(.startingTopUp(returnLimit: 80))
+            )
+        )
+    }
+}
+
 @MainActor
 final class UserSettingsTests: XCTestCase {
     func testBatteryControlOwnershipDefaultsEnabledAndPersistsExplicitRelease() throws {
