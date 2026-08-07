@@ -176,4 +176,53 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
         XCTAssertNotNil(persistenceError)
     }
+
+    func testDiagnosticLogDropsOldestEventsToRemainWithinByteLimit() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-bounded-diagnostics-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 100)
+
+        for index in 0..<100 {
+            await log.record(
+                DiagnosticEvent(
+                    timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                    category: .control,
+                    operation: "operation-\(index)-" + String(repeating: "x", count: 20_000)
+                )
+            )
+        }
+
+        let events = await log.recentEvents()
+        let persistenceError = await log.persistenceError
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let fileSize = try XCTUnwrap(attributes[.size] as? NSNumber).intValue
+
+        XCTAssertLessThan(events.count, 100)
+        XCTAssertTrue(events.last?.operation.hasPrefix("operation-99-") == true)
+        XCTAssertLessThanOrEqual(fileSize, 1_048_576)
+        XCTAssertNil(persistenceError)
+    }
+
+    func testDiagnosticLogTightensExistingDirectoryPermissions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-diagnostic-permissions-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o755]
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 10)
+
+        await log.record(DiagnosticEvent(category: .control, operation: "permission check"))
+
+        let persistenceError = await log.persistenceError
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        let permissions = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).intValue
+        XCTAssertEqual(permissions & 0o777, 0o700)
+        XCTAssertNil(persistenceError)
+    }
 }

@@ -74,6 +74,25 @@ final class BatteryHistoryTests: XCTestCase {
         XCTAssertTrue(sampled.contains { $0.chargePercent == 100 })
     }
 
+    func testDownsamplingPreservesAOneSampleChargeLimitExtreme() {
+        var records = (0..<1_000).map {
+            BatteryHistory.ChartRecord(
+                timestamp: Date(timeIntervalSince1970: TimeInterval($0)),
+                chargePercent: 50,
+                chargeLimit: 80
+            )
+        }
+        records[501] = BatteryHistory.ChartRecord(
+            timestamp: records[501].timestamp,
+            chargePercent: 50,
+            chargeLimit: 60
+        )
+
+        let sampled = BatteryHistory.downsample(records, maxPoints: 100)
+
+        XCTAssertTrue(sampled.contains { $0.chargeLimit == 60 })
+    }
+
     func testPersistentStoreLoadFailureIsExposed() async throws {
         let blockingFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-history-block-\(UUID().uuidString)")

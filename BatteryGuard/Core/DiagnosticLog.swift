@@ -253,25 +253,53 @@ actor DiagnosticLog {
 
     private func persist() throws {
         guard let fileURL else { return }
+        let directoryURL = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
+            at: directoryURL,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try Self.encode(events, to: fileURL)
+        try Self.validateAndSecureDirectory(directoryURL)
+        events = try Self.encodeNewestEventsWithinLimit(events, to: fileURL)
         persistenceError = nil
     }
 
-    private nonisolated static func encode(_ events: [DiagnosticEvent], to fileURL: URL) throws {
+    private nonisolated static func validateAndSecureDirectory(_ directoryURL: URL) throws {
+        var metadata = stat()
+        guard lstat(directoryURL.path, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFDIR,
+              metadata.st_uid == geteuid() else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        guard Darwin.chmod(directoryURL.path, mode_t(S_IRWXU)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard lstat(directoryURL.path, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFDIR,
+              metadata.st_uid == geteuid(),
+              metadata.st_mode & mode_t(S_IRWXG | S_IRWXO) == 0 else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+    }
+
+    private nonisolated static func encodeNewestEventsWithinLimit(
+        _ events: [DiagnosticEvent],
+        to fileURL: URL
+    ) throws -> [DiagnosticEvent] {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(events)
-        guard data.count <= maximumFileBytes else { throw CocoaError(.fileWriteOutOfSpace) }
+        var retained = events
+        var data = try encoder.encode(retained)
+        while data.count > maximumFileBytes, !retained.isEmpty {
+            retained.removeFirst()
+            data = try encoder.encode(retained)
+        }
         try data.write(to: fileURL, options: .atomic)
         guard Darwin.chmod(fileURL.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
+        return retained
     }
 
     private nonisolated static func readBoundedRegularFile(_ fileURL: URL) throws -> Data? {

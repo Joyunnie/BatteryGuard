@@ -277,20 +277,28 @@ final class BatteryHistory {
                 / Double(averageRange.count)
             let averageY = averageRange.map { Double($0.chargePercent) }.reduce(0, +)
                 / Double(averageRange.count)
+            let averageLimit = averageRange.map { Double($0.chargeLimit) }.reduce(0, +)
+                / Double(averageRange.count)
 
             let rangeStart = min(Int(floor(Double(bucket) * every)) + 1, records.count - 2)
             let rangeEnd = min(Int(floor(Double(bucket + 1) * every)) + 1, records.count - 1)
             let pointA = records[selectedIndex]
             let ax = pointA.timestamp.timeIntervalSinceReferenceDate
             let ay = Double(pointA.chargePercent)
+            let limitA = Double(pointA.chargeLimit)
             var bestArea = -1.0
             var bestIndex = rangeStart
             for index in rangeStart..<max(rangeStart + 1, rangeEnd) {
                 let point = records[index]
-                let area = abs(
+                let chargeArea = abs(
                     (ax - averageX) * (Double(point.chargePercent) - ay)
                     - (ax - point.timestamp.timeIntervalSinceReferenceDate) * (averageY - ay)
                 )
+                let limitArea = abs(
+                    (ax - averageX) * (Double(point.chargeLimit) - limitA)
+                    - (ax - point.timestamp.timeIntervalSinceReferenceDate) * (averageLimit - limitA)
+                )
+                let area = max(chargeArea, limitArea)
                 if area > bestArea {
                     bestArea = area
                     bestIndex = index

@@ -267,7 +267,6 @@ enum ChargeFailureDisposition: String, Equatable, Sendable {
 
 enum BatteryIssueSource: String, Hashable, Sendable {
     case command
-    case lifecycle
     case externalDrift
     case sensor
     case led
@@ -318,7 +317,8 @@ struct BatteryIssueRegistry: Sendable {
     var orderedIssues: [BatteryIssue] {
         entries.values.sorted {
             if $0.severity != $1.severity { return $0.severity > $1.severity }
-            return $0.occurredAt > $1.occurredAt
+            if $0.occurredAt != $1.occurredAt { return $0.occurredAt > $1.occurredAt }
+            return $0.source.rawValue < $1.source.rawValue
         }
     }
 }
@@ -350,7 +350,8 @@ struct SafetyTemperatureSnapshot: Equatable, Sendable {
     var displayValue: String {
         guard let value else { return "알 수 없음" }
         let provenance = sources.map(\.rawValue).joined(separator: "+")
-        return String(format: "%.1f°C (%@)", value, provenance)
+        let measurement = String(format: "%.1f°C (%@)", value, provenance)
+        return freshness == .stale ? "\(measurement) · 오래됨" : measurement
     }
 }
 

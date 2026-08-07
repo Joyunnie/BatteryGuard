@@ -77,7 +77,7 @@ final class ChargeController: ObservableObject {
         case .heatBlocked: return .blocked
         case .failed(_, _, .heatProtection): return .failed
         default:
-            return safetyTemperatureSnapshot.value == nil ? .degraded : .monitoring
+            return safetyTemperatureSnapshot.freshness == .fresh ? .monitoring : .degraded
         }
     }
     var isBatteryControlDisabled: Bool {
@@ -857,6 +857,10 @@ final class ChargeController: ObservableObject {
     }
 
     func processBatteryInfo(_ info: BatteryInfo) {
+        publishSafetyTemperature(
+            smc: recentSMCTemperature(),
+            ioKit: info.temperature
+        )
         let historyLimit: Int?
         if case .externalDrift(_, .maintaining(let limit)) = mode {
             historyLimit = limit
@@ -903,8 +907,7 @@ final class ChargeController: ObservableObject {
     private func measuredTemperature(using info: BatteryInfo) -> Double? {
         let recentSMC = recentSMCTemperature()
         let ioKit = info.temperature.flatMap(BatteryMonitor.validatedTemperature)
-        publishSafetyTemperature(smc: recentSMC, ioKit: ioKit)
-        return safetyTemperatureSnapshot.value
+        return publishSafetyTemperature(smc: recentSMC, ioKit: ioKit)
     }
 
     private func readFreshSafetyTemperature(fallbackInfo: BatteryInfo? = nil) async -> Double? {
@@ -930,17 +933,17 @@ final class ChargeController: ObservableObject {
         } else {
             failures.append("IOKit: 배터리 정보 없음")
         }
-        publishSafetyTemperature(smc: smc, ioKit: ioKit, failures: failures)
-        let value = safetyTemperatureSnapshot.value
+        let value = publishSafetyTemperature(smc: smc, ioKit: ioKit, failures: failures)
         lastTemperature = value
         return value
     }
 
+    @discardableResult
     private func publishSafetyTemperature(
         smc: Double?,
         ioKit: Double?,
         failures: [String] = []
-    ) {
+    ) -> Double? {
         var readings: [(SafetyTemperatureSource, Double)] = []
         if let smc = smc.flatMap(BatteryMonitor.validatedTemperature) {
             readings.append((.smc, smc))
@@ -948,12 +951,31 @@ final class ChargeController: ObservableObject {
         if let ioKit = ioKit.flatMap(BatteryMonitor.validatedTemperature) {
             readings.append((.ioKit, ioKit))
         }
+        guard let maximum = readings.map(\.1).max() else {
+            if safetyTemperatureSnapshot.value != nil {
+                safetyTemperatureSnapshot = SafetyTemperatureSnapshot(
+                    value: safetyTemperatureSnapshot.value,
+                    sources: safetyTemperatureSnapshot.sources,
+                    freshness: .stale,
+                    failures: failures
+                )
+            } else {
+                safetyTemperatureSnapshot = SafetyTemperatureSnapshot(
+                    value: nil,
+                    sources: [],
+                    freshness: .unavailable,
+                    failures: failures
+                )
+            }
+            return nil
+        }
         safetyTemperatureSnapshot = SafetyTemperatureSnapshot(
-            value: readings.map(\.1).max(),
-            sources: readings.map(\.0),
-            freshness: readings.isEmpty ? .unavailable : .fresh,
+            value: maximum,
+            sources: readings.filter { $0.1 == maximum }.map(\.0),
+            freshness: .fresh,
             failures: failures
         )
+        return maximum
     }
 
     // MARK: - Heat Protection

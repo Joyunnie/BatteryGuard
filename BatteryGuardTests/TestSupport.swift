@@ -5,11 +5,22 @@ import Darwin
 import AppKit
 @testable import BatteryGuard
 
+private final class EphemeralTestDefaults: UserDefaults, @unchecked Sendable {
+    private let suite: String
+
+    init() {
+        suite = "com.jiwon.batteryguard.tests.\(UUID().uuidString)"
+        super.init(suiteName: suite)!
+        removePersistentDomain(forName: suite)
+    }
+
+    deinit {
+        removePersistentDomain(forName: suite)
+    }
+}
+
 func makeTestDefaults() -> UserDefaults {
-    let testDefaultsSuite = "com.jiwon.batteryguard.tests.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: testDefaultsSuite)!
-    defaults.removePersistentDomain(forName: testDefaultsSuite)
-    return defaults
+    EphemeralTestDefaults()
 }
 
 func makeOwnershipJournalURL() -> URL {
