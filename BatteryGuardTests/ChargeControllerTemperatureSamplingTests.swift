@@ -4,6 +4,47 @@ import Foundation
 
 @MainActor
 extension ChargeControllerSafetyTests {
+    func testSafetyTemperatureUsesIOKitWhileHeatProtectionIsDisabled() {
+        let (controller, _, _, _) = makeSUT(heatProtectionEnabled: false, temperature: 31.5)
+
+        controller.processBatteryInfo(makeBatteryInfo(charge: 70, temperature: 31.5))
+
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.value, 31.5)
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.sources, [.ioKit])
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.freshness, .fresh)
+    }
+
+    func testMissingCurrentTemperatureKeepsOnlyAStaleDisplayValue() {
+        let (controller, _, _, _) = makeSUT(heatProtectionEnabled: false, temperature: 31.5)
+        controller.processBatteryInfo(makeBatteryInfo(charge: 70, temperature: 31.5))
+
+        controller.processBatteryInfo(makeBatteryInfo(charge: 70, temperature: nil))
+
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.value, 31.5)
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.freshness, .stale)
+        XCTAssertTrue(controller.safetyTemperatureSnapshot.displayValue.contains("오래됨"))
+    }
+
+    func testSafetyTemperatureAttributesMaximumToTheHotterSensor() async throws {
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            batteryInfoOnRead: info
+        )
+        backend.temperature = 40
+
+        try await controller.initialize()
+        let sampled = await eventually {
+            controller.safetyTemperatureSnapshot.value == 40
+        }
+
+        XCTAssertTrue(sampled)
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.sources, [.smc])
+        try await controller.shutdown()
+    }
+
     func testDelayedSMCTemperatureSampleCannotMutateStateAfterShutdown() async throws {
         let backend = FakeChargeBackend()
         backend.enqueueTemperatures([30, 45])

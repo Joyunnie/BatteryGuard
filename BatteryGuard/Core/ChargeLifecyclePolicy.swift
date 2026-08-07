@@ -17,6 +17,7 @@ struct ChargeShutdownContext: Equatable, Sendable {
 enum ChargeShutdownPlanningError: LocalizedError, Equatable, Sendable {
     case unsafeExternalState(ObservedChargeMode)
     case releasedControlMismatch(BatteryControlStatus)
+    case manualInterventionRequired(String)
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +25,8 @@ enum ChargeShutdownPlanningError: LocalizedError, Equatable, Sendable {
             return "외부 CLI 변경 상태를 먼저 해결해야 안전하게 종료할 수 있습니다: \(observed.userDescription)"
         case .releasedControlMismatch(let status):
             return "BatteryGuard control was no longer released: \(status.diagnosticDescription)"
+        case .manualInterventionRequired(let message):
+            return "하드웨어 상태가 불확실하여 자동 종료 복구를 수행하지 않습니다: \(message)"
         }
     }
 }
@@ -61,8 +64,8 @@ enum ChargeShutdownPlanner {
             return .keepChargingDisabled
         case .sleepProtected(let previous, _):
             return .restoreMaintain(previous.maintainLimit)
-        case .failed(let previous, _, .manualIntervention):
-            return .restoreMaintain(previous?.maintainLimit ?? context.effectiveLimit)
+        case .failed(_, let message, .manualIntervention):
+            throw ChargeShutdownPlanningError.manualInterventionRequired(message)
         case .externalDrift(_, let observed):
             switch observed {
             case .maintaining:

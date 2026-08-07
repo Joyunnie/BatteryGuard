@@ -74,7 +74,7 @@ final class BatteryHistory {
     private let heartbeatInterval: TimeInterval
     private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "History")
     private var readinessWaiters: [CheckedContinuation<BatteryHistoryReadiness, Never>] = []
-    private var pendingRecord: (chargePercent: Int, chargeLimit: Int)?
+    private var pendingRecords: [(chargePercent: Int, chargeLimit: Int)] = []
     private var lastChargePercent: Int?
     private var lastChargeLimit: Int?
     private var lastRecordDate: Date?
@@ -160,8 +160,9 @@ final class BatteryHistory {
                 }
                 self.readiness = .ready
                 self.resolveReadinessWaiters()
-                if let pending = self.pendingRecord {
-                    self.pendingRecord = nil
+                let pendingRecords = self.pendingRecords
+                self.pendingRecords.removeAll()
+                for pending in pendingRecords {
                     self.record(chargePercent: pending.chargePercent, chargeLimit: pending.chargeLimit)
                 }
             }
@@ -189,7 +190,10 @@ final class BatteryHistory {
         }
         guard readiness == .ready else {
             if readiness == .loading {
-                pendingRecord = (chargePercent, chargeLimit)
+                pendingRecords.append((chargePercent, chargeLimit))
+                if pendingRecords.count > 256 {
+                    pendingRecords.removeFirst(pendingRecords.count - 256)
+                }
             }
             return
         }
@@ -255,12 +259,110 @@ final class BatteryHistory {
         guard maxPoints > 0 else { return [] }
         guard records.count > maxPoints else { return records }
         guard maxPoints > 1 else { return [records[records.count - 1]] }
+        guard maxPoints > 2 else { return [records.first!, records.last!] }
 
-        let lastIndex = records.count - 1
-        return (0..<maxPoints).map { position in
-            let index = position * lastIndex / (maxPoints - 1)
-            return records[index]
+        let requiredIndices = extremaIndices(in: records)
+        guard requiredIndices.count < maxPoints else {
+            // When the point budget cannot contain every unique series extremum,
+            // endpoints win, followed by charge and then charge-limit extrema.
+            return constrainedExtremaIndices(in: records, maxPoints: maxPoints)
+                .sorted()
+                .map { records[$0] }
         }
+
+        // Reserve enough slots for unique extrema from both plotted series, then
+        // use LTTB to distribute the remaining points over the full time range.
+        let lttbBudget = max(3, maxPoints - requiredIndices.count + 2)
+        var selectedIndices = requiredIndices
+        selectedIndices.formUnion(lttbIndices(in: records, threshold: lttbBudget))
+
+        if selectedIndices.count < maxPoints {
+            for index in lttbIndices(in: records, threshold: maxPoints)
+            where selectedIndices.count < maxPoints {
+                selectedIndices.insert(index)
+            }
+        }
+        if selectedIndices.count < maxPoints {
+            for index in 1..<(records.count - 1) where selectedIndices.count < maxPoints {
+                selectedIndices.insert(index)
+            }
+        }
+
+        return selectedIndices.sorted().map { records[$0] }
+    }
+
+    private static func extremaIndices(in records: [ChartRecord]) -> Set<Int> {
+        Set(constrainedExtremaIndices(in: records, maxPoints: 6))
+    }
+
+    private static func constrainedExtremaIndices(
+        in records: [ChartRecord],
+        maxPoints: Int
+    ) -> [Int] {
+        guard !records.isEmpty, maxPoints > 0 else { return [] }
+        guard maxPoints > 1 else { return [records.count - 1] }
+
+        var indices = [0, records.count - 1]
+        let candidates = [
+            records.indices.max { records[$0].chargePercent < records[$1].chargePercent },
+            records.indices.min { records[$0].chargePercent < records[$1].chargePercent },
+            records.indices.max { records[$0].chargeLimit < records[$1].chargeLimit },
+            records.indices.min { records[$0].chargeLimit < records[$1].chargeLimit }
+        ].compactMap { $0 }
+        for index in candidates where indices.count < maxPoints && !indices.contains(index) {
+            indices.append(index)
+        }
+        return indices
+    }
+
+    private static func lttbIndices(in records: [ChartRecord], threshold: Int) -> [Int] {
+        guard threshold < records.count else { return Array(records.indices) }
+        guard threshold > 2 else { return [0, records.count - 1] }
+
+        let every = Double(records.count - 2) / Double(threshold - 2)
+        var sampled = [0]
+        var selectedIndex = 0
+
+        for bucket in 0..<(threshold - 2) {
+            let averageStart = min(Int(floor(Double(bucket + 1) * every)) + 1, records.count - 1)
+            let averageEnd = min(Int(floor(Double(bucket + 2) * every)) + 1, records.count)
+            let averageRange = records[averageStart..<max(averageStart + 1, averageEnd)]
+            let averageX = averageRange.map { $0.timestamp.timeIntervalSinceReferenceDate }.reduce(0, +)
+                / Double(averageRange.count)
+            let averageY = averageRange.map { Double($0.chargePercent) }.reduce(0, +)
+                / Double(averageRange.count)
+            let averageLimit = averageRange.map { Double($0.chargeLimit) }.reduce(0, +)
+                / Double(averageRange.count)
+
+            let rangeStart = min(Int(floor(Double(bucket) * every)) + 1, records.count - 2)
+            let rangeEnd = min(Int(floor(Double(bucket + 1) * every)) + 1, records.count - 1)
+            let pointA = records[selectedIndex]
+            let ax = pointA.timestamp.timeIntervalSinceReferenceDate
+            let ay = Double(pointA.chargePercent)
+            let limitA = Double(pointA.chargeLimit)
+            var bestArea = -1.0
+            var bestIndex = rangeStart
+            for index in rangeStart..<max(rangeStart + 1, rangeEnd) {
+                let point = records[index]
+                let chargeArea = abs(
+                    (ax - averageX) * (Double(point.chargePercent) - ay)
+                    - (ax - point.timestamp.timeIntervalSinceReferenceDate) * (averageY - ay)
+                )
+                let limitArea = abs(
+                    (ax - averageX) * (Double(point.chargeLimit) - limitA)
+                    - (ax - point.timestamp.timeIntervalSinceReferenceDate) * (averageLimit - limitA)
+                )
+                let area = max(chargeArea, limitArea)
+                if area > bestArea {
+                    bestArea = area
+                    bestIndex = index
+                }
+            }
+            sampled.append(bestIndex)
+            selectedIndex = bestIndex
+        }
+        sampled.append(records.count - 1)
+        return sampled
     }
 
     private func removeRecords(olderThan cutoff: Date, from context: NSManagedObjectContext) throws {

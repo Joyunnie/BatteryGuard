@@ -376,6 +376,19 @@ PR #12와 #13은 순서대로 `main`에 병합됐고, 갱신된 `main`에서 178
 - 전역 Boolean `SleepDisabled`의 소유권을 증명할 수 없으므로 charge-to-limit sleep inhibition과 watchdog은 제거했다. 기능 기본값은 실제 lid-close 검증 전까지 비활성이다. 강제 sleep은 macOS가 veto를 허용하지 않아 준비 실패를 되돌릴 수 없다는 제한을 UI에 명시했다.
 - strict-concurrency complete와 warnings-as-errors에서 전체 204개 테스트, Release build와 Debug analyze가 통과했다. 실제 battery/SMC 명령과 lid-close 하드웨어 검증은 실행하지 않았다.
 
+### 0.25 PR #15 누적 안전 보완 실기 검증 결과 (2026-08-07)
+
+사용자 승인 뒤 `/Applications/BatteryGuard.app`의 PR #15 Release 빌드와 실제 battery CLI v1.3.4로 체크포인트 17의 sleep/Discharge 경계를 검증했다.
+
+- lid close에서 기존 Maintain 80 worker를 종료하고 charging disabled를 검증한 뒤 `Clamshell Sleep`에 진입했다. lid wake 직후 새 exact Maintain 80 worker가 생성됐다.
+- 열린 덮개에서 `Idle Sleep`, `pmset sleepnow`의 non-vetoable `Software Sleep`, DarkWake와 Maintenance Sleep을 확인했다. 각 full wake 뒤 charging disabled/not discharging/Maintain 80과 exact worker가 복원됐다.
+- forced sleep negotiation에서 worker 종료를 감지해 앱을 정상 종료했다. 앱과 worker가 없는 약 51분 동안 charging disabled와 80%가 유지됐고, 재실행 뒤 Maintain 80이 복원됐다.
+- 실제 Discharge 전에 BatteryGuard와 CLI `caffeinate` sleep assertion이 모두 생성됐다. Discharge 중단 뒤 두 assertion이 해제되고 exact Maintain 75 worker가 복원됐다.
+- Debug 빌드에서 `IOPMAssertionCreateWithName` 한 호출만 실패로 반환했다. Discharge/caffeinate가 시작되지 않고 기존 Maintain 75 worker와 hardware tuple이 그대로 유지됐다. debugger attach 중 UI 정지는 검증 장치의 영향이며 detach 뒤 정상 복구됐다.
+- 최종 상태는 80%, AC attached, charging disabled, not discharging, exact Maintain 80 worker 1개, PID 파일 일치, ownership `batteryGuard`/lastLimit 80, Heat 활성/40°C, Sleep Protection `pauseOnSleep`이다. 기존 Amphetamine 무제한 세션도 원래 설정으로 복원했다.
+
+하드웨어 안전 전이는 모두 통과했다. 검증 중 100개짜리 diagnostics ring에서 5초 간격의 성공 SMC command가 장시간 sleep 중 중요한 `prepare battery for system sleep` 이벤트를 밀어내는 결함을 발견했다. `control`/`lifecycle`과 실패 이벤트, long-running 문맥, 성공 command 순서로 retention priority를 적용하고 count/byte limit 모두 가장 오래된 최저 우선순위 이벤트부터 제거하도록 수정했다. 실제 유실 패턴을 고정한 회귀 테스트를 포함해 strict-concurrency complete와 warnings-as-errors에서 전체 228개 테스트, Release build와 Debug analyze가 통과했다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -882,6 +895,7 @@ enum ChargeMode: Equatable {
 14. `[PR #10 누적 리뷰 보완]` failure Boolean을 typed disposition으로 교체하고 stale long-running probe가 shutdown/new operation 뒤 상태를 바꾸지 못하게 generation 검증
 15. `[PR #11 구현·혹독 리뷰 보완]` Top Up/Discharge long-running decision을 pure policy로 분리하고 target/liveness/recovery/drift 및 sleep assertion 수명 테스트 추가
 16. `[완료: PR #14]` IOKit sleep acknowledgement 전 verified charging-off와 wake 시 Maintain 복원 추가. 전역 Boolean인 `SleepDisabled`는 외부 소유권을 증명할 수 없어 charge-to-limit sleep inhibition/lease/watchdog 설계는 hostile review 후 제거
+17. `[구현·자동·실기 검증 및 진단 보존 보완 완료]` 누적 hostile review 보완: Discharge assertion 선획득, drift/manual failure를 보존하는 Heat 전이, 신규·분실 journal의 monitoring-only 기본값과 일회성 legacy migration, injectable IOKit transport 계약 테스트, process-group cleanup을 포함한 absolute deadline, typed issue/safety-temperature UI, backend capability 분리, exact CLI v1.3.4 및 실행 파일 identity 재검증, priority-aware bounded diagnostics, ownership directory hardening, history queue/extrema 보존, Release Hardened Runtime
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -896,6 +910,7 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 - 실제 CLI, 로그인 항목과 운영 store가 격리되기 전에는 기존 전체 테스트를 실행하지 않는다.
 - 실제 하드웨어 테스트는 사용자의 명시적 승인 후 수동으로 실행한다.
 - 각 수동 검증 전후에 실제 status를 기록하고 테스트 종료 시 의도한 maintain 상태로 복원한다.
+- 17번의 실제 Mac 검증에서 lid close, vetoable idle sleep, forced sleep, wake, sleep negotiation 중 Quit, Discharge assertion 실패/복구를 완료했다. 검증에서 발견한 diagnostics 우선순위 결함과 회귀 테스트도 완료했다.
 
 ## 9. 변경 거절 기준
 

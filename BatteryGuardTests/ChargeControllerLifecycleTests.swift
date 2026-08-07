@@ -206,6 +206,51 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(LEDWasRestored)
     }
 
+    func testDischargeDoesNotMutateHardwareWhenSleepAssertionCannotBeAcquired() async {
+        let (controller, backend, monitor, settings) = makeSUT(
+            charge: 90,
+            preventSleepHandler: { _ in false }
+        )
+        settings.chargeLimit = 80
+
+        controller.startDischarge()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertFalse(backend.operations.contains("discharge:80"))
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertTrue(controller.lastError?.contains("Discharge를 시작하지 않았습니다") == true)
+    }
+
+    func testFailedDischargeStartReleasesSleepAssertionAfterMaintainRecovery() async {
+        let (controller, backend, monitor, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        backend.failNext("discharge")
+
+        controller.startDischarge()
+        let finished = await eventually { !controller.isCommandPending }
+
+        XCTAssertTrue(finished)
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+    }
+
+    func testFailedDischargeCompensationRetainsSleepAssertionForManualRecovery() async {
+        let (controller, backend, monitor, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        backend.failNext("discharge")
+        backend.failNext("maintain")
+
+        controller.startDischarge()
+        let finished = await eventually { !controller.isCommandPending }
+
+        XCTAssertTrue(finished)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
+        guard case .failed(_, _, .manualIntervention) = controller.mode else {
+            return XCTFail("Expected manual-intervention failure")
+        }
+    }
+
     func testDisablingLEDWhileDischargingRestoresInsteadOfLosingSnapshot() async {
         let (controller, backend, monitor, settings) = makeSUT(charge: 90)
         settings.controlMagSafeLED = true
@@ -285,8 +330,12 @@ extension ChargeControllerSafetyTests {
         }
 
 
-        try await controller.shutdown()
-        XCTAssertEqual(controller.readiness, .shuttingDown)
+        do {
+            try await controller.shutdown()
+            XCTFail("Manual intervention must not be auto-recovered on retry")
+        } catch {
+            XCTAssertEqual(controller.readiness, .ready)
+        }
     }
 
     func testFailedDischargeShutdownKeepsSleepPreventionUntilVerifiedRecovery() async throws {
@@ -306,8 +355,34 @@ extension ChargeControllerSafetyTests {
             XCTAssertEqual(controller.readiness, .ready)
         }
 
-        try await controller.shutdown()
-        XCTAssertFalse(monitor.isSleepPreventionActive)
+        do {
+            try await controller.shutdown()
+            XCTFail("Manual intervention must retain the sleep assertion")
+        } catch {
+            XCTAssertTrue(monitor.isSleepPreventionActive)
+        }
+    }
+
+    func testShutdownCancellationFailureStopsBeforeAnyRecoveryMutation() async {
+        let (controller, backend, monitor, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+        backend.clearOperations()
+        backend.failNext("request-cancellation")
+
+        do {
+            try await controller.shutdown()
+            XCTFail("Expected cancellation failure")
+        } catch {
+            XCTAssertEqual(backend.operations, ["request-cancellation"])
+            XCTAssertTrue(monitor.isSleepPreventionActive)
+            XCTAssertTrue(controller.isReady)
+            guard case .failed(_, _, .manualIntervention) = controller.mode else {
+                return XCTFail("Expected manual intervention after uncertain cancellation")
+            }
+        }
     }
 
     func testShutdownDuringTopUpCancelsAndRestoresVerifiedMaintain() async throws {

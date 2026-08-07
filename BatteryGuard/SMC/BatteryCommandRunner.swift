@@ -170,7 +170,8 @@ actor BatteryCommandRunner {
 
     private struct LongRunningCommand {
         let child: SpawnedChild
-        let deadline: UInt64
+        let terminationStartDeadline: UInt64
+        let totalDeadline: UInt64
         var requestedTermination: BatteryCommandTermination?
     }
 
@@ -217,7 +218,7 @@ actor BatteryCommandRunner {
             return longRunningCommand != nil
         }
         guard let command = longRunningCommand else { return false }
-        if DispatchTime.now().uptimeNanoseconds >= command.deadline {
+        if DispatchTime.now().uptimeNanoseconds >= command.terminationStartDeadline {
             var timedOut = command
             timedOut.requestedTermination = .timedOut
             longRunningCommand = timedOut
@@ -359,16 +360,20 @@ actor BatteryCommandRunner {
                         )
                     }
                     let child = try spawn(command, id: item.id)
+                    let deadlines = terminationDeadlines(after: command.timeout)
                     lastLongRunningResult = nil
                     longRunningCommand = LongRunningCommand(
                         child: child,
-                        deadline: monotonicDeadline(after: command.timeout),
+                        terminationStartDeadline: deadlines.start,
+                        totalDeadline: deadlines.total,
                         requestedTermination: nil
                     )
-                    scheduleLongRunningTimeout(
-                        commandID: child.id,
-                        timeout: command.timeout
-                    )
+                    if let longRunningCommand {
+                        scheduleLongRunningTimeout(
+                            commandID: child.id,
+                            deadline: longRunningCommand.terminationStartDeadline
+                        )
+                    }
                     recordDiagnostic(
                         DiagnosticEvent(
                             category: .command,
@@ -390,7 +395,7 @@ actor BatteryCommandRunner {
     }
 
     private func execute(_ command: Command, id: UUID) async throws -> BatteryCommandResult {
-        let deadline = monotonicDeadline(after: command.timeout)
+        let deadlines = terminationDeadlines(after: command.timeout)
         let child = try spawn(command, id: id)
         activeCommand = ActiveCommand(child: child, requestedTermination: nil)
         var waitStatus: Int32?
@@ -399,15 +404,25 @@ actor BatteryCommandRunner {
             while waitStatus == nil {
                 if activeCommand?.child.id == id,
                    activeCommand?.requestedTermination != nil {
-                    waitStatus = try await terminateProcessGroup(child)
+                    let cancellationDeadline = min(
+                        deadlines.total,
+                        monotonicDeadline(after: cancellationAcknowledgementTimeout)
+                    )
+                    waitStatus = try await terminateProcessGroup(
+                        child,
+                        deadline: cancellationDeadline
+                    )
                     break
                 }
-                if DispatchTime.now().uptimeNanoseconds >= deadline {
+                if DispatchTime.now().uptimeNanoseconds >= deadlines.start {
                     if var active = activeCommand, active.child.id == id {
                         active.requestedTermination = .timedOut
                         activeCommand = active
                     }
-                    waitStatus = try await terminateProcessGroup(child)
+                    waitStatus = try await terminateProcessGroup(
+                        child,
+                        deadline: deadlines.total
+                    )
                     break
                 }
                 waitStatus = pollWaitStatus(pid: child.pid)
@@ -421,7 +436,8 @@ actor BatteryCommandRunner {
                processGroupExists(child.pid) {
                 waitStatus = try await terminateProcessGroup(
                     child,
-                    knownWaitStatus: waitStatus
+                    knownWaitStatus: waitStatus,
+                    deadline: deadlines.total
                 )
             }
             activeCommand = nil
@@ -430,8 +446,8 @@ actor BatteryCommandRunner {
                 waitStatus: waitStatus ?? 0,
                 requestedTermination: requestedTermination,
                 drainDeadline: command.descendantPolicy == .allowPersistentProcessGroup
-                    ? min(deadline, monotonicDeadline(nanoseconds: 250_000_000))
-                    : deadline
+                    ? min(deadlines.total, monotonicDeadline(nanoseconds: 250_000_000))
+                    : deadlines.total
             )
             recordDiagnostic(DiagnosticEvent(commandResult: result))
             return result
@@ -632,30 +648,32 @@ actor BatteryCommandRunner {
 
     private func terminateProcessGroup(
         _ child: SpawnedChild,
-        knownWaitStatus: Int32? = nil
+        knownWaitStatus: Int32? = nil,
+        deadline: UInt64
     ) async throws -> Int32 {
         var waitStatus = knownWaitStatus ?? pollWaitStatus(pid: child.pid)
         try signalProcessGroup(child, signal: SIGTERM)
-        let termDeadline = monotonicDeadline(nanoseconds: terminationGraceNanoseconds)
+        let now = DispatchTime.now().uptimeNanoseconds
+        let remaining = deadline > now ? deadline - now : 0
+        let termBudget = min(terminationGraceNanoseconds, remaining / 2)
+        let termDeadline = min(deadline, monotonicDeadline(nanoseconds: termBudget))
         while processGroupExists(child.pid), DispatchTime.now().uptimeNanoseconds < termDeadline {
             if waitStatus == nil { waitStatus = pollWaitStatus(pid: child.pid) }
-            await Self.pollDelay()
+            await Self.teardownPollDelay()
         }
 
         if processGroupExists(child.pid) {
             try signalProcessGroup(child, signal: SIGKILL)
-            let killDeadline = monotonicDeadline(nanoseconds: terminationGraceNanoseconds)
-            while processGroupExists(child.pid), DispatchTime.now().uptimeNanoseconds < killDeadline {
+            while processGroupExists(child.pid), DispatchTime.now().uptimeNanoseconds < deadline {
                 if waitStatus == nil { waitStatus = pollWaitStatus(pid: child.pid) }
-                await Self.pollDelay()
+                await Self.teardownPollDelay()
             }
         }
 
         if waitStatus == nil {
-            let reapDeadline = monotonicDeadline(nanoseconds: terminationGraceNanoseconds)
-            while waitStatus == nil, DispatchTime.now().uptimeNanoseconds < reapDeadline {
+            while waitStatus == nil, DispatchTime.now().uptimeNanoseconds < deadline {
                 waitStatus = pollWaitStatus(pid: child.pid)
-                if waitStatus == nil { await Self.pollDelay() }
+                if waitStatus == nil { await Self.teardownPollDelay() }
             }
         }
 
@@ -705,10 +723,20 @@ actor BatteryCommandRunner {
         }
 
         let waitStatus: Int32
+        let finalizationDeadline: UInt64
+        if command.requestedTermination == .timedOut {
+            finalizationDeadline = command.totalDeadline
+        } else {
+            finalizationDeadline = min(
+                command.totalDeadline,
+                monotonicDeadline(after: cancellationAcknowledgementTimeout)
+            )
+        }
         if terminateRemainingGroup, processGroupExists(command.child.pid) {
             waitStatus = try await terminateProcessGroup(
                 command.child,
-                knownWaitStatus: knownWaitStatus
+                knownWaitStatus: knownWaitStatus,
+                deadline: finalizationDeadline
             )
         } else if let knownWaitStatus {
             waitStatus = knownWaitStatus
@@ -725,7 +753,7 @@ actor BatteryCommandRunner {
             child: command.child,
             waitStatus: waitStatus,
             requestedTermination: command.requestedTermination,
-            drainDeadline: monotonicDeadline(nanoseconds: terminationGraceNanoseconds)
+            drainDeadline: finalizationDeadline
         )
         if longRunningCommand?.child.id == command.child.id {
             longRunningCommand = nil
@@ -737,11 +765,13 @@ actor BatteryCommandRunner {
         return result
     }
 
-    private func scheduleLongRunningTimeout(commandID: UUID, timeout: TimeInterval) {
+    private func scheduleLongRunningTimeout(commandID: UUID, deadline: UInt64) {
         longRunningTimeoutTask?.cancel()
-        let nanoseconds = Self.nanoseconds(from: timeout)
         longRunningTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: nanoseconds)
+            let now = DispatchTime.now().uptimeNanoseconds
+            if deadline > now {
+                try? await Task.sleep(nanoseconds: deadline - now)
+            }
             guard !Task.isCancelled else { return }
             await self?.expireLongRunningCommand(commandID: commandID)
         }
@@ -854,6 +884,21 @@ actor BatteryCommandRunner {
         return monotonicDeadline(nanoseconds: nanoseconds)
     }
 
+    private func terminationDeadlines(after seconds: TimeInterval) -> (start: UInt64, total: UInt64) {
+        let requestedDuration = Self.nanoseconds(from: seconds)
+        let duration = requestedDuration == 0 ? 100_000_000 : requestedDuration
+        let total = monotonicDeadline(nanoseconds: duration)
+        guard duration != UInt64.max else { return (UInt64.max, UInt64.max) }
+        let minimumReserve: UInt64 = 10_000_000
+        // Process-group teardown is part of the advertised timeout. Reserve most
+        // of very short budgets for TERM/KILL/reap instead of starting cleanup
+        // only after the caller's deadline has already expired.
+        let proportionalReserve = duration / 5 * 4
+        let reserve = min(terminationGraceNanoseconds, max(minimumReserve, proportionalReserve))
+        let start = total > reserve ? total - reserve : DispatchTime.now().uptimeNanoseconds
+        return (start, total)
+    }
+
     private nonisolated static func nanoseconds(from seconds: TimeInterval) -> UInt64 {
         guard !seconds.isNaN, seconds > 0 else { return 0 }
         guard seconds.isFinite else { return UInt64.max }
@@ -906,6 +951,14 @@ actor BatteryCommandRunner {
     private nonisolated static func pollDelay() async {
         await withCheckedContinuation { continuation in
             DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(20)) {
+                continuation.resume()
+            }
+        }
+    }
+
+    private nonisolated static func teardownPollDelay() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(2)) {
                 continuation.resume()
             }
         }

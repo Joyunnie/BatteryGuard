@@ -152,6 +152,11 @@ final class UserSettings: ObservableObject {
     ) {
         self.defaults = defaults
         self.launchAtLoginService = launchAtLoginService
+        let hadLegacyBatteryControlPreference = defaults.object(forKey: "batteryControlEnabled") != nil
+            || defaults.object(forKey: "batteryControlReleasePending") != nil
+        let ownershipMigrationWasCompleted = defaults.bool(
+            forKey: "batteryControlOwnershipJournalMigrationCompleted"
+        )
 
         if defaults.object(forKey: "chargeLimit") == nil {
             defaults.set(80, forKey: "chargeLimit")
@@ -159,10 +164,6 @@ final class UserSettings: ObservableObject {
         if defaults.object(forKey: "heatThreshold") == nil {
             defaults.set(40.0, forKey: "heatThreshold")
         }
-        if defaults.object(forKey: "batteryControlEnabled") == nil {
-            defaults.set(true, forKey: "batteryControlEnabled")
-        }
-
         let validatedChargeLimit = Self.validatedChargeLimit(defaults.integer(forKey: "chargeLimit"))
         self.chargeLimitStorage = validatedChargeLimit
         self.heatProtectionThresholdStorage = Self.validatedHeatProtectionThreshold(defaults.double(forKey: "heatThreshold"))
@@ -195,7 +196,7 @@ final class UserSettings: ObservableObject {
         let legacyOwnership: BatteryControlOwnership
         if defaults.bool(forKey: "batteryControlReleasePending") {
             legacyOwnership = .releasing(lastLimit: validatedChargeLimit)
-        } else if defaults.bool(forKey: "batteryControlEnabled") {
+        } else if hadLegacyBatteryControlPreference && defaults.bool(forKey: "batteryControlEnabled") {
             legacyOwnership = .batteryGuard(lastLimit: validatedChargeLimit)
         } else {
             legacyOwnership = .system(lastLimit: validatedChargeLimit)
@@ -208,21 +209,34 @@ final class UserSettings: ObservableObject {
                 if let persisted = try batteryControlOwnershipJournal.load() {
                     self.batteryControlOwnership = persisted
                 } else {
-                    try batteryControlOwnershipJournal.save(legacyOwnership)
-                    self.batteryControlOwnership = legacyOwnership
+                    let initialOwnership: BatteryControlOwnership
+                    if !ownershipMigrationWasCompleted && hadLegacyBatteryControlPreference {
+                        initialOwnership = legacyOwnership
+                    } else {
+                        initialOwnership = .system(lastLimit: validatedChargeLimit)
+                    }
+                    try batteryControlOwnershipJournal.save(initialOwnership)
+                    self.batteryControlOwnership = initialOwnership
                 }
+                defaults.set(true, forKey: "batteryControlOwnershipJournalMigrationCompleted")
                 self.batteryControlOwnershipPersistenceError = nil
             } catch {
                 self.batteryControlOwnership = .releasing(lastLimit: validatedChargeLimit)
                 self.batteryControlOwnershipPersistenceError = error.localizedDescription
             }
         } else {
-            self.batteryControlOwnership = legacyOwnership
+            // Tests and explicitly journal-less embeddings retain the legacy
+            // compatibility surface. Production always resolves a journal URL.
+            self.batteryControlOwnership = hadLegacyBatteryControlPreference
+                ? legacyOwnership
+                : .batteryGuard(lastLimit: validatedChargeLimit)
             self.batteryControlOwnershipPersistenceError = nil
         }
 
         defaults.set(chargeLimitStorage, forKey: "chargeLimit")
         defaults.set(heatProtectionThresholdStorage, forKey: "heatThreshold")
+        defaults.set(batteryControlEnabled, forKey: "batteryControlEnabled")
+        defaults.set(batteryControlReleasePending, forKey: "batteryControlReleasePending")
     }
 
     func requireDurableBatteryControlOwnership() throws {

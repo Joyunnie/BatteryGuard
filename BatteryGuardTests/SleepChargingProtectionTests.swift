@@ -144,6 +144,58 @@ final class SleepAcknowledgedOperationTests: XCTestCase {
     }
 }
 
+@MainActor
+final class SystemPowerObserverContractTests: XCTestCase {
+    func testVetoableIOKitMessageRejectsWhenPreparationFails() async throws {
+        let transport = FakeSystemPowerTransport()
+        let observer = SystemPowerObserver(transport: transport)
+        try observer.start(willSleep: { _ in false }, didWake: {})
+
+        transport.send(messageType: SystemPowerMessage.canSystemSleep, token: 41)
+        let resolved = await eventuallyDecision(transport, token: 41)
+
+        XCTAssertEqual(resolved, .reject)
+        XCTAssertTrue(observer.requiresChargingDisabledForSleepTransition)
+        transport.send(messageType: SystemPowerMessage.systemWillNotSleep)
+        XCTAssertFalse(observer.requiresChargingDisabledForSleepTransition)
+    }
+
+    func testForcedSleepAllowsOnlyAfterRunningPreparation() async throws {
+        let transport = FakeSystemPowerTransport()
+        let observer = SystemPowerObserver(transport: transport)
+        let preparationRan = LockedFlag()
+        try observer.start(
+            willSleep: { _ in
+                preparationRan.setTrue()
+                return false
+            },
+            didWake: {}
+        )
+
+        transport.send(messageType: SystemPowerMessage.systemWillSleep, token: 42)
+        let resolved = await eventuallyDecision(transport, token: 42)
+
+        XCTAssertTrue(preparationRan.value)
+        XCTAssertEqual(resolved, .allow)
+        XCTAssertTrue(observer.requiresChargingDisabledForSleepTransition)
+        transport.send(messageType: SystemPowerMessage.systemHasPoweredOn)
+        XCTAssertFalse(observer.requiresChargingDisabledForSleepTransition)
+    }
+
+    private func eventuallyDecision(
+        _ transport: FakeSystemPowerTransport,
+        token: Int
+    ) async -> SleepAcknowledgementDecision? {
+        for _ in 0..<100 {
+            if let decision = transport.decisions.first(where: { $0.0 == token })?.1 {
+                return decision
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return nil
+    }
+}
+
 private final class LockedDecisions: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [SleepAcknowledgementDecision] = []
@@ -162,6 +214,32 @@ private final class LockedFlag: @unchecked Sendable {
 
 @MainActor
 extension ChargeControllerSafetyTests {
+    func testObserverAndControllerUseProductionMessagePathForVerifiedSleepTuple() async throws {
+        let transport = FakeSystemPowerTransport()
+        let observer = SystemPowerObserver(transport: transport)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .maintaining(limit: 80),
+            systemPowerObserver: observer,
+            runsSystemPowerObservation: true
+        )
+        try observer.start(
+            willSleep: { deadline in
+                await controller.prepareForSleep(deadlineUptimeNanoseconds: deadline)
+            },
+            didWake: { Task { await controller.reconcileAfterWake() } }
+        )
+
+        transport.send(messageType: SystemPowerMessage.canSystemSleep, token: 43)
+        let resolved = await eventually {
+            transport.decisions.contains { $0.0 == 43 }
+        }
+
+        XCTAssertTrue(resolved)
+        XCTAssertEqual(transport.decisions.first(where: { $0.0 == 43 })?.1, .allow)
+        XCTAssertTrue(backend.operations.contains("prepare-system-sleep"))
+        XCTAssertTrue(controller.sleepProtectionState.userDescription?.contains("충전을 중지") == true)
+    }
+
     func testPauseStrategyStopsChargingAndWakeRestoresVerifiedMaintain() async {
         let (controller, backend, _, _) = makeSUT(
             charge: 67,

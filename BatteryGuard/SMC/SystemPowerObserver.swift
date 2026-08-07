@@ -21,16 +21,7 @@ final class SystemPowerObserver: SystemPowerObserving {
     typealias SleepHandler = @MainActor (_ deadlineUptimeNanoseconds: UInt64) async -> Bool
 
     private static let acknowledgementDeadline: TimeInterval = 25
-    // Swift cannot import IOMessage.h's nested iokit_common_msg macros.
-    private static let canSystemSleepMessage: UInt32 = 0xe000_0270
-    private static let systemWillSleepMessage: UInt32 = 0xe000_0280
-    private static let systemWillNotSleepMessage: UInt32 = 0xe000_0290
-    private static let systemHasPoweredOnMessage: UInt32 = 0xe000_0300
-
-    private var rootPort: io_connect_t = 0
-    private var notificationPort: IONotificationPortRef?
-    private var notifier: io_object_t = 0
-    private var runLoopSource: CFRunLoopSource?
+    private let transport: SystemPowerTransport
     private var sleepHandler: SleepHandler?
     private var wakeHandler: (@MainActor () -> Void)?
     private struct PendingSleepRequest {
@@ -39,10 +30,13 @@ final class SystemPowerObserver: SystemPowerObserving {
     }
 
     private var pendingSleepOperations: [Int: PendingSleepRequest] = [:]
-    private let powerChangeResponder = PowerChangeResponder()
     private var sleepTransitionInProgress = false
 
     var requiresChargingDisabledForSleepTransition: Bool { sleepTransitionInProgress }
+
+    init(transport: SystemPowerTransport = IOKitSystemPowerTransport()) {
+        self.transport = transport
+    }
 
     func start(
         willSleep: @escaping SleepHandler,
@@ -52,52 +46,19 @@ final class SystemPowerObserver: SystemPowerObserving {
         sleepHandler = willSleep
         wakeHandler = didWake
 
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        rootPort = IORegisterForSystemPower(
-            context,
-            &notificationPort,
-            { context, _, messageType, messageArgument in
-                guard let context else { return }
-                let observer = Unmanaged<SystemPowerObserver>
-                    .fromOpaque(context)
-                    .takeUnretainedValue()
-                let token = Int(bitPattern: messageArgument)
-                // This callback is delivered by the source installed on the main
-                // run loop, so start the absolute IOKit budget without queueing.
-                MainActor.assumeIsolated {
-                    observer.receive(messageType: messageType, token: token)
-                }
-            },
-            &notifier
-        )
-        powerChangeResponder.activate(rootPort)
-        guard rootPort != 0,
-              let notificationPort,
-              let source = IONotificationPortGetRunLoopSource(notificationPort)?.takeUnretainedValue()
-        else {
+        do {
+            try transport.start { [weak self] messageType, token in
+                self?.receive(messageType: messageType, token: token)
+            }
+        } catch {
             stop()
-            throw BatteryError.unsupported("시스템 잠자기 이벤트를 등록할 수 없습니다.")
+            throw error
         }
-        runLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
     }
 
     func stop() {
         resolvePendingSleepRequestsForShutdown()
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        }
-        if notifier != 0 {
-            IODeregisterForSystemPower(&notifier)
-        }
-        powerChangeResponder.close()
-        if let notificationPort {
-            IONotificationPortDestroy(notificationPort)
-        }
-        rootPort = 0
-        notifier = 0
-        notificationPort = nil
-        runLoopSource = nil
+        transport.stop()
         sleepHandler = nil
         wakeHandler = nil
         sleepTransitionInProgress = false
@@ -113,20 +74,20 @@ final class SystemPowerObserver: SystemPowerObserving {
     private func receive(messageType: UInt32, token: Int) {
         let deadline = Self.monotonicDeadline(after: Self.acknowledgementDeadline)
         switch messageType {
-        case Self.canSystemSleepMessage:
+        case SystemPowerMessage.canSystemSleep:
             // Latch the whole accepted/rejected negotiation window. Shutdown is
             // conservative until IOKit reports that sleep was cancelled or ended.
             sleepTransitionInProgress = true
             handleSleepRequest(token: token, canVeto: true, deadline: deadline)
-        case Self.systemWillSleepMessage:
+        case SystemPowerMessage.systemWillSleep:
             // Keep this latched after acknowledgement: IOAllowPowerChange means
             // the non-vetoable transition may still suspend the process.
             sleepTransitionInProgress = true
             handleSleepRequest(token: token, canVeto: false, deadline: deadline)
-        case Self.systemWillNotSleepMessage:
+        case SystemPowerMessage.systemWillNotSleep:
             wakeHandler?()
             sleepTransitionInProgress = false
-        case Self.systemHasPoweredOnMessage:
+        case SystemPowerMessage.systemHasPoweredOn:
             wakeHandler?()
             sleepTransitionInProgress = false
         default:
@@ -136,15 +97,15 @@ final class SystemPowerObserver: SystemPowerObserving {
 
     private func handleSleepRequest(token: Int, canVeto: Bool, deadline: UInt64) {
         guard let sleepHandler else {
-            powerChangeResponder.resolve(token: token, decision: .allow)
+            transport.resolve(token: token, decision: .allow)
             return
         }
         let timeoutDecision: SleepAcknowledgementDecision = canVeto ? .reject : .allow
         let operation = SleepAcknowledgedOperation(
             deadlineUptimeNanoseconds: deadline,
             timeoutDecision: timeoutDecision
-        ) { [weak self, powerChangeResponder] decision in
-            powerChangeResponder.resolve(token: token, decision: decision)
+        ) { [weak self, transport] decision in
+            transport.resolve(token: token, decision: decision)
             Task { @MainActor in
                 self?.completeSleepRequest(token: token)
             }
@@ -174,30 +135,98 @@ final class SystemPowerObserver: SystemPowerObserving {
     }
 }
 
-private final class PowerChangeResponder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var port: io_connect_t = 0
+enum SystemPowerMessage {
+    // Swift cannot import IOMessage.h's nested iokit_common_msg macros.
+    static let canSystemSleep: UInt32 = 0xe000_0270
+    static let systemWillSleep: UInt32 = 0xe000_0280
+    static let systemWillNotSleep: UInt32 = 0xe000_0290
+    static let systemHasPoweredOn: UInt32 = 0xe000_0300
+}
 
-    func activate(_ port: io_connect_t) {
-        lock.withLock { self.port = port }
+protocol SystemPowerTransport: AnyObject, Sendable {
+    @MainActor
+    func start(
+        handler: @escaping @MainActor (_ messageType: UInt32, _ token: Int) -> Void
+    ) throws
+    func resolve(token: Int, decision: SleepAcknowledgementDecision)
+    @MainActor func stop()
+}
+
+private final class IOKitSystemPowerTransport: SystemPowerTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var responderPort: io_connect_t = 0
+    private var rootPort: io_connect_t = 0
+    private var notificationPort: IONotificationPortRef?
+    private var notifier: io_object_t = 0
+    private var runLoopSource: CFRunLoopSource?
+    private var handler: (@MainActor (UInt32, Int) -> Void)?
+
+    @MainActor
+    func start(
+        handler: @escaping @MainActor (_ messageType: UInt32, _ token: Int) -> Void
+    ) throws {
+        stop()
+        self.handler = handler
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        rootPort = IORegisterForSystemPower(
+            context,
+            &notificationPort,
+            { context, _, messageType, messageArgument in
+                guard let context else { return }
+                let transport = Unmanaged<IOKitSystemPowerTransport>
+                    .fromOpaque(context)
+                    .takeUnretainedValue()
+                let token = Int(bitPattern: messageArgument)
+                MainActor.assumeIsolated {
+                    transport.handler?(messageType, token)
+                }
+            },
+            &notifier
+        )
+        lock.withLock { responderPort = rootPort }
+        guard rootPort != 0,
+              let notificationPort,
+              let source = IONotificationPortGetRunLoopSource(notificationPort)?.takeUnretainedValue()
+        else {
+            stop()
+            throw BatteryError.unsupported("시스템 잠자기 이벤트를 등록할 수 없습니다.")
+        }
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
     }
 
     func resolve(token: Int, decision: SleepAcknowledgementDecision) {
         lock.withLock {
-            guard port != 0 else { return }
+            guard responderPort != 0 else { return }
             switch decision {
-            case .allow: IOAllowPowerChange(port, token)
-            case .reject: IOCancelPowerChange(port, token)
+            case .allow: IOAllowPowerChange(responderPort, token)
+            case .reject: IOCancelPowerChange(responderPort, token)
             }
         }
     }
 
-    func close() {
-        lock.withLock {
-            guard port != 0 else { return }
-            IOServiceClose(port)
-            port = 0
+    @MainActor
+    func stop() {
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         }
+        if notifier != 0 {
+            IODeregisterForSystemPower(&notifier)
+        }
+        lock.withLock {
+            if responderPort != 0 {
+                IOServiceClose(responderPort)
+                responderPort = 0
+            }
+        }
+        if let notificationPort {
+            IONotificationPortDestroy(notificationPort)
+        }
+        rootPort = 0
+        notifier = 0
+        notificationPort = nil
+        runLoopSource = nil
+        handler = nil
     }
 }
 

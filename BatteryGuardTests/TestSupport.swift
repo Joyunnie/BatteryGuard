@@ -5,12 +5,22 @@ import Darwin
 import AppKit
 @testable import BatteryGuard
 
-private let testDefaultsSuite = "com.jiwon.batteryguard.tests.isolated"
+private final class EphemeralTestDefaults: UserDefaults, @unchecked Sendable {
+    private let suite: String
+
+    init() {
+        suite = "com.jiwon.batteryguard.tests.\(UUID().uuidString)"
+        super.init(suiteName: suite)!
+        removePersistentDomain(forName: suite)
+    }
+
+    deinit {
+        removePersistentDomain(forName: suite)
+    }
+}
 
 func makeTestDefaults() -> UserDefaults {
-    let defaults = UserDefaults(suiteName: testDefaultsSuite)!
-    defaults.removePersistentDomain(forName: testDefaultsSuite)
-    return defaults
+    EphemeralTestDefaults()
 }
 
 func makeOwnershipJournalURL() -> URL {
@@ -122,6 +132,37 @@ final class FakeSystemPowerObserver: SystemPowerObserving {
     }
 }
 
+final class FakeSystemPowerTransport: SystemPowerTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var decisionsStorage: [(Int, SleepAcknowledgementDecision)] = []
+    private var handler: (@MainActor (UInt32, Int) -> Void)?
+
+    var decisions: [(Int, SleepAcknowledgementDecision)] {
+        lock.withLock { decisionsStorage }
+    }
+
+    @MainActor
+    func start(
+        handler: @escaping @MainActor (_ messageType: UInt32, _ token: Int) -> Void
+    ) throws {
+        self.handler = handler
+    }
+
+    func resolve(token: Int, decision: SleepAcknowledgementDecision) {
+        lock.withLock { decisionsStorage.append((token, decision)) }
+    }
+
+    @MainActor
+    func stop() {
+        handler = nil
+    }
+
+    @MainActor
+    func send(messageType: UInt32, token: Int = 1) {
+        handler?(messageType, token)
+    }
+}
+
 final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private let lock = NSLock()
     private var recordedOperations: [String] = []
@@ -217,6 +258,10 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         lock.lock()
         failures[operation] = error
         lock.unlock()
+    }
+
+    func clearOperations() {
+        lock.withLock { recordedOperations.removeAll() }
     }
 
     func enqueueTemperatures(_ values: [Float?]) {

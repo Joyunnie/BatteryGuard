@@ -51,7 +51,7 @@ struct DashboardView: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         DetailRow(icon: "bolt.fill", label: "상태", value: controller.currentState.rawValue)
-                        DetailRow(icon: "thermometer", label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "알 수 없음")
+                        DetailRow(icon: "thermometer", label: "안전 온도", value: controller.safetyTemperatureSnapshot.displayValue)
                         DetailRow(icon: "waveform.path", label: "전류", value: BatteryDisplay.amperage(info.amperage))
                         DetailRow(icon: "bolt.batteryblock", label: "전압", value: BatteryDisplay.measurement(info.voltage, unit: "mV"))
                     }
@@ -91,15 +91,7 @@ struct DashboardView: View {
                         in: 20...100,
                         step: 5
                     )
-                    .disabled(
-                        !controller.isReady ||
-                        controller.isCommandPending ||
-                        controller.isDischarging ||
-                        controller.isTopUpActive ||
-                        controller.isBatteryControlDisabled ||
-                        controller.hasExternalControlDrift ||
-                        controller.isHeatProtectionBlockingControls
-                    )
+                    .disabled(!controller.chargeLimitAvailability.isAllowed)
                 }
 
                 Divider()
@@ -119,15 +111,7 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
-                    .disabled(
-                        !controller.isReady ||
-                        controller.isCommandPending ||
-                        controller.isChargeLimitPending ||
-                        controller.isHeatProtectionBlockingControls ||
-                        controller.isBatteryControlDisabled ||
-                        controller.hasExternalControlDrift ||
-                        controller.isDischarging
-                    )
+                    .disabled(!controller.topUpAvailability.isAllowed)
 
                     Button(action: {
                         if controller.isDischarging {
@@ -143,18 +127,18 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
-                    .disabled(
-                        !controller.isReady ||
-                        controller.isCommandPending ||
-                        controller.isChargeLimitPending ||
-                        controller.isHeatProtectionBlockingControls ||
-                        controller.isBatteryControlDisabled ||
-                        controller.hasExternalControlDrift ||
-                        controller.isTopUpActive
-                    )
+                    .disabled(!controller.dischargeAvailability.isAllowed)
                 }
 
                 ExternalDriftStatusView(controller: controller)
+
+                if let issue = controller.issues.first,
+                   !controller.hasExternalControlDrift {
+                    Label(issue.message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(issue.severity == .critical ? .red : .orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .padding()
         }

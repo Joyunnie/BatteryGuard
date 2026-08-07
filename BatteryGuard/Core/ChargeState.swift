@@ -265,6 +265,116 @@ enum ChargeFailureDisposition: String, Equatable, Sendable {
     case manualIntervention
 }
 
+enum BatteryIssueSource: String, Hashable, Sendable {
+    case command
+    case externalDrift
+    case sensor
+    case led
+}
+
+enum BatteryIssueSeverity: Int, Equatable, Comparable, Sendable {
+    case warning = 1
+    case blocking = 2
+    case critical = 3
+
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+}
+
+struct BatteryIssue: Identifiable, Equatable, Sendable {
+    let source: BatteryIssueSource
+    let severity: BatteryIssueSeverity
+    let message: String
+    let occurredAt: Date
+    var id: String { "\(source.rawValue):\(message)" }
+}
+
+struct BatteryIssueRegistry: Sendable {
+    private var entries: [BatteryIssueSource: BatteryIssue] = [:]
+
+    mutating func set(
+        _ source: BatteryIssueSource,
+        severity: BatteryIssueSeverity,
+        message: String?,
+        at date: Date
+    ) {
+        guard let message else {
+            entries[source] = nil
+            return
+        }
+        if entries[source]?.message == message { return }
+        entries[source] = BatteryIssue(
+            source: source,
+            severity: severity,
+            message: message,
+            occurredAt: date
+        )
+    }
+
+    func message(for source: BatteryIssueSource) -> String? {
+        entries[source]?.message
+    }
+
+    var orderedIssues: [BatteryIssue] {
+        entries.values.sorted {
+            if $0.severity != $1.severity { return $0.severity > $1.severity }
+            if $0.occurredAt != $1.occurredAt { return $0.occurredAt > $1.occurredAt }
+            return $0.source.rawValue < $1.source.rawValue
+        }
+    }
+}
+
+enum SafetyTemperatureSource: String, Equatable, Sendable {
+    case smc = "SMC"
+    case ioKit = "IOKit"
+}
+
+enum SafetyTemperatureFreshness: Equatable, Sendable {
+    case fresh
+    case stale
+    case unavailable
+}
+
+struct SafetyTemperatureSnapshot: Equatable, Sendable {
+    let value: Double?
+    let sources: [SafetyTemperatureSource]
+    let freshness: SafetyTemperatureFreshness
+    let failures: [String]
+
+    static let unavailable = SafetyTemperatureSnapshot(
+        value: nil,
+        sources: [],
+        freshness: .unavailable,
+        failures: []
+    )
+
+    var displayValue: String {
+        guard let value else { return "알 수 없음" }
+        let provenance = sources.map(\.rawValue).joined(separator: "+")
+        let measurement = String(format: "%.1f°C (%@)", value, provenance)
+        return freshness == .stale ? "\(measurement) · 오래됨" : measurement
+    }
+}
+
+enum HeatProtectionPhase: Equatable, Sendable {
+    case disabled
+    case monitoring
+    case degraded
+    case entering
+    case blocked
+    case restoring
+    case failed
+}
+
+enum ChargeActionAvailability: Equatable, Sendable {
+    case allowed
+    case denied(String)
+
+    var isAllowed: Bool {
+        if case .allowed = self { return true }
+        return false
+    }
+}
+
 enum BatteryDisplay {
     static func amperage(_ value: Int?) -> String {
         guard let value else { return "알 수 없음" }
