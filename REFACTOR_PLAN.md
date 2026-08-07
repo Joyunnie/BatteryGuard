@@ -334,7 +334,7 @@ silent failure이면서 테스트와 오류 처리가 모두 없는 새 경로�
 - [x] **T2 (P1)** — 갱신된 `main`에서 strict tests, Release build와 Debug analyze를 실행한다.
 - [x] **T3 (P2)** — PR #12에서 SMC sample task를 generation 기반으로 소유·취소하고 stale completion 테스트를 추가한다.
 - [x] **T4 (P3)** — PR #13에서 두 대형 테스트 파일을 subsystem별로 물리 분리하고 test count를 보존한다.
-- [ ] **T5 (approval-gated)** — PR #12 영향 범위의 Heat/sleep-wake/Maintain 수동 검증을 수행하고 최종 복원 상태를 기록한다.
+- [x] **T5 (approval-gated)** — PR #12 영향 범위의 Heat/sleep-wake/Maintain 수동 검증을 수행하고 최종 복원 상태를 기록한다.
 
 ### 0.21 PR #12 SMC sample task lifetime 결과 (2026-08-07)
 
@@ -354,7 +354,20 @@ PR #12의 구현·리뷰 보완·누적 리뷰 수정과 push는 완료됐다. P
 - 혹독 리뷰에서 원본 header를 모든 새 파일에 복사해 불필요한 framework dependency가 남은 점을 수정해 각 파일의 import를 실제 사용 범위로 축소했다.
 - strict-concurrency complete와 warnings-as-errors에서 전체 178개 테스트가 통과했다. production source diff와 실제 battery/SMC 명령 실행은 0이다.
 
-PR #13 뒤 남은 필수 자동 코드 작업은 없다. PR #12→#13 순차 merge와 갱신된 main 자동 gate만 남아 있다. 수동 Heat/sleep-wake/Maintain 재검증은 계속 사용자 승인 기반이다.
+PR #12와 #13은 순서대로 `main`에 병합됐고, 갱신된 `main`에서 178개 strict tests, Release build와 Debug analyze가 통과했다.
+
+### 0.23 PR #12 영향 범위 실기 재검증 결과 (2026-08-07)
+
+사용자 승인 뒤 갱신된 `main`의 Release 앱 한 인스턴스로 실제 battery CLI v1.3.4와 하드웨어를 재검증했다.
+
+- 시작 상태는 82%, AC attached, charging disabled, not discharging, Maintain 80이었다. PID 파일은 exact `/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80` worker를 가리켰고 ownership journal은 `batteryGuard`, lastLimit 80이었다.
+- 실제 온도 35.4°C에서 Heat threshold를 40→34°C로 낮추자 UI가 `열 보호 작동 중`으로 전이하고 exact worker와 PID 파일이 제거됐다. status는 charging disabled/not discharging을 유지했다.
+- Heat Protection을 끄자 exact Maintain 80 worker가 다시 생성됐다. 다시 활성화한 뒤 threshold를 34→40°C로 되돌리자 hysteresis를 통과해 Maintain 80이 자동 복원됐다. 최종 설정은 원래 값인 Heat 활성/40°C다.
+- Amphetamine 무제한 세션을 종료한 뒤 software sleep을 수행했다. `pmset`은 14:38:03 Sleep 진입과 14:38:23 Deep Idle wake를 기록했다. wake 직후 진단 로그가 full tuple과 동일한 worker PID를 포함한 Maintain 80 재검증 성공을 기록했다.
+- Amphetamine 무제한 세션을 복원했다. 최종 상태는 82%, AC attached, charging disabled, not discharging, exact Maintain 80 worker 1개, PID 파일 일치, ownership `batteryGuard`, Heat 활성/40°C, MagSafe LED 제어 비활성이다.
+- 모든 전이가 verified safe state로 끝나 별도 실패 복구는 필요하지 않았다. 실제 검사 중 하드웨어 상태가 불명확해지는 경로는 발생하지 않았다.
+
+계획된 코드 작업과 승인 기반 하드웨어 gate는 모두 완료됐다. 이후 작업은 실제 결함이나 새로운 요구가 생길 때 별도 범위로 시작한다.
 
 ## 1. 프로젝트 전제
 
