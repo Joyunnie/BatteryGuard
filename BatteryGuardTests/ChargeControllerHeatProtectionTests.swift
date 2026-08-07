@@ -4,6 +4,58 @@ import Foundation
 
 @MainActor
 extension ChargeControllerSafetyTests {
+    func testDisablingHeatDuringEntryPreemptsStaleChargingBlock() async {
+        let (controller, backend, monitor, settings) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 80
+        )
+        backend.setCancelLongRunningDelay(0.3, ignoringCancellation: true)
+
+        let hotInfo = makeBatteryInfo(temperature: 45)
+        monitor.batteryInfo = hotInfo
+        controller.processBatteryInfo(hotInfo)
+        let entryStarted = await eventually { backend.operations.contains("cancel-long") }
+        XCTAssertTrue(entryStarted)
+        monitor.batteryInfo = nil
+
+        controller.setHeatProtectionEnabled(false)
+        let restored = await eventually {
+            controller.mode == .maintaining(limit: 80) && !controller.isCommandPending
+        }
+        XCTAssertTrue(restored)
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertFalse(settings.heatProtectionEnabled)
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+    }
+
+    func testHeatPreemptionStopsStaleTopUpCancellationBeforeMaintain() async {
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 80,
+            initialMode: .toppingUp(returnLimit: 80)
+        )
+        backend.setCancelLongRunningDelay(0.3, ignoringCancellation: true)
+
+        controller.cancelTopUp()
+        let stopStarted = await eventually { backend.operations.contains("cancel-long") }
+        XCTAssertTrue(stopStarted)
+
+        let hotInfo = makeBatteryInfo(temperature: 45)
+        monitor.batteryInfo = hotInfo
+        controller.processBatteryInfo(hotInfo)
+        let blocked = await eventually {
+            controller.heatProtectionTriggered && !controller.isCommandPending
+        }
+        XCTAssertTrue(blocked)
+
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+    }
+
     func testHeatProtectionPreemptsDischargeAndRequiresVerifiedDisable() async {
         let (controller, backend, monitor, settings) = makeSUT(
             heatProtectionEnabled: true,
@@ -51,6 +103,42 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(restored)
         XCTAssertTrue(backend.operations.contains("maintain:80"))
         XCTAssertEqual(controller.effectiveChargeLimit, 80)
+    }
+
+    func testPreemptedTemperaturePreflightCannotRestoreMaintainAfterReblock() async {
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 45,
+            charge: 80
+        )
+        controller.processBatteryInfo(makeBatteryInfo(temperature: 45))
+        let initiallyProtected = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(initiallyProtected)
+
+        backend.enqueueTemperatures([37])
+        backend.enqueueTemperatureReadDelays([0.3], ignoringCancellation: true)
+        let coolInfo = makeBatteryInfo(temperature: 37)
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+        let preflightStarted = await eventually {
+            backend.operations.contains("read-temperature")
+        }
+        XCTAssertTrue(preflightStarted)
+
+        let hotAgain = makeBatteryInfo(temperature: 45)
+        monitor.batteryInfo = hotAgain
+        controller.processBatteryInfo(hotAgain)
+        let reblocked = await eventually {
+            controller.heatProtectionTriggered && !controller.isCommandPending
+        }
+        XCTAssertTrue(reblocked)
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertGreaterThanOrEqual(
+            backend.operations.filter { $0 == "disable-charging" }.count,
+            2
+        )
     }
 
     func testRisingTemperatureInvalidatesAnInFlightRestore() async {

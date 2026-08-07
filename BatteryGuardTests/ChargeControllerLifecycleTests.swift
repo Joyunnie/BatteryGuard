@@ -4,6 +4,28 @@ import Foundation
 
 @MainActor
 extension ChargeControllerSafetyTests {
+    func testShutdownInvalidatesWakeTemperatureReadBeforeHardwareMutation() async throws {
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 80
+        )
+        backend.enqueueTemperatures([30])
+        backend.enqueueTemperatureReadDelays([0.3], ignoringCancellation: true)
+
+        let wake = Task { await controller.reconcileAfterWake() }
+        let temperatureReadStarted = await eventually {
+            backend.operations.contains("read-temperature")
+        }
+        XCTAssertTrue(temperatureReadStarted)
+
+        try await controller.shutdown()
+        await wake.value
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
     func testStaleLongRunningProbeCannotMutateStateAfterShutdownStarts() async throws {
         let previous = RestorableChargeMode.toppingUp(returnLimit: 80)
         let (controller, backend, _, _) = makeSUT(
