@@ -144,6 +144,37 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+private extension DiagnosticEvent {
+    enum RetentionPriority: Int {
+        case routine
+        case contextual
+        case safety
+    }
+
+    var retentionPriority: RetentionPriority {
+        switch category {
+        case .control, .lifecycle:
+            return .safety
+        case .command, .history, .sensor:
+            break
+        }
+
+        switch outcome {
+        case .failed, .signaled, .timedOut, .drifted:
+            return .safety
+        case .launched, .cancelled, .superseded:
+            return .contextual
+        case .succeeded:
+            return .contextual
+        case .exited:
+            if exitCode != 0 || message?.isEmpty == false {
+                return .safety
+            }
+            return .routine
+        }
+    }
+}
+
 extension DiagnosticEvent {
     init(commandResult result: BatteryCommandResult) {
         let outcome: DiagnosticOutcome
@@ -197,9 +228,7 @@ actor DiagnosticLog {
             if $0.timestamp == $1.timestamp { return $0.id.uuidString < $1.id.uuidString }
             return $0.timestamp < $1.timestamp
         }
-        if events.count > capacity {
-            events.removeFirst(events.count - capacity)
-        }
+        events = Self.retainedEvents(events, capacity: capacity)
         do {
             try persist()
         } catch {
@@ -244,7 +273,7 @@ actor DiagnosticLog {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let decoded = try decoder.decode([DiagnosticEvent].self, from: data)
-            events = Array(decoded.suffix(capacity))
+            events = Self.retainedEvents(decoded, capacity: capacity)
         } catch {
             persistenceError = error.localizedDescription
             logger.error("Read failed: \(error.localizedDescription, privacy: .public)")
@@ -260,7 +289,7 @@ actor DiagnosticLog {
             attributes: [.posixPermissions: 0o700]
         )
         try Self.validateAndSecureDirectory(directoryURL)
-        events = try Self.encodeNewestEventsWithinLimit(events, to: fileURL)
+        events = try Self.encodeRetainedEventsWithinLimit(events, to: fileURL)
         persistenceError = nil
     }
 
@@ -282,7 +311,29 @@ actor DiagnosticLog {
         }
     }
 
-    private nonisolated static func encodeNewestEventsWithinLimit(
+    private nonisolated static func retainedEvents(
+        _ events: [DiagnosticEvent],
+        capacity: Int
+    ) -> [DiagnosticEvent] {
+        guard capacity > 0 else { return [] }
+        var retained = events.sorted {
+            if $0.timestamp == $1.timestamp { return $0.id.uuidString < $1.id.uuidString }
+            return $0.timestamp < $1.timestamp
+        }
+        while retained.count > capacity {
+            retained.remove(at: evictionIndex(in: retained))
+        }
+        return retained
+    }
+
+    private nonisolated static func evictionIndex(in events: [DiagnosticEvent]) -> Int {
+        let lowestPriority = events.map(\.retentionPriority.rawValue).min() ?? 0
+        return events.firstIndex {
+            $0.retentionPriority.rawValue == lowestPriority
+        } ?? events.startIndex
+    }
+
+    private nonisolated static func encodeRetainedEventsWithinLimit(
         _ events: [DiagnosticEvent],
         to fileURL: URL
     ) throws -> [DiagnosticEvent] {
@@ -292,7 +343,7 @@ actor DiagnosticLog {
         var retained = events
         var data = try encoder.encode(retained)
         while data.count > maximumFileBytes, !retained.isEmpty {
-            retained.removeFirst()
+            retained.remove(at: evictionIndex(in: retained))
             data = try encoder.encode(retained)
         }
         try data.write(to: fileURL, options: .atomic)

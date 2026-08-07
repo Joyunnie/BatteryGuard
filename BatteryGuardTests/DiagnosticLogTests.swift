@@ -31,6 +31,57 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertEqual(reloadedEvents, events)
     }
 
+    func testRoutineCommandChurnDoesNotEvictOlderSafetyEvents() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-diagnostic-priority-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 4)
+
+        await log.record(
+            DiagnosticEvent(
+                timestamp: Date(timeIntervalSince1970: 0),
+                category: .control,
+                operation: "prepare battery for system sleep"
+            )
+        )
+        await log.record(
+            DiagnosticEvent(
+                timestamp: Date(timeIntervalSince1970: 1),
+                category: .command,
+                operation: "failed command",
+                exitCode: 7,
+                outcome: .exited,
+                message: "failure"
+            )
+        )
+        for index in 0..<4 {
+            await log.record(
+                DiagnosticEvent(
+                    timestamp: Date(timeIntervalSince1970: TimeInterval(index + 2)),
+                    category: .command,
+                    operation: "smc-read-\(index)",
+                    exitCode: 0,
+                    outcome: .exited
+                )
+            )
+        }
+
+        let events = await log.recentEvents()
+        XCTAssertEqual(
+            events.map(\.operation),
+            [
+                "prepare battery for system sleep",
+                "failed command",
+                "smc-read-2",
+                "smc-read-3"
+            ]
+        )
+
+        let reloadedEvents = await DiagnosticLog(fileURL: fileURL, capacity: 4).recentEvents()
+        XCTAssertEqual(reloadedEvents.map(\.operation), events.map(\.operation))
+    }
+
     func testCommandRunnerRecordsStructuredFailureDetails() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-command-log-\(UUID().uuidString)", isDirectory: true)
@@ -184,12 +235,21 @@ final class DiagnosticLogTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let log = DiagnosticLog(fileURL: fileURL, capacity: 100)
 
-        for index in 0..<100 {
+        await log.record(
+            DiagnosticEvent(
+                timestamp: Date(timeIntervalSince1970: 0),
+                category: .lifecycle,
+                operation: "prepare battery for system sleep"
+            )
+        )
+        for index in 1..<100 {
             await log.record(
                 DiagnosticEvent(
                     timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
-                    category: .control,
-                    operation: "operation-\(index)-" + String(repeating: "x", count: 20_000)
+                    category: .command,
+                    operation: "operation-\(index)-" + String(repeating: "x", count: 20_000),
+                    exitCode: 0,
+                    outcome: .exited
                 )
             )
         }
@@ -200,6 +260,7 @@ final class DiagnosticLogTests: XCTestCase {
         let fileSize = try XCTUnwrap(attributes[.size] as? NSNumber).intValue
 
         XCTAssertLessThan(events.count, 100)
+        XCTAssertTrue(events.contains { $0.operation == "prepare battery for system sleep" })
         XCTAssertTrue(events.last?.operation.hasPrefix("operation-99-") == true)
         XCTAssertLessThanOrEqual(fileSize, 1_048_576)
         XCTAssertNil(persistenceError)
