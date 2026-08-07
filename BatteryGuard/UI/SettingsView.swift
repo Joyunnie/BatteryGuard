@@ -1,10 +1,12 @@
 // SettingsView.swift
 
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @EnvironmentObject var settings: UserSettings
     @EnvironmentObject var controller: ChargeController
+    @State private var diagnosticLogError: String?
 
     var body: some View {
         TabView {
@@ -18,11 +20,15 @@ struct SettingsView: View {
                 .tabItem { Label("외관", systemImage: "paintbrush") }
         }
         .padding()
+        .onAppear { settings.refreshLaunchAtLoginStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            settings.refreshLaunchAtLoginStatus()
+        }
     }
 
     private var chargeSettings: some View {
         Form {
-            Section("Charge Limit") {
+            Section("충전 한도") {
                 HStack {
                     Slider(
                         value: Binding(
@@ -55,8 +61,8 @@ struct SettingsView: View {
 
     private var protectionSettings: some View {
         Form {
-            Section("Heat Protection") {
-                Toggle("Heat Protection 활성화", isOn: $settings.heatProtectionEnabled)
+            Section("열 보호") {
+                Toggle("열 보호 활성화", isOn: $settings.heatProtectionEnabled)
 
                 if settings.heatProtectionEnabled {
                     VStack(alignment: .leading, spacing: 6) {
@@ -94,10 +100,21 @@ struct SettingsView: View {
     private var appearanceSettings: some View {
         Form {
             Section("시작") {
-                Toggle("로그인 시 자동 시작", isOn: $settings.launchAtLogin)
-                Text("Mac 시작 시 BatteryGuard가 자동으로 실행됩니다")
+                Toggle(
+                    "로그인 시 자동 시작",
+                    isOn: Binding(
+                        get: { settings.launchAtLogin },
+                        set: { settings.setLaunchAtLogin($0) }
+                    )
+                )
+                Text(launchAtLoginDescription)
                     .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(settings.launchAtLoginState == .requiresApproval ? .orange : .secondary)
+                if let error = settings.launchAtLoginError {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
+                }
             }
 
             Section("MagSafe LED") {
@@ -113,18 +130,58 @@ struct SettingsView: View {
             Divider()
                 .padding(.vertical, 8)
 
+            Section("진단") {
+                Button("진단 로그 보기") {
+                    Task {
+                        do {
+                            let fileURL = try await DiagnosticLog.shared.prepareForViewing()
+                            diagnosticLogError = nil
+                            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                        } catch {
+                            diagnosticLogError = error.localizedDescription
+                        }
+                    }
+                }
+                if let diagnosticLogError {
+                    Text(diagnosticLogError)
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
+                }
+                if let fileURL = DiagnosticLog.shared.fileURL {
+                    Text(fileURL.path)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+
             Section("정보") {
                 HStack {
                     Text("BatteryGuard")
                         .font(.system(size: 13, weight: .semibold))
                     Spacer()
-                    Text("v1.0")
+                    Text("v\(AppMetadata.version)")
                         .foregroundColor(.secondary)
                 }
                 Text("macOS 배터리 관리 메뉴바 앱")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
+        }
+    }
+
+    private var launchAtLoginDescription: String {
+        switch settings.launchAtLoginState {
+        case .disabled:
+            return "Mac 로그인 시 자동으로 시작하지 않습니다."
+        case .enabled:
+            return "Mac 로그인 시 BatteryGuard가 자동으로 시작됩니다."
+        case .requiresApproval:
+            return "시스템 설정 > 일반 > 로그인 항목에서 BatteryGuard를 허용해야 합니다."
+        case .unavailable:
+            return "로그인 항목 서비스를 찾을 수 없습니다."
+        case .unknown(let value):
+            return "로그인 항목 상태를 확인할 수 없습니다 (\(value))."
         }
     }
 }

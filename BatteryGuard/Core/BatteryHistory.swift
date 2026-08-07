@@ -1,14 +1,9 @@
 // BatteryHistory.swift
-// Core Data 기반 24시간 배터리 이력 저장 + 조회
-//
-// 60초마다 (chargePercent, chargeLimit)을 기록.
-// 24시간 초과 데이터 자동 삭제.
-// 프로그래매틱 Core Data 모델 — .xcdatamodeld 파일 불필요.
+// Core Data-backed 24-hour battery history.
 
 import Foundation
 import CoreData
-
-// MARK: - BatteryRecord (NSManagedObject)
+import OSLog
 
 final class BatteryRecord: NSManagedObject {
     @NSManaged var timestamp: Date
@@ -16,155 +11,229 @@ final class BatteryRecord: NSManagedObject {
     @NSManaged var chargeLimit: Int16
 }
 
-// MARK: - BatteryHistory
+private enum BatteryHistoryError: LocalizedError {
+    case missingEntity
+
+    var errorDescription: String? {
+        switch self {
+        case .missingEntity:
+            return "BatteryRecord entity is missing from the persistent store model."
+        }
+    }
+}
+
+enum BatteryHistoryReadiness: Equatable {
+    case loading
+    case ready
+    case failed(String)
+}
+
+@MainActor
+struct BatteryHistoryStoreOperations {
+    let save: (NSManagedObjectContext) throws -> Void
+    let fetch: (NSManagedObjectContext, NSFetchRequest<BatteryRecord>) throws -> [BatteryRecord]
+
+    init(
+        save: @escaping (NSManagedObjectContext) throws -> Void = { try $0.save() },
+        fetch: @escaping (NSManagedObjectContext, NSFetchRequest<BatteryRecord>) throws -> [BatteryRecord] = {
+            try $0.fetch($1)
+        }
+    ) {
+        self.save = save
+        self.fetch = fetch
+    }
+}
 
 @MainActor
 final class BatteryHistory {
-    static let shared = BatteryHistory()
+    static let shared = BatteryHistory(diagnostics: .shared)
 
-    private let container: NSPersistentContainer
-    private let inMemory: Bool
-
-    /// 차트용 구조체 — Core Data 컨텍스트 밖에서 안전하게 사용
-    struct ChartRecord {
+    struct ChartRecord: Equatable {
         let timestamp: Date
         let chargePercent: Int
         let chargeLimit: Int
     }
 
-    init(inMemory: Bool = false) {
-        self.inMemory = inMemory
-        // 프로그래매틱 모델 정의
-        let model = NSManagedObjectModel()
+    private(set) var readiness: BatteryHistoryReadiness = .loading
+    private(set) var saveError: String?
+    private(set) var fetchError: String?
+    var visibleError: String? {
+        if case .failed(let message) = readiness { return message }
+        return fetchError ?? saveError
+    }
 
+    private let container: NSPersistentContainer
+    private let inMemory: Bool
+    private let diagnostics: DiagnosticLog
+    private let storeOperations: BatteryHistoryStoreOperations
+    private let now: @Sendable () -> Date
+    private let heartbeatInterval: TimeInterval
+    private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "History")
+    private var readinessWaiters: [CheckedContinuation<BatteryHistoryReadiness, Never>] = []
+    private var pendingRecord: (chargePercent: Int, chargeLimit: Int)?
+    private var lastChargePercent: Int?
+    private var lastChargeLimit: Int?
+    private var lastRecordDate: Date?
+    private var lastCleanupDate: Date?
+
+    init(
+        inMemory: Bool = false,
+        storeURL: URL? = nil,
+        heartbeatInterval: TimeInterval = 15 * 60,
+        diagnostics: DiagnosticLog = .disabled,
+        storeOperations: BatteryHistoryStoreOperations = BatteryHistoryStoreOperations(),
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.inMemory = inMemory
+        self.diagnostics = diagnostics
+        self.now = now
+        self.heartbeatInterval = heartbeatInterval
+        self.storeOperations = storeOperations
+
+        let model = NSManagedObjectModel()
         let entity = NSEntityDescription()
         entity.name = "BatteryRecord"
         entity.managedObjectClassName = NSStringFromClass(BatteryRecord.self)
 
-        let timestampAttr = NSAttributeDescription()
-        timestampAttr.name = "timestamp"
-        timestampAttr.attributeType = .dateAttributeType
+        let timestamp = NSAttributeDescription()
+        timestamp.name = "timestamp"
+        timestamp.attributeType = .dateAttributeType
+        timestamp.isOptional = false
 
-        let chargePercentAttr = NSAttributeDescription()
-        chargePercentAttr.name = "chargePercent"
-        chargePercentAttr.attributeType = .integer16AttributeType
+        let chargePercent = NSAttributeDescription()
+        chargePercent.name = "chargePercent"
+        chargePercent.attributeType = .integer16AttributeType
+        chargePercent.isOptional = false
 
-        let chargeLimitAttr = NSAttributeDescription()
-        chargeLimitAttr.name = "chargeLimit"
-        chargeLimitAttr.attributeType = .integer16AttributeType
+        let chargeLimit = NSAttributeDescription()
+        chargeLimit.name = "chargeLimit"
+        chargeLimit.attributeType = .integer16AttributeType
+        chargeLimit.isOptional = false
 
-        entity.properties = [timestampAttr, chargePercentAttr, chargeLimitAttr]
-
-        // Index on timestamp — all queries filter/sort by timestamp
-        let timestampIndex = NSFetchIndexDescription(name: "idx_timestamp", elements: [
-            NSFetchIndexElementDescription(property: timestampAttr, collationType: .binary)
-        ])
-        entity.indexes = [timestampIndex]
-
+        entity.properties = [timestamp, chargePercent, chargeLimit]
+        entity.indexes = [
+            NSFetchIndexDescription(
+                name: "idx_timestamp",
+                elements: [NSFetchIndexElementDescription(property: timestamp, collationType: .binary)]
+            )
+        ]
         model.entities = [entity]
 
         container = NSPersistentContainer(name: "BatteryGuardHistory", managedObjectModel: model)
-
-        let desc: NSPersistentStoreDescription
+        let description: NSPersistentStoreDescription
         if inMemory {
-            desc = NSPersistentStoreDescription()
-            desc.type = NSInMemoryStoreType
+            description = NSPersistentStoreDescription()
+            description.type = NSInMemoryStoreType
         } else {
-            // Application Support에 저장
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            let storeDir = appSupport.appendingPathComponent("BatteryGuard", isDirectory: true)
-            try? FileManager.default.createDirectory(at: storeDir, withIntermediateDirectories: true)
-            let storeURL = storeDir.appendingPathComponent("BatteryHistory.sqlite")
-            desc = NSPersistentStoreDescription(url: storeURL)
-        }
-        desc.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
-        desc.setOption(true as NSNumber, forKey: NSInferMappingModelAutomaticallyOption)
-        container.persistentStoreDescriptions = [desc]
-
-        container.loadPersistentStores { _, error in
-            if let error = error {
-                print("[BatteryHistory] Core Data load failed: \(error)")
+            let resolvedURL = storeURL ?? Self.productionStoreURL()
+            description = NSPersistentStoreDescription(url: resolvedURL)
+            do {
+                try FileManager.default.createDirectory(
+                    at: resolvedURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                readiness = .failed("이력 저장 폴더를 만들지 못했습니다: \(error.localizedDescription)")
             }
         }
+        description.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
+        description.setOption(true as NSNumber, forKey: NSInferMappingModelAutomaticallyOption)
+        container.persistentStoreDescriptions = [description]
         container.viewContext.automaticallyMergesChangesFromParent = true
-    }
 
-    // MARK: - 기록
-
-    private var lastChargePercent: Int?
-    private var lastChargeLimit: Int?
-    private var lastCleanupDate: Date?
-
-    /// 60초마다 호출 — 값이 변경된 경우에만 저장
-    func record(chargePercent: Int, chargeLimit: Int) {
-        if chargePercent == lastChargePercent && chargeLimit == lastChargeLimit {
-            return
-        }
-        lastChargePercent = chargePercent
-        lastChargeLimit = chargeLimit
-
-        // 1시간마다 24시간 초과 데이터 정리
-        let needsCleanup: Bool
-        if let last = lastCleanupDate {
-            needsCleanup = Date().timeIntervalSince(last) >= 3600
-        } else {
-            needsCleanup = true
-        }
-
-        let ctx = container.newBackgroundContext()
-        ctx.perform {
-            let record = BatteryRecord(context: ctx)
-            record.timestamp = Date()
-            record.chargePercent = Int16(chargePercent)
-            record.chargeLimit = Int16(chargeLimit)
-
-            if needsCleanup {
-                let cutoff = Date().addingTimeInterval(-86400)
-                if self.inMemory {
-                    // NSInMemoryStoreType does not support NSBatchDeleteRequest.
-                    let fetch = NSFetchRequest<BatteryRecord>(entityName: "BatteryRecord")
-                    fetch.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
-                    if let expired = try? ctx.fetch(fetch) {
-                        expired.forEach(ctx.delete)
-                    }
-                } else {
-                    let deleteReq = NSFetchRequest<NSFetchRequestResult>(entityName: "BatteryRecord")
-                    deleteReq.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
-                    let batchDelete = NSBatchDeleteRequest(fetchRequest: deleteReq)
-                    batchDelete.resultType = .resultTypeObjectIDs
-                    if let result = try? ctx.execute(batchDelete) as? NSBatchDeleteResult,
-                       let ids = result.result as? [NSManagedObjectID], !ids.isEmpty {
-                        NSManagedObjectContext.mergeChanges(
-                            fromRemoteContextSave: [NSDeletedObjectsKey: ids],
-                            into: [self.container.viewContext]
-                        )
-                    }
+        container.loadPersistentStores { [weak self] _, error in
+            let errorMessage = error?.localizedDescription
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let errorMessage {
+                    self.setReadinessFailure("Core Data store load failed: \(errorMessage)")
+                    return
+                }
+                if case .failed(let message) = self.readiness {
+                    self.resolveReadinessWaiters()
+                    self.reportDiagnostic(message, operation: "load history store")
+                    return
+                }
+                self.readiness = .ready
+                self.resolveReadinessWaiters()
+                if let pending = self.pendingRecord {
+                    self.pendingRecord = nil
+                    self.record(chargePercent: pending.chargePercent, chargeLimit: pending.chargeLimit)
                 }
             }
-
-            do {
-                try ctx.save()
-            } catch {
-                print("[BatteryHistory] Save failed: \(error)")
-            }
-        }
-
-        if needsCleanup {
-            lastCleanupDate = Date()
         }
     }
 
-    // MARK: - 조회
+    func waitUntilReady() async -> BatteryHistoryReadiness {
+        guard readiness == .loading else { return readiness }
+        return await withCheckedContinuation { readinessWaiters.append($0) }
+    }
 
-    /// 최근 24시간 데이터를 메인 스레드에서 조회
+    func loadLast24Hours() async -> [ChartRecord] {
+        guard await waitUntilReady() == .ready else { return [] }
+        return fetchLast24Hours()
+    }
+
+    func record(chargePercent: Int, chargeLimit: Int) {
+        guard (0...100).contains(chargePercent),
+              UserSettings.chargeLimitRange.contains(chargeLimit) else {
+            reportError(
+                "History rejected invalid values: charge=\(chargePercent), limit=\(chargeLimit)",
+                operation: "validate history sample"
+            )
+            return
+        }
+        guard readiness == .ready else {
+            if readiness == .loading {
+                pendingRecord = (chargePercent, chargeLimit)
+            }
+            return
+        }
+
+        let timestamp = now()
+        let valuesChanged = chargePercent != lastChargePercent || chargeLimit != lastChargeLimit
+        let heartbeatDue = lastRecordDate.map { timestamp.timeIntervalSince($0) >= heartbeatInterval } ?? true
+        guard valuesChanged || heartbeatDue else { return }
+
+        let context = container.viewContext
+        let needsCleanup = lastCleanupDate.map { timestamp.timeIntervalSince($0) >= 3600 } ?? true
+        do {
+            if needsCleanup {
+                try removeRecords(olderThan: timestamp.addingTimeInterval(-86400), from: context)
+                lastCleanupDate = timestamp
+            }
+
+            guard let entity = NSEntityDescription.entity(forEntityName: "BatteryRecord", in: context) else {
+                throw BatteryHistoryError.missingEntity
+            }
+            let record = BatteryRecord(entity: entity, insertInto: context)
+            record.timestamp = timestamp
+            record.chargePercent = Int16(chargePercent)
+            record.chargeLimit = Int16(chargeLimit)
+            try storeOperations.save(context)
+
+            lastChargePercent = chargePercent
+            lastChargeLimit = chargeLimit
+            lastRecordDate = timestamp
+            saveError = nil
+        } catch {
+            context.rollback()
+            reportError("Core Data save failed: \(error.localizedDescription)", operation: "save history")
+        }
+    }
+
     func fetchLast24Hours() -> [ChartRecord] {
-        let ctx = container.viewContext
-        let req = NSFetchRequest<BatteryRecord>(entityName: "BatteryRecord")
-        req.predicate = NSPredicate(format: "timestamp >= %@", Date().addingTimeInterval(-86400) as NSDate)
-        req.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+        guard readiness == .ready else { return [] }
+        let request = NSFetchRequest<BatteryRecord>(entityName: "BatteryRecord")
+        request.predicate = NSPredicate(
+            format: "timestamp >= %@",
+            now().addingTimeInterval(-86400) as NSDate
+        )
+        request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
 
         do {
-            let records = try ctx.fetch(req)
+            let records = try storeOperations.fetch(container.viewContext, request)
+            fetchError = nil
             return records.map {
                 ChartRecord(
                     timestamp: $0.timestamp,
@@ -173,8 +242,88 @@ final class BatteryHistory {
                 )
             }
         } catch {
-            print("[BatteryHistory] Fetch failed: \(error)")
+            reportError("Core Data fetch failed: \(error.localizedDescription)", operation: "fetch history")
             return []
         }
+    }
+
+    static func downsample(_ records: [ChartRecord], maxPoints: Int) -> [ChartRecord] {
+        guard maxPoints > 0 else { return [] }
+        guard records.count > maxPoints else { return records }
+        guard maxPoints > 1 else { return [records[records.count - 1]] }
+
+        let lastIndex = records.count - 1
+        return (0..<maxPoints).map { position in
+            let index = position * lastIndex / (maxPoints - 1)
+            return records[index]
+        }
+    }
+
+    private func removeRecords(olderThan cutoff: Date, from context: NSManagedObjectContext) throws {
+        if inMemory {
+            let request = NSFetchRequest<BatteryRecord>(entityName: "BatteryRecord")
+            request.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
+            try context.fetch(request).forEach(context.delete)
+            return
+        }
+
+        let request = NSFetchRequest<NSFetchRequestResult>(entityName: "BatteryRecord")
+        request.predicate = NSPredicate(format: "timestamp < %@", cutoff as NSDate)
+        let delete = NSBatchDeleteRequest(fetchRequest: request)
+        delete.resultType = .resultTypeObjectIDs
+        if let result = try context.execute(delete) as? NSBatchDeleteResult,
+           let objectIDs = result.result as? [NSManagedObjectID],
+           !objectIDs.isEmpty {
+            NSManagedObjectContext.mergeChanges(
+                fromRemoteContextSave: [NSDeletedObjectsKey: objectIDs],
+                into: [context]
+            )
+        }
+    }
+
+    private func setReadinessFailure(_ message: String) {
+        readiness = .failed(message)
+        resolveReadinessWaiters()
+        reportDiagnostic(message, operation: "load history store")
+    }
+
+    private func resolveReadinessWaiters() {
+        let waiters = readinessWaiters
+        readinessWaiters.removeAll()
+        waiters.forEach { $0.resume(returning: readiness) }
+    }
+
+    private func reportError(_ message: String, operation: String) {
+        if operation == "save history" {
+            saveError = message
+        } else {
+            fetchError = message
+        }
+        reportDiagnostic(message, operation: operation)
+    }
+
+    private func reportDiagnostic(_ message: String, operation: String) {
+        logger.error("\(message, privacy: .public)")
+        let diagnostics = diagnostics
+        Task {
+            await diagnostics.record(
+                DiagnosticEvent(
+                    category: .history,
+                    operation: operation,
+                    outcome: .failed,
+                    message: message
+                )
+            )
+        }
+    }
+
+    private nonisolated static func productionStoreURL() -> URL {
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        return base
+            .appendingPathComponent("BatteryGuard", isDirectory: true)
+            .appendingPathComponent("BatteryHistory.sqlite")
     }
 }

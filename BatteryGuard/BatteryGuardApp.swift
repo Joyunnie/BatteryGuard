@@ -2,6 +2,80 @@
 // 앱 진입점 + 메뉴바 아이콘
 
 import SwiftUI
+import AppKit
+
+enum AppMetadata {
+    static var version: String {
+        guard let value = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String, !value.isEmpty else {
+            return "알 수 없음"
+        }
+        return value
+    }
+}
+
+@MainActor
+final class AppActivationController {
+    static let shared = AppActivationController()
+
+    private let setPolicy: (NSApplication.ActivationPolicy) -> Bool
+    private let activate: () -> Void
+    private let hasVisibleAppWindow: () -> Bool
+    private let diagnostics: DiagnosticLog
+
+    init(
+        setPolicy: @escaping (NSApplication.ActivationPolicy) -> Bool = { NSApp.setActivationPolicy($0) },
+        activate: @escaping () -> Void = { NSApp.activate(ignoringOtherApps: true) },
+        hasVisibleAppWindow: @escaping () -> Bool = {
+            NSApp.windows.contains {
+                $0.isVisible && $0.styleMask.contains(.titled) && !($0 is NSPanel)
+            }
+        },
+        diagnostics: DiagnosticLog = .shared
+    ) {
+        self.setPolicy = setPolicy
+        self.activate = activate
+        self.hasVisibleAppWindow = hasVisibleAppWindow
+        self.diagnostics = diagnostics
+    }
+
+    @discardableResult
+    func setInitialAccessoryPolicy() -> Bool {
+        apply(.accessory, operation: "set initial accessory activation policy")
+    }
+
+    @discardableResult
+    func showAppWindow() -> Bool {
+        guard apply(.regular, operation: "set regular activation policy") else { return false }
+        activate()
+        return true
+    }
+
+    @discardableResult
+    func restoreAccessoryPolicyIfNeeded() -> Bool {
+        guard !hasVisibleAppWindow() else { return true }
+        return apply(.accessory, operation: "restore accessory activation policy")
+    }
+
+    private func apply(_ policy: NSApplication.ActivationPolicy, operation: String) -> Bool {
+        guard setPolicy(policy) else {
+            let diagnostics = diagnostics
+            Task {
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .lifecycle,
+                        operation: operation,
+                        outcome: .failed,
+                        message: "NSApplication rejected activation policy \(policy.rawValue)"
+                    )
+                )
+            }
+            return false
+        }
+        return true
+    }
+}
 
 @main
 struct BatteryGuardApp: App {
@@ -37,8 +111,13 @@ struct BatteryGuardApp: App {
 }
 
 // MARK: - AppDelegate
-class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var initializationTask: Task<Void, Never>?
+    private var terminationTask: Task<Void, Never>?
+    private var terminationApproved = false
+    private var windowCloseObserver: NSObjectProtocol?
+    private let activationController = AppActivationController.shared
 
     private var isRunningTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
@@ -46,11 +125,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        activationController.setInitialAccessoryPolicy()
 
         // The unit-test bundle is app-hosted. Never let launching the test host
         // initialize real battery control, history, login items, or SMC writes.
         guard !isRunningTests else { return }
+
+        windowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.activationController.restoreAccessoryPolicyIfNeeded()
+            }
+        }
 
         initializationTask = Task { @MainActor in
             do {
@@ -71,12 +161,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        guard !isRunningTests else { return }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isRunningTests else { return .terminateNow }
+        if terminationApproved { return .terminateNow }
+        if terminationTask != nil { return .terminateLater }
+
         initializationTask?.cancel()
         initializationTask = nil
-        ChargeController.shared.shutdown()
+        terminationTask = Task { @MainActor [weak self, weak sender] in
+            guard let self, let sender else { return }
+            do {
+                try await ChargeController.shared.shutdown()
+                self.terminationApproved = true
+                self.terminationTask = nil
+                sender.reply(toApplicationShouldTerminate: true)
+            } catch {
+                self.terminationTask = nil
+                let alert = NSAlert()
+                alert.messageText = "안전한 종료 실패"
+                alert.informativeText = "\(error.localizedDescription)\n\n배터리 제어 상태를 확인하기 위해 앱을 종료하지 않았습니다."
+                alert.alertStyle = .critical
+                alert.runModal()
+                sender.reply(toApplicationShouldTerminate: false)
+            }
+        }
+        return .terminateLater
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        guard !isRunningTests else { return }
+        if let windowCloseObserver {
+            NotificationCenter.default.removeObserver(windowCloseObserver)
+            self.windowCloseObserver = nil
+        }
+    }
+
 }
 
 // MARK: - MenuBarLabel (Live Status Icons)
