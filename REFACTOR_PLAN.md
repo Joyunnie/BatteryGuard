@@ -873,7 +873,7 @@ enum ChargeMode: Equatable {
 - 엔터프라이즈식 다층 서비스 구조: 테스트에 필요한 최소 경계만 둔다.
 - View를 포함한 100% 테스트 커버리지: 안전 경로와 실패 처리의 완전성을 우선한다.
 - 클라우드 텔레메트리와 원격 로그: 로컬 진단 로그만 유지한다.
-- 대규모 성능 최적화: 현재 규모에서는 프로세스 실행과 차트 상한 외에 우선할 병목이 없다.
+- 측정 근거 없는 대규모 성능 재작성: 이번에 확인된 background wakeup·subprocess·진단 저장 병목은 체크포인트 18에서 제한적으로 개선하고, 그 밖의 미세 최적화는 실제 profile 근거가 생길 때만 수행한다.
 
 ## 7. 구현 체크포인트
 
@@ -896,6 +896,7 @@ enum ChargeMode: Equatable {
 15. `[PR #11 구현·혹독 리뷰 보완]` Top Up/Discharge long-running decision을 pure policy로 분리하고 target/liveness/recovery/drift 및 sleep assertion 수명 테스트 추가
 16. `[완료: PR #14]` IOKit sleep acknowledgement 전 verified charging-off와 wake 시 Maintain 복원 추가. 전역 Boolean인 `SleepDisabled`는 외부 소유권을 증명할 수 없어 charge-to-limit sleep inhibition/lease/watchdog 설계는 hostile review 후 제거
 17. `[구현·자동·실기 검증 및 진단 보존 보완 완료]` 누적 hostile review 보완: Discharge assertion 선획득, drift/manual failure를 보존하는 Heat 전이, 신규·분실 journal의 monitoring-only 기본값과 일회성 legacy migration, injectable IOKit transport 계약 테스트, process-group cleanup을 포함한 absolute deadline, typed issue/safety-temperature UI, backend capability 분리, exact CLI v1.3.4 및 실행 파일 identity 재검증, priority-aware bounded diagnostics, ownership directory hardening, history queue/extrema 보존, Release Hardened Runtime
+18. `[구현·자동 검증 완료]` 측정된 background 비용 축소: 정상 온도에서는 SMC 3-key sampling을 15초로 낮추되 임계값 5°C 이내·IOKit unavailable·안전 전이는 5초/강제 sampling을 유지한다. routine diagnostics는 30초 단위로 묶고 safety/control/lifecycle/failure는 즉시 flush한다. IOKit 알림을 주 측정 경로로 사용하고 동일 snapshot을 억제하며 30초 watchdog만 둔다. exact Maintain worker 확인은 bounded `pgrep -fl` 한 번으로 PID와 전체 명령을 얻되 exact tuple, PID-file binding과 process start identity 검증을 유지한다. 정상 상태 기준 SMC subprocess는 분당 36회에서 12회, routine diagnostics 파일 교체는 최대 분당 약 36회에서 2회, battery polling은 분당 30회에서 watchdog 2회로 줄고, reconciliation은 주기당 subprocess 3개에서 2개로 줄어든다. Runner의 일반 20ms poll과 teardown 전용 2ms poll 분리는 PR #15 기준선에서 이미 적용된 상태를 유지한다. strict-concurrency complete와 warnings-as-errors에서 전체 239개 테스트, Release build와 Debug analyze가 통과했다.
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 

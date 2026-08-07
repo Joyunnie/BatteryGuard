@@ -58,6 +58,9 @@ IOKit readings ---+                    result + verified CLI status
 - Do not report missing temperature/health/current values as plausible measurements such as `0` or `100%`; model them as unavailable.
 - Do not dump raw IOKit dictionaries or battery identifiers to stdout or diagnostics.
 - Reject nonfinite or physically implausible sensor values before any safety decision.
+- Keep battery measurement delivery notification-driven, suppress identical snapshots, and use only a low-frequency watchdog for missed notifications.
+- Sample SMC temperatures adaptively: a clearly safe IOKit reading may use the slower cadence, but near-threshold, unavailable, and explicit safety-transition reads must retain the fast/forced path.
+- Batch only routine diagnostics. Safety, failure, control, and lifecycle events must flush immediately, including any pending routine context.
 
 ## State and Lifecycle Invariants
 
