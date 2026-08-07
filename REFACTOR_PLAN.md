@@ -226,10 +226,14 @@ PR #2~8 누적 리뷰에서 병합을 막는 종료·프로세스·온도 안전
 
 PR #2~8 병합 뒤 동작을 바꾸지 않는 maintainability 단계로 lifecycle과 temperature freshness 경계를 `ChargeController` 밖에 정의한다.
 
-- `ChargeShutdownContext`를 shutdown planning의 명시적 입력으로, `ChargeShutdownPolicy` 또는 `ChargeShutdownPlanningError`를 출력으로 둔다. current mode와 ownership에서 requested policy를 고르는 로직, fresh full tuple로 최종 policy를 확정하는 로직을 I/O 없는 `ChargeShutdownPlanner`로 이동한다.
+- durable `BatteryControlOwnership`, current mode와 effective limit을 묶은 `ChargeShutdownContext`를 shutdown planning의 명시적 입력으로, `ChargeShutdownPolicy` 또는 typed `ChargeShutdownPlanningError`를 출력으로 둔다. requested policy와 fresh full tuple 기반 최종 policy를 고르는 로직을 I/O 없는 `ChargeShutdownPlanner`로 이동한다.
 - SMC sample 값과 측정 시각을 `SafetyTemperatureCache` 한 값 타입으로 묶는다. future sample, expired sample, nonfinite max age를 모두 unavailable로 처리하며 `ChargeController`는 유효한 측정의 record/clear와 freshness 조회만 orchestration한다.
-- 3,600줄 단일 테스트 파일에서 `ChargeControllerSafetyTests`를 독립 파일로 분리한다. shared fake는 test target 내부 support로 유지하고, pure lifecycle/temperature 계약은 별도 `ChargeLifecyclePolicyTests`에서 직접 검증한다.
+- 3,600줄 단일 테스트 파일에서 `ChargeControllerSafetyTests`와 shared `TestSupport`를 독립 파일로 분리한다. pure lifecycle과 temperature 계약은 각각 `ChargeLifecyclePolicyTests`, `SafetyTemperatureCacheTests`에서 직접 검증한다.
 - actor ownership, hardware command 순서, UI-visible state와 기존 테스트 의미는 변경하지 않는다. 다음 책임 분리는 새 순수 계약이 안정된 뒤 Heat Protection decision과 long-running lifecycle을 각각 독립 PR에서 다룬다.
+
+PR #9 혹독 리뷰에서 Boolean ownership 입력이 durable enum과 경쟁하고, verified planning이 `restoreMaintain`에 기록된 limit을 fallback limit으로 덮을 수 있는 계약 오류를 발견했다. context 입력을 `BatteryControlOwnership` 하나로 정규화하고 recorded limit을 끝까지 보존했다. planning error는 문자열 대신 typed `BatteryControlStatus`를 보유한다. `SafetyTemperatureCache`도 nonfinite·물리적으로 불가능한 온도와 잘못된 timestamp를 자체적으로 거부하도록 강화했다. 모든 transition family, ownership 우선순위, full-tuple fallback, invalid/stale/future temperature 경계를 별도 pure-policy 테스트로 검증한다.
+
+최종 자동 검증은 strict-concurrency complete와 warnings-as-errors에서 151개 테스트, Release build와 Debug analyze가 모두 통과했다. 이 PR은 실제 CLI나 하드웨어를 실행하지 않는다.
 
 ## 1. 프로젝트 전제
 

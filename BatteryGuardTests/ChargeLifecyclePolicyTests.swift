@@ -5,16 +5,14 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
     func testActiveLongRunningModesRestoreTheirRecordedMaintainLimit() throws {
         let topUp = try ChargeShutdownPlanner.requestedPolicy(
             for: ChargeShutdownContext(
-                releasePending: false,
-                controlEnabled: true,
+                ownership: .batteryGuard(lastLimit: 80),
                 mode: .toppingUp(returnLimit: 75),
                 effectiveLimit: 80
             )
         )
         let discharge = try ChargeShutdownPlanner.requestedPolicy(
             for: ChargeShutdownContext(
-                releasePending: false,
-                controlEnabled: true,
+                ownership: .batteryGuard(lastLimit: 80),
                 mode: .discharging(target: 70, returnLimit: 65),
                 effectiveLimit: 80
             )
@@ -27,24 +25,21 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
     func testOwnershipAndHeatStatesTakePriorityOverGenericMaintainFallback() throws {
         let release = try ChargeShutdownPlanner.requestedPolicy(
             for: ChargeShutdownContext(
-                releasePending: true,
-                controlEnabled: false,
+                ownership: .releasing(lastLimit: 80),
                 mode: .heatBlocked(previous: .maintaining(limit: 80)),
                 effectiveLimit: 80
             )
         )
         let released = try ChargeShutdownPlanner.requestedPolicy(
             for: ChargeShutdownContext(
-                releasePending: false,
-                controlEnabled: false,
+                ownership: .system(lastLimit: 80),
                 mode: .maintaining(limit: 80),
                 effectiveLimit: 80
             )
         )
         let heatBlocked = try ChargeShutdownPlanner.requestedPolicy(
             for: ChargeShutdownContext(
-                releasePending: false,
-                controlEnabled: true,
+                ownership: .batteryGuard(lastLimit: 80),
                 mode: .heatBlocked(previous: .maintaining(limit: 80)),
                 effectiveLimit: 80
             )
@@ -59,8 +54,7 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
         XCTAssertThrowsError(
             try ChargeShutdownPlanner.requestedPolicy(
                 for: ChargeShutdownContext(
-                    releasePending: false,
-                    controlEnabled: true,
+                    ownership: .batteryGuard(lastLimit: 80),
                     mode: .externalDrift(
                         expected: .maintaining(limit: 80),
                         observed: .discharging
@@ -106,6 +100,43 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
             ),
             .restoreMaintain(80)
         )
+        XCTAssertEqual(
+            try ChargeShutdownPlanner.verifiedPolicy(
+                requested: .restoreMaintain(75),
+                status: missingWorker,
+                restoreLimit: 80
+            ),
+            .restoreMaintain(75)
+        )
+    }
+
+    func testEveryTransitionFamilyHasAnExplicitShutdownPolicy() throws {
+        let previous = RestorableChargeMode.maintaining(limit: 75)
+        let cases: [(ChargeTransition, ChargeShutdownPolicy)] = [
+            (.applyingMaintain(target: 60, previous: previous), .restoreMaintain(75)),
+            (.startingTopUp(returnLimit: 70), .restoreMaintain(70)),
+            (.stoppingTopUp(returnLimit: 70), .restoreMaintain(70)),
+            (.startingDischarge(target: 60, returnLimit: 70), .restoreMaintain(70)),
+            (.stoppingDischarge(returnLimit: 70), .restoreMaintain(70)),
+            (.enteringHeat(previous: previous), .keepChargingDisabled),
+            (.restoringHeat(previous: previous), .keepChargingDisabled),
+            (.recoveringMaintain(limit: 65), .restoreMaintain(65)),
+            (.releasingControl(previous: previous), .releaseControl)
+        ]
+
+        for (transition, expected) in cases {
+            XCTAssertEqual(
+                try ChargeShutdownPlanner.requestedPolicy(
+                    for: ChargeShutdownContext(
+                        ownership: .batteryGuard(lastLimit: 80),
+                        mode: .transitioning(transition),
+                        effectiveLimit: 80
+                    )
+                ),
+                expected,
+                "Unexpected shutdown policy for \(transition)"
+            )
+        }
     }
 
     func testReleasedControlRequiresACompatibleFreshTuple() throws {
@@ -139,17 +170,4 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
         )
     }
 
-    func testSafetyTemperatureCacheRejectsExpiredAndFutureSamples() {
-        let recordedAt = Date(timeIntervalSince1970: 1_000)
-        var cache = SafetyTemperatureCache()
-        cache.record(31.5, at: recordedAt)
-
-        XCTAssertEqual(cache.recentValue(at: recordedAt.addingTimeInterval(15), maxAge: 15), 31.5)
-        XCTAssertNil(cache.recentValue(at: recordedAt.addingTimeInterval(15.001), maxAge: 15))
-        XCTAssertNil(cache.recentValue(at: recordedAt.addingTimeInterval(-1), maxAge: 15))
-        XCTAssertNil(cache.recentValue(at: recordedAt, maxAge: .infinity))
-
-        cache.clear()
-        XCTAssertNil(cache.recentValue(at: recordedAt, maxAge: 15))
-    }
 }

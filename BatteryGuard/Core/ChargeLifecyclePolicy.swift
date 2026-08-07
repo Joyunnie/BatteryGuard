@@ -9,30 +9,35 @@ enum ChargeShutdownPolicy: Equatable, Sendable {
 }
 
 struct ChargeShutdownContext: Equatable, Sendable {
-    let releasePending: Bool
-    let controlEnabled: Bool
+    let ownership: BatteryControlOwnership
     let mode: ChargeMode
     let effectiveLimit: Int
 }
 
 enum ChargeShutdownPlanningError: LocalizedError, Equatable, Sendable {
     case unsafeExternalState(ObservedChargeMode)
-    case releasedControlMismatch(String)
+    case releasedControlMismatch(BatteryControlStatus)
 
     var errorDescription: String? {
         switch self {
         case .unsafeExternalState(let observed):
             return "외부 CLI 변경 상태를 먼저 해결해야 안전하게 종료할 수 있습니다: \(observed.userDescription)"
-        case .releasedControlMismatch(let description):
-            return "BatteryGuard control was no longer released: \(description)"
+        case .releasedControlMismatch(let status):
+            return "BatteryGuard control was no longer released: \(status.diagnosticDescription)"
         }
     }
 }
 
 enum ChargeShutdownPlanner {
     static func requestedPolicy(for context: ChargeShutdownContext) throws -> ChargeShutdownPolicy {
-        if context.releasePending { return .releaseControl }
-        if !context.controlEnabled { return .preserveReleasedControl }
+        switch context.ownership {
+        case .releasing:
+            return .releaseControl
+        case .system:
+            return .preserveReleasedControl
+        case .batteryGuard:
+            break
+        }
 
         switch context.mode {
         case .controlDisabled:
@@ -51,7 +56,7 @@ enum ChargeShutdownPlanner {
                 )
             }
         case .heatBlocked, .failed(_, _, true):
-            return context.releasePending ? .releaseControl : .keepChargingDisabled
+            return .keepChargingDisabled
         case .externalDrift(_, let observed):
             switch observed {
             case .maintaining:
@@ -82,15 +87,15 @@ enum ChargeShutdownPlanner {
             return .keepChargingDisabled
         case .preserveReleasedControl:
             guard status.isCompatibleWithReleasedControl else {
-                throw ChargeShutdownPlanningError.releasedControlMismatch(
-                    status.diagnosticDescription
-                )
+                throw ChargeShutdownPlanningError.releasedControlMismatch(status)
             }
             return .preserveReleasedControl
         case .releaseControl:
             return .releaseControl
-        case .preserveMaintain, .restoreMaintain:
+        case .preserveMaintain:
             return .restoreMaintain(restoreLimit)
+        case .restoreMaintain(let recordedLimit):
+            return .restoreMaintain(recordedLimit)
         }
     }
 }

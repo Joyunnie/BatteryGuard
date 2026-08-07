@@ -30,6 +30,7 @@
 		BB000004 /* ChargeControllerSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100004 /* ChargeControllerSafetyTests.swift */; };
 		BB000005 /* ChargeLifecyclePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100005 /* ChargeLifecyclePolicyTests.swift */; };
 		BB000006 /* TestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100006 /* TestSupport.swift */; };
+		BB000007 /* SafetyTemperatureCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100007 /* SafetyTemperatureCacheTests.swift */; };
 		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -71,6 +72,7 @@
 		BB100004 /* ChargeControllerSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerSafetyTests.swift; sourceTree = "<group>"; };
 		BB100005 /* ChargeLifecyclePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeLifecyclePolicyTests.swift; sourceTree = "<group>"; };
 		BB100006 /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
+		BB100007 /* SafetyTemperatureCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyTemperatureCacheTests.swift; sourceTree = "<group>"; };
 		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -170,6 +172,7 @@
 				BB100005 /* ChargeLifecyclePolicyTests.swift */,
 				BB100003 /* ChargeReconciliationPolicyTests.swift */,
 				BB100006 /* TestSupport.swift */,
+				BB100007 /* SafetyTemperatureCacheTests.swift */,
 			);
 			path = BatteryGuardTests;
 			sourceTree = "<group>";
@@ -286,6 +289,7 @@
 				BB000005 /* ChargeLifecyclePolicyTests.swift in Sources */,
 				BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */,
 				BB000006 /* TestSupport.swift in Sources */,
+				BB000007 /* SafetyTemperatureCacheTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

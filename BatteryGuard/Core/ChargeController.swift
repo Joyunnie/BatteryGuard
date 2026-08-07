@@ -347,8 +347,7 @@ final class ChargeController: ObservableObject {
         do {
             requestedPolicy = try ChargeShutdownPlanner.requestedPolicy(
                 for: ChargeShutdownContext(
-                    releasePending: settings.batteryControlReleasePending,
-                    controlEnabled: settings.batteryControlEnabled,
+                    ownership: settings.batteryControlOwnership,
                     mode: modeBeforeShutdown,
                     effectiveLimit: requestedLimit
                 )
