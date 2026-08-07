@@ -367,7 +367,11 @@ final class ChargeReconciliationPolicyTests: XCTestCase {
                 expected: .controlReleased(lastLimit: 80),
                 observed: .charging
             ),
-            .failed(previous: .maintaining(limit: 80), message: "failed", controlsBlocked: false)
+            .failed(
+                previous: .maintaining(limit: 80),
+                message: "failed",
+                disposition: .recoverPrevious
+            )
         ]
         for mode in inactiveModes {
             XCTAssertNil(ChargeReconciliationPolicy.expectation(fromActiveMode: mode))

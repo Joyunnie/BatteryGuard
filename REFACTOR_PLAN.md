@@ -235,6 +235,26 @@ PR #9 혹독 리뷰에서 Boolean ownership 입력이 durable enum과 경쟁하�
 
 최종 자동 검증은 strict-concurrency complete와 warnings-as-errors에서 151개 테스트, Release build와 Debug analyze가 모두 통과했다. 이 PR은 실제 CLI나 하드웨어를 실행하지 않는다.
 
+### 0.17 PR #10 Heat Protection decision 분리 (2026-08-07)
+
+PR #9의 순수 subsystem 계약 위에서 Heat Protection의 temperature/ownership/mode/cooldown 판단을 I/O 없는 `HeatProtectionPolicy`로 분리한다.
+
+- 입력은 validated temperature 또는 unavailable, threshold, battery-info availability, 단일 `ChargeMode`, effective limit, durable `BatteryControlOwnership`, retry timestamp와 현재 시각이다.
+- 출력은 normalized temperature와 `none`, `enter(previous:)`, `restore(previous:)` 중 하나인 단일 action이다. controller는 sensor error 표시와 backend transition 실행만 담당한다.
+- BatteryGuard ownership이 아니면 hardware action을 만들지 않고, invalid/unavailable temperature는 BatteryGuard ownership에서 fail closed 한다. 2°C restore hysteresis, restore 중 재과열 re-block, failed-state retry cooldown과 battery-info requirement를 기존 계약 그대로 유지한다.
+- pure policy 테스트에서 invalid/unavailable sample, ownership, restorable mode, hysteresis, cooldown, in-flight restore와 release drift 경계를 검증한다. 실제 CLI와 하드웨어는 실행하지 않는다.
+
+### 0.18 PR #2~10 누적 리뷰 보완과 PR #11 범위 (2026-08-07)
+
+PR #2부터 #10까지의 현재 tree를 다시 검토해 failure 의미와 장기 작업 관측 수명을 강화한다.
+
+- `failed(previous:message:controlsBlocked:)`의 Boolean은 Heat Protection 실패, 이전 상태로 read-only 복구 가능한 실패와 하드웨어 상태가 불명인 실패를 서로 바꿔 해석할 수 있었다. 이를 `recoverPrevious`, `heatProtection`, `manualIntervention`의 typed disposition으로 교체한다.
+- 오직 Heat Protection disposition만 온도 policy의 자동 retry/restore와 charging-disabled reconciliation 대상이다. Top Up/Discharge 보상 실패, wake/quit cleanup 실패와 초기화 실패는 온도 샘플이 자동으로 Maintain/Top Up/Discharge를 재시작하지 못한다.
+- long-running process 생존 확인 task는 check generation과 controller operation generation을 함께 검증한다. shutdown, preemption 또는 새 operation 뒤에 끝난 stale probe는 mode를 바꾸거나 recovery를 시작하지 못한다.
+- strict-concurrency complete와 warnings-as-errors에서 161개 테스트, Release build와 Debug analyze가 통과했다. 실제 CLI와 하드웨어는 실행하지 않았다.
+
+이 보완은 기존 순서를 바꾸지 않는다. PR #11은 Top Up/Discharge 장기 작업의 순수 decision 계약을 별도 타입으로 추출한다. process liveness와 fresh status를 입력으로 받아 `none`, verified completion, safe Maintain recovery 또는 external drift를 구분하고, controller에는 task 소유권, backend I/O와 published state 적용만 남긴다. 시작/중지 명령 자체와 `BatteryCommandRunner`의 process ownership은 옮기지 않는다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -736,6 +756,9 @@ enum ChargeMode: Equatable {
 10. `[PR #8 완료]` 실제 CLI 계약에 맞춘 Discharge 검증 수정, 전체 자동 검증과 승인된 하드웨어 checklist
 11. `[PR #8 병합 전 보완]` 초기 preflight 실패 종료, sleep assertion 수명, LED best-effort cleanup, temperature cache freshness와 PID start identity 재검증
 12. `[PR #9 구현]` shutdown planning과 temperature freshness 계약 분리, 동일 경계에 맞춘 controller/policy 테스트 파일 분할
+13. `[PR #10 구현]` Heat Protection decision을 pure policy로 분리하고 ownership·hysteresis·cooldown·fail-closed 경계 테스트 추가
+14. `[PR #10 누적 리뷰 보완]` failure Boolean을 typed disposition으로 교체하고 stale long-running probe가 shutdown/new operation 뒤 상태를 바꾸지 못하게 generation 검증
+15. `[PR #11 예정]` Top Up/Discharge long-running exit decision을 pure policy로 분리하고 completion/recovery/drift 경계 테스트 추가
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 

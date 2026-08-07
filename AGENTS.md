@@ -23,13 +23,14 @@ IOKit readings ---+                    result + verified CLI status
 
 - IOKit is the source of truth for measurements; verified CLI status is the source of truth for charge control; UI state is derived from both.
 - Represent charge control with one mutually exclusive state enum, not independent booleans.
+- Represent failure recovery with a typed disposition. Only a Heat Protection failure may enter the automatic Heat retry/restore path; an uncertain hardware failure requires explicit recovery.
 - Use operation IDs/generations so stale async completions cannot overwrite newer intent.
 - Cancel the owning Swift task when preempting; stale work must not issue compensation or cleanup commands after newer safety intent starts.
 - Carry one semantic operation ID through controller transitions, CLI commands, verified status reads, and diagnostics; command/event IDs remain independently unique.
 - Give shared observable UI state explicit main-actor isolation; keep Core Data work on its configured context/queue.
 - Model asynchronous store readiness explicitly and await it; never use fixed sleeps as an initialization contract.
 - Keep abstractions minimal: use `ChargeBackend` plus an in-memory Core Data configuration; add a `BatteryHistoryStore` protocol only if a second implementation becomes necessary.
-- Keep the POSIX ownership journal implementation in `BatteryControlOwnershipJournal`; `UserSettings` retains ownership loading, transitions, and persistence errors. Keep tuple matching and observed-state interpretation in `ChargeReconciliationPolicy`, shutdown mapping in `ChargeShutdownPlanner`, temperature freshness in `SafetyTemperatureCache`, and state presentation in `ChargeState`. Hardware reads, task ownership, and published state remain in `ChargeController`.
+- Keep the POSIX ownership journal implementation in `BatteryControlOwnershipJournal`; `UserSettings` retains ownership loading, transitions, and persistence errors. Keep tuple matching and observed-state interpretation in `ChargeReconciliationPolicy`, shutdown mapping in `ChargeShutdownPlanner`, Heat Protection decisions in `HeatProtectionPolicy`, temperature freshness in `SafetyTemperatureCache`, and state presentation in `ChargeState`. Hardware reads, task ownership, and published state remain in `ChargeController`.
 - Reuse existing views, IOKit monitoring, and history code. Replace unsafe process/state internals incrementally; do not rewrite the app wholesale.
 
 ## Hardware and Command Safety
@@ -69,6 +70,7 @@ IOKit readings ---+                    result + verified CLI status
 - Compare the complete expected tuple after every reconciliation read. Surface mismatch as external drift, show the observed state, and lock conflicting controls; a failed or inconsistent status read is unknown, not stale success.
 - For Top Up and Discharge, require both the expected CLI tuple and a live BatteryGuard-owned process; a matching external command is drift, not success.
 - Revalidate the operation generation and expected mode after an async status read so stale reconciliation cannot overwrite wake or newer safety intent.
+- Own long-running liveness probes as cancellable tasks and validate both probe and operation generations after every await; a stale probe must not mutate shutdown or a later Top Up/Discharge session.
 - Show drift as expected versus observed state with an explicit read-only retry path; never hide the recovery target behind a disabled control.
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.

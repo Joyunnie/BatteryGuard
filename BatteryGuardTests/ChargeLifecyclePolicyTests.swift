@@ -50,6 +50,38 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
         XCTAssertEqual(heatBlocked, .keepChargingDisabled)
     }
 
+    func testFailureDispositionCannotBeReinterpretedByShutdownPlanning() throws {
+        let previous = RestorableChargeMode.maintaining(limit: 75)
+        let heatFailure = ChargeMode.failed(
+            previous: previous,
+            message: "heat transition failed",
+            disposition: .heatProtection
+        )
+        let uncertainFailure = ChargeMode.failed(
+            previous: previous,
+            message: "compensation failed",
+            disposition: .manualIntervention
+        )
+        let recoverableFailure = ChargeMode.failed(
+            previous: previous,
+            message: "command failed before mutation",
+            disposition: .recoverPrevious
+        )
+
+        XCTAssertEqual(
+            try requestedPolicy(for: heatFailure),
+            .keepChargingDisabled
+        )
+        XCTAssertEqual(
+            try requestedPolicy(for: uncertainFailure),
+            .restoreMaintain(75)
+        )
+        XCTAssertEqual(
+            try requestedPolicy(for: recoverableFailure),
+            .preserveMaintain
+        )
+    }
+
     func testUnsafeExternalStateIsRejectedBeforeShutdownMutation() {
         XCTAssertThrowsError(
             try ChargeShutdownPlanner.requestedPolicy(
@@ -166,6 +198,16 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
                 requested: .preserveReleasedControl,
                 status: externalDischarge,
                 restoreLimit: 80
+            )
+        )
+    }
+
+    private func requestedPolicy(for mode: ChargeMode) throws -> ChargeShutdownPolicy {
+        try ChargeShutdownPlanner.requestedPolicy(
+            for: ChargeShutdownContext(
+                ownership: .batteryGuard(lastLimit: 80),
+                mode: mode,
+                effectiveLimit: 80
             )
         )
     }

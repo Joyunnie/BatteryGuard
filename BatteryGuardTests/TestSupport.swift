@@ -86,6 +86,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var ledDelayByRawValue: [UInt8: TimeInterval] = [:]
     private var controlStatusOverride: BatteryControlStatus?
     private var controlStatusDelayValue: TimeInterval = 0
+    private var longRunningProbeDelayValue: TimeInterval = 0
 
     var operations: [String] {
         lock.lock()
@@ -177,6 +178,10 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func setOwnedLongRunningOperation(_ isActive: Bool) {
         setLongRunning(isActive)
+    }
+
+    func setLongRunningProbeDelay(_ delay: TimeInterval) {
+        lock.withLock { longRunningProbeDelayValue = delay }
     }
 
     func open() async throws {
@@ -275,7 +280,16 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         }
     }
 
-    func isLongRunningOperationActive() async -> Bool { longRunningActive }
+    func isLongRunningOperationActive() async -> Bool {
+        let probe = lock.withLock { () -> (Bool, TimeInterval) in
+            recordedOperations.append("check-long-running")
+            return (longRunning, longRunningProbeDelayValue)
+        }
+        if probe.1 > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(probe.1 * 1_000_000_000))
+        }
+        return probe.0
+    }
 
     func longRunningOperationResult() async -> BatteryCommandResult? { nil }
 
