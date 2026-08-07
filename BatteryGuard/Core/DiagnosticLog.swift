@@ -209,14 +209,23 @@ actor DiagnosticLog {
     nonisolated let fileURL: URL?
 
     private let capacity: Int
+    private let routineFlushInterval: TimeInterval
     private var events: [DiagnosticEvent]
     private var hasLoadedFromDisk = false
+    private var routineFlushTask: Task<Void, Never>?
     private(set) var persistenceError: String?
     private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "Diagnostics")
 
-    init(fileURL: URL?, capacity: Int = 100) {
+    init(
+        fileURL: URL?,
+        capacity: Int = 100,
+        routineFlushInterval: TimeInterval = 30
+    ) {
         self.fileURL = fileURL
         self.capacity = max(0, capacity)
+        self.routineFlushInterval = routineFlushInterval.isFinite
+            ? max(0, routineFlushInterval)
+            : 30
         self.events = []
     }
 
@@ -224,16 +233,11 @@ actor DiagnosticLog {
         guard capacity > 0 else { return }
         loadFromDiskIfNeeded()
         events.append(event)
-        events.sort {
-            if $0.timestamp == $1.timestamp { return $0.id.uuidString < $1.id.uuidString }
-            return $0.timestamp < $1.timestamp
-        }
         events = Self.retainedEvents(events, capacity: capacity)
-        do {
-            try persist()
-        } catch {
-            persistenceError = error.localizedDescription
-            logger.error("Write failed: \(error.localizedDescription, privacy: .public)")
+        if event.retentionPriority == .routine, routineFlushInterval > 0 {
+            scheduleRoutineFlushIfNeeded()
+        } else {
+            persistImmediately(operation: "Write")
         }
     }
 
@@ -254,6 +258,8 @@ actor DiagnosticLog {
                 NSLocalizedDescriptionKey: "진단 로그를 저장하지 못했습니다: \(persistenceError)"
             ])
         }
+        routineFlushTask?.cancel()
+        routineFlushTask = nil
         do {
             try persist()
             return fileURL
@@ -261,6 +267,42 @@ actor DiagnosticLog {
             persistenceError = error.localizedDescription
             logger.error("Prepare for viewing failed: \(error.localizedDescription, privacy: .public)")
             throw error
+        }
+    }
+
+    func flushPendingEvents() {
+        routineFlushTask?.cancel()
+        routineFlushTask = nil
+        persistImmediately(operation: "Flush")
+    }
+
+    private func scheduleRoutineFlushIfNeeded() {
+        guard fileURL != nil, routineFlushTask == nil else { return }
+        let nanoseconds = UInt64(min(routineFlushInterval * 1_000_000_000, Double(UInt64.max)))
+        routineFlushTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await self?.flushScheduledRoutineEvents()
+        }
+    }
+
+    private func flushScheduledRoutineEvents() {
+        routineFlushTask = nil
+        persistImmediately(operation: "Scheduled flush")
+    }
+
+    private func persistImmediately(operation: String) {
+        routineFlushTask?.cancel()
+        routineFlushTask = nil
+        do {
+            try persist()
+        } catch {
+            persistenceError = error.localizedDescription
+            logger.error("\(operation, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

@@ -78,8 +78,62 @@ final class DiagnosticLogTests: XCTestCase {
             ]
         )
 
+        await log.flushPendingEvents()
         let reloadedEvents = await DiagnosticLog(fileURL: fileURL, capacity: 4).recentEvents()
         XCTAssertEqual(reloadedEvents.map(\.operation), events.map(\.operation))
+    }
+
+    func testRoutineEventsAreCoalescedUntilExplicitFlush() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-diagnostic-batch-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 100, routineFlushInterval: 60)
+
+        for index in 0..<10 {
+            await log.record(
+                DiagnosticEvent(
+                    category: .command,
+                    operation: "routine-\(index)",
+                    exitCode: 0,
+                    outcome: .exited
+                )
+            )
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        await log.flushPendingEvents()
+
+        let reloaded = await DiagnosticLog(fileURL: fileURL, capacity: 100).recentEvents()
+        XCTAssertEqual(reloaded.count, 10)
+    }
+
+    func testSafetyEventImmediatelyFlushesPendingRoutineEvents() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-diagnostic-safety-flush-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 10, routineFlushInterval: 60)
+
+        await log.record(
+            DiagnosticEvent(
+                timestamp: Date(timeIntervalSince1970: 0),
+                category: .command,
+                operation: "routine",
+                exitCode: 0,
+                outcome: .exited
+            )
+        )
+        await log.record(
+            DiagnosticEvent(
+                timestamp: Date(timeIntervalSince1970: 1),
+                category: .lifecycle,
+                operation: "safety boundary"
+            )
+        )
+
+        let reloaded = await DiagnosticLog(fileURL: fileURL, capacity: 10).recentEvents()
+        XCTAssertEqual(reloaded.map(\.operation), ["routine", "safety boundary"])
     }
 
     func testCommandRunnerRecordsStructuredFailureDetails() async throws {
@@ -253,6 +307,7 @@ final class DiagnosticLogTests: XCTestCase {
                 )
             )
         }
+        await log.flushPendingEvents()
 
         let events = await log.recentEvents()
         let persistenceError = await log.persistenceError
