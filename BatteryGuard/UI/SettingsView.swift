@@ -125,7 +125,7 @@ struct SettingsView: View {
             }
 
             Section("정보") {
-                Text("충전 제어는 battery CLI를 통해 관리됩니다. maintain 모드는 sleep/재부팅 후에도 유지됩니다.")
+                Text("충전 제어는 battery CLI를 통해 관리됩니다. Maintain worker는 시스템 잠자기 동안 실행되지 않으므로 아래 잠자기 보호가 충전을 별도로 중지합니다.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
@@ -134,6 +134,31 @@ struct SettingsView: View {
 
     private var protectionSettings: some View {
         Form {
+            Section("잠자기 충전 보호") {
+                Picker(
+                    "동작",
+                    selection: Binding(
+                        get: { settings.sleepChargingStrategy },
+                        set: { controller.setSleepChargingStrategy($0) }
+                    )
+                ) {
+                    ForEach(SleepChargingStrategy.allCases, id: \.self) { strategy in
+                        Text(strategy.title).tag(strategy)
+                    }
+                }
+                .disabled(controller.isBatteryControlDisabled || controller.isCommandPending)
+
+                if let description = controller.sleepProtectionState.userDescription {
+                    Text(description)
+                        .font(.system(size: 11))
+                        .foregroundColor(sleepProtectionColor)
+                }
+
+                Text("잠자기 직전에 Top Up/Discharge를 중단하고 충전 비활성을 검증합니다. 실제 Mac에서 동작을 확인한 뒤 활성화하세요. 시스템이 이미 잠자기를 시작한 뒤에는 실패를 되돌릴 수 없습니다.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+
             Section("열 보호") {
                 Toggle(
                     "열 보호 활성화",
@@ -270,5 +295,10 @@ struct SettingsView: View {
         case .unknown(let value):
             return "로그인 항목 상태를 확인할 수 없습니다 (\(value))."
         }
+    }
+
+    private var sleepProtectionColor: Color {
+        if case .unavailable = controller.sleepProtectionState { return .red }
+        return .secondary
     }
 }

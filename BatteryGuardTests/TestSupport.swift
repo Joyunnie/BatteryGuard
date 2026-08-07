@@ -84,6 +84,44 @@ final class FakeLaunchAtLoginService: LaunchAtLoginManaging {
     }
 }
 
+@MainActor
+final class FakeSystemPowerObserver: SystemPowerObserving {
+    var startError: Error?
+    var requiresChargingDisabledForSleepTransition = false
+    private(set) var didStart = false
+    private(set) var didStop = false
+    private var sleepHandler: (@MainActor (UInt64) async -> Bool)?
+    private var wakeHandler: (@MainActor () -> Void)?
+
+    func start(
+        willSleep: @escaping @MainActor (UInt64) async -> Bool,
+        didWake: @escaping @MainActor () -> Void
+    ) throws {
+        if let startError { throw startError }
+        didStart = true
+        sleepHandler = willSleep
+        wakeHandler = didWake
+    }
+
+    func stop() {
+        didStop = true
+        sleepHandler = nil
+        wakeHandler = nil
+        requiresChargingDisabledForSleepTransition = false
+    }
+
+    func resolvePendingSleepRequestsForShutdown() {
+    }
+
+    func sendSleep() async -> Bool {
+        await sleepHandler?(UInt64.max) ?? true
+    }
+
+    func sendWake() {
+        wakeHandler?()
+    }
+}
+
 final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private let lock = NSLock()
     private var recordedOperations: [String] = []
@@ -349,6 +387,39 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
             }
         }
         setLongRunning(false)
+    }
+
+    func prepareForSystemSleep(
+        deadlineUptimeNanoseconds: UInt64?
+    ) async throws -> BatteryControlStatus {
+        try record("prepare-system-sleep")
+        let delay = lock.withLock {
+            (cancelLongRunningDelayValue, ignoresCancelLongRunningCancellation)
+        }
+        if delay.0 > 0 {
+            if delay.1 {
+                await Task.detached {
+                    try? await Task.sleep(nanoseconds: UInt64(delay.0 * 1_000_000_000))
+                }.value
+            } else {
+                try await Task.sleep(nanoseconds: UInt64(delay.0 * 1_000_000_000))
+            }
+        }
+        if let error = lock.withLock({ failures["prepare-system-sleep"] }) {
+            throw error
+        }
+        if let deadlineUptimeNanoseconds,
+           DispatchTime.now().uptimeNanoseconds >= deadlineUptimeNanoseconds {
+            throw BatteryError.commandFailed("prepare system sleep", -1, "deadline exceeded")
+        }
+        setLongRunning(false)
+        lock.withLock {
+            guard controlStatusOverride == nil else { return }
+            chargingStatus = .disabled
+            discharging = false
+            maintainWorkerRunning = false
+        }
+        return try await readControlStatus()
     }
 
     func requestCancellation() async throws {

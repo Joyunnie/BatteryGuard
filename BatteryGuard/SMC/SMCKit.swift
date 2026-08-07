@@ -175,6 +175,9 @@ protocol ChargeBackend: AnyObject, Sendable {
     func applyMaintain(level: Int) async throws
     func releaseBatteryGuardControl() async throws
     func disableCharging() async throws
+    func prepareForSystemSleep(
+        deadlineUptimeNanoseconds: UInt64?
+    ) async throws -> BatteryControlStatus
     func startDischarge(to level: Int) async throws
     func startTopUp(to level: Int) async throws
     func isLongRunningOperationActive() async -> Bool
@@ -456,6 +459,50 @@ actor SMCKit: ChargeBackend {
         }
     }
 
+    func prepareForSystemSleep(
+        deadlineUptimeNanoseconds: UInt64?
+    ) async throws -> BatteryControlStatus {
+        let operationID = DiagnosticContext.operationID ?? UUID()
+        return try await DiagnosticContext.$operationID.withValue(operationID) {
+            // Cancel the shared runner before entering the semantic gate so an
+            // in-flight Top Up/Discharge cannot hold the gate indefinitely.
+            try await runner.cancelAll()
+            try ensureSleepPreparationDeadline(deadlineUptimeNanoseconds)
+            return try await withGate(controlGate) {
+                try ensureSleepPreparationDeadline(deadlineUptimeNanoseconds)
+                let before = await readPreOperationStatus(
+                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                )
+                try await terminateMaintainWorkersUnlocked(
+                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                )
+                _ = try await batteryCommand(
+                    ["charging", "off"],
+                    timeout: try boundedSleepPreparationTimeout(
+                        maximum: 8,
+                        deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                    )
+                )
+                let status = try await readControlStatusUnlocked(
+                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                )
+                guard status.isVerifiedChargingDisabled else {
+                    throw BatteryError.commandFailed(
+                        "prepare battery for system sleep",
+                        -1,
+                        "status_csv did not confirm fully disabled control: \(status.diagnosticDescription)"
+                    )
+                }
+                await recordVerifiedOperation(
+                    "prepare battery for system sleep",
+                    before: before,
+                    after: status
+                )
+                return status
+            }
+        }
+    }
+
     private func disableChargingUnlocked() async throws {
         let before = await readPreOperationStatus()
         try await terminateMaintainWorkersUnlocked()
@@ -535,12 +582,22 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private func readControlStatusUnlocked() async throws -> BatteryControlStatus {
-        let result = try await batteryCommand(["status_csv"], timeout: statusCommandTimeout)
+    private func readControlStatusUnlocked(
+        deadlineUptimeNanoseconds: UInt64? = nil
+    ) async throws -> BatteryControlStatus {
+        let result = try await batteryCommand(
+            ["status_csv"],
+            timeout: try boundedSleepPreparationTimeout(
+                maximum: statusCommandTimeout,
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            )
+        )
         guard let parsedStatus = Self.parseControlStatus(csv: result.stdout) else {
             throw BatteryError.unsupported("Installed battery CLI returned an unsupported status_csv format")
         }
-        let workerStatus = try await readMaintainWorkerStatusUnlocked()
+        let workerStatus = try await readMaintainWorkerStatusUnlocked(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
         return BatteryControlStatus(
             charging: parsedStatus.charging,
             isDischarging: parsedStatus.isDischarging,
@@ -549,7 +606,9 @@ actor SMCKit: ChargeBackend {
         )
     }
 
-    private func readMaintainWorkerStatusUnlocked() async throws -> MaintainWorkerStatus {
+    private func readMaintainWorkerStatusUnlocked(
+        deadlineUptimeNanoseconds: UInt64? = nil
+    ) async throws -> MaintainWorkerStatus {
         if let maintainWorkerProbe {
             return try await maintainWorkerProbe(maintainPIDFilePath, batteryPath)
         }
@@ -557,7 +616,9 @@ actor SMCKit: ChargeBackend {
         do {
             return Self.classifyMaintainWorkers(
                 pidFilePID: try readMaintainPIDFile(),
-                workers: try await currentMaintainWorkersUnlocked()
+                workers: try await currentMaintainWorkersUnlocked(
+                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                )
             )
         } catch {
             return .unknown
@@ -641,8 +702,12 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private func terminateMaintainWorkersUnlocked() async throws {
-        let workers = try await currentMaintainWorkersUnlocked()
+    private func terminateMaintainWorkersUnlocked(
+        deadlineUptimeNanoseconds: UInt64? = nil
+    ) async throws {
+        let workers = try await currentMaintainWorkersUnlocked(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
         guard !workers.isEmpty else {
             if try readMaintainPIDFile() != nil {
                 try FileManager.default.removeItem(atPath: maintainPIDFilePath)
@@ -660,8 +725,11 @@ actor SMCKit: ChargeBackend {
                 )
             }
         }
+        try ensureSleepPreparationDeadline(deadlineUptimeNanoseconds)
         try await Task.sleep(nanoseconds: 250_000_000)
-        let remainingAfterTerm = try await currentMaintainWorkersUnlocked()
+        let remainingAfterTerm = try await currentMaintainWorkersUnlocked(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
         for worker in remainingAfterTerm where workers.contains(worker) {
             guard try currentIdentity(for: worker.pid) == worker.identity else { continue }
             guard Darwin.kill(worker.pid, SIGKILL) == 0 || errno == ESRCH else {
@@ -672,8 +740,11 @@ actor SMCKit: ChargeBackend {
                 )
             }
         }
+        try ensureSleepPreparationDeadline(deadlineUptimeNanoseconds)
         try await Task.sleep(nanoseconds: 100_000_000)
-        let currentWorkers = try await currentMaintainWorkersUnlocked()
+        let currentWorkers = try await currentMaintainWorkersUnlocked(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
         let survivors = currentWorkers.filter { current in
             workers.contains(current)
         }
@@ -689,47 +760,63 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private func currentMaintainWorkersUnlocked() async throws -> [MaintainWorkerProcess] {
+    private func currentMaintainWorkersUnlocked(
+        deadlineUptimeNanoseconds: UInt64? = nil
+    ) async throws -> [MaintainWorkerProcess] {
         let escapedPath = NSRegularExpression.escapedPattern(for: batteryPath)
         let candidates = try await runProcess(
             executable: "/usr/bin/pgrep",
             arguments: ["-f", escapedPath],
             label: "locate battery CLI processes",
-            timeout: statusCommandTimeout,
+            timeout: try boundedSleepPreparationTimeout(
+                maximum: statusCommandTimeout,
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            ),
             allowedExitCodes: [0, 1]
         )
         guard candidates.exitCode == 0 else { return [] }
 
-        var workers: [MaintainWorkerProcess] = []
-        for line in candidates.stdout.split(whereSeparator: \Character.isNewline) {
-            guard let pid = Int32(line.trimmingCharacters(in: .whitespacesAndNewlines)),
-                  pid > 1,
-                  pid != getpid() else { continue }
-            let inspection = try await runProcess(
-                executable: "/bin/ps",
-                arguments: ["-p", String(pid), "-o", "pid=,pgid=,command="],
-                label: "inspect battery CLI process \(pid)",
-                timeout: statusCommandTimeout,
-                allowedExitCodes: [0, 1]
+        let candidatePIDs = candidates.stdout
+            .split(whereSeparator: \Character.isNewline)
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { $0 > 1 && $0 != getpid() }
+        guard candidatePIDs.count <= 32 else {
+            throw BatteryError.commandFailed(
+                "inspect battery CLI processes",
+                -1,
+                "refusing unbounded process inspection: \(candidatePIDs.count) candidates"
             )
-            guard inspection.exitCode == 0 else { continue }
-            let parsedWorkers = Self.parseMaintainWorkerProcesses(
-                processTable: inspection.stdout,
-                batteryPath: batteryPath
-            )
-            for worker in parsedWorkers {
-                guard let identity = try currentIdentity(for: worker.pid) else { continue }
-                workers.append(
-                    MaintainWorkerProcess(
-                        pid: worker.pid,
-                        command: worker.command,
-                        target: worker.target,
-                        identity: identity
-                    )
-                )
-            }
         }
-        return workers
+        guard !candidatePIDs.isEmpty else { return [] }
+
+        let inspection = try await runProcess(
+            executable: "/bin/ps",
+            arguments: [
+                "-p",
+                candidatePIDs.map(String.init).joined(separator: ","),
+                "-o",
+                "pid=,pgid=,command="
+            ],
+            label: "inspect battery CLI processes",
+            timeout: try boundedSleepPreparationTimeout(
+                maximum: statusCommandTimeout,
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            ),
+            allowedExitCodes: [0, 1]
+        )
+        guard inspection.exitCode == 0 else { return [] }
+        return try Self.parseMaintainWorkerProcesses(
+            processTable: inspection.stdout,
+            batteryPath: batteryPath
+        ).compactMap { worker in
+            guard let identity = try currentIdentity(for: worker.pid) else { return nil }
+            return MaintainWorkerProcess(
+                pid: worker.pid,
+                command: worker.command,
+                target: worker.target,
+                identity: identity
+            )
+        }
     }
 
     private func currentIdentity(for pid: Int32) throws -> ProcessIdentity? {
@@ -971,6 +1058,31 @@ actor SMCKit: ChargeBackend {
         ]
     }
 
+    private func ensureSleepPreparationDeadline(_ deadlineUptimeNanoseconds: UInt64?) throws {
+        guard let deadlineUptimeNanoseconds else { return }
+        guard DispatchTime.now().uptimeNanoseconds < deadlineUptimeNanoseconds else {
+            throw BatteryError.commandFailed(
+                "prepare battery for system sleep",
+                -1,
+                "the end-to-end IOKit acknowledgement deadline expired"
+            )
+        }
+    }
+
+    private func boundedSleepPreparationTimeout(
+        maximum: TimeInterval,
+        deadlineUptimeNanoseconds: UInt64?
+    ) throws -> TimeInterval {
+        guard let deadlineUptimeNanoseconds else { return maximum }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard deadlineUptimeNanoseconds > now else {
+            try ensureSleepPreparationDeadline(deadlineUptimeNanoseconds)
+            return maximum
+        }
+        let remaining = TimeInterval(deadlineUptimeNanoseconds - now) / 1_000_000_000
+        return min(maximum, remaining)
+    }
+
     private func batteryCommand(
         _ arguments: [String],
         timeout: TimeInterval = 30,
@@ -1119,9 +1231,13 @@ actor SMCKit: ChargeBackend {
         )
     }
 
-    private func readPreOperationStatus() async -> BatteryControlStatus? {
+    private func readPreOperationStatus(
+        deadlineUptimeNanoseconds: UInt64? = nil
+    ) async -> BatteryControlStatus? {
         guard executableTrustPolicy == .production else { return nil }
-        return try? await readControlStatusUnlocked()
+        return try? await readControlStatusUnlocked(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
     }
 
     #if DEBUG

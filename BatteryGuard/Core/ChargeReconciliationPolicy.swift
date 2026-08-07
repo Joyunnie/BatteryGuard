@@ -26,7 +26,7 @@ enum ChargeReconciliationPolicy {
         case .discharging:
             return snapshot.ownedLongRunningOperation == .active &&
                 status.isVerifiedDischarging
-        case .chargingDisabled:
+        case .chargingDisabled, .sleepProtected:
             return status.isVerifiedChargingDisabled
         case .controlReleasing:
             return false

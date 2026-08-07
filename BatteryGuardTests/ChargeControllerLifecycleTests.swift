@@ -46,7 +46,7 @@ extension ChargeControllerSafetyTests {
         XCTAssertFalse(controller.hasExternalControlDrift)
     }
 
-    func testStaleReconciliationCannotOverwriteWakeRecovery() async {
+    func testWakeInvalidatesStaleReconciliationAndPreservesObservedDrift() async {
         let backend = FakeChargeBackend()
         let info = makeBatteryInfo(charge: 80)
         let monitor = BatteryMonitor(
@@ -83,8 +83,14 @@ extension ChargeControllerSafetyTests {
         await controller.reconcileAfterWake()
         await reconciliation.value
 
-        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
-        XCTAssertFalse(controller.hasExternalControlDrift)
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(
+                expected: .maintaining(limit: 80),
+                observed: .maintaining(limit: 60)
+            )
+        )
+        XCTAssertTrue(controller.hasExternalControlDrift)
     }
 
     func testExternalActiveOperationRejectsShutdownWithoutDisablingController() async throws {
@@ -227,7 +233,7 @@ extension ChargeControllerSafetyTests {
         XCTAssertFalse(backend.operations.contains("stop-maintain"))
     }
 
-    func testWakeReconciliationSupersedesAnInFlightMaintainCompletion() async {
+    func testWakeAwaitsAnInFlightMaintainCompletionBeforeReconciling() async {
         let backend = FakeChargeBackend()
         backend.maintainDelay = 0.25
         let info = makeBatteryInfo(charge: 80, temperature: 30)
@@ -252,10 +258,10 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(maintainStarted)
         await controller.reconcileAfterWake()
 
-        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertEqual(controller.mode, .maintaining(limit: 60))
         XCTAssertEqual(controller.readiness, .ready)
         XCTAssertFalse(controller.isCommandPending)
-        XCTAssertEqual(backend.operations.last(where: { $0.hasPrefix("maintain:") }), "maintain:80")
+        XCTAssertEqual(backend.operations.last(where: { $0.hasPrefix("maintain:") }), "maintain:60")
     }
 
     func testShutdownFailureDoesNotPretendCleanupSucceeded() async throws {

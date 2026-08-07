@@ -53,6 +53,7 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
     case toppingUp(returnLimit: Int)
     case discharging(target: Int, returnLimit: Int)
     case chargingDisabled(previous: RestorableChargeMode)
+    case sleepProtected(previous: RestorableChargeMode)
     case controlReleasing(lastLimit: Int)
     case controlReleased(lastLimit: Int)
 
@@ -62,7 +63,7 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
         case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
         case .discharging(let target, let returnLimit):
             return .discharging(target: target, returnLimit: returnLimit)
-        case .chargingDisabled(let previous): return previous
+        case .chargingDisabled(let previous), .sleepProtected(let previous): return previous
         case .controlReleasing(let lastLimit), .controlReleased(let lastLimit):
             return .maintaining(limit: lastLimit)
         }
@@ -76,6 +77,8 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
             return "discharging(target:\(target),returnLimit:\(returnLimit))"
         case .chargingDisabled(let previous):
             return "chargingDisabled(previous:\(previous.diagnosticLabel))"
+        case .sleepProtected(let previous):
+            return "sleepProtected(previous:\(previous.diagnosticLabel))"
         case .controlReleasing(let lastLimit):
             return "controlReleasing(lastLimit:\(lastLimit))"
         case .controlReleased(let lastLimit):
@@ -88,7 +91,8 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
         case .maintaining(let limit): return "Maintain \(limit)%"
         case .toppingUp: return "Top Up"
         case .discharging(let target, _): return "Discharge \(target)%"
-        case .chargingDisabled: return "충전 비활성"
+        case .chargingDisabled: return "열 보호로 충전 비활성"
+        case .sleepProtected: return "잠자기 보호로 충전 비활성"
         case .controlReleasing: return "BatteryGuard 제어 해제 미완료"
         case .controlReleased: return "BatteryGuard 제어 끔"
         }
@@ -107,6 +111,7 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
         case .discharging(let target, let returnLimit):
             return .discharging(target: target, returnLimit: returnLimit)
         case .chargingDisabled(let previous): return .heatBlocked(previous: previous)
+        case .sleepProtected(let previous): return .sleepProtected(previous: previous, charge: nil)
         }
     }
 }
@@ -162,6 +167,7 @@ enum ChargeTransition: Equatable {
     case stoppingDischarge(returnLimit: Int)
     case enteringHeat(previous: RestorableChargeMode)
     case restoringHeat(previous: RestorableChargeMode)
+    case preparingForSleep(previous: RestorableChargeMode)
     case recoveringMaintain(limit: Int)
     case releasingControl(previous: RestorableChargeMode?)
 
@@ -174,7 +180,7 @@ enum ChargeTransition: Equatable {
             return .maintaining(limit: limit)
         case .stoppingDischarge(let limit):
             return .maintaining(limit: limit)
-        case .enteringHeat(let previous), .restoringHeat(let previous):
+        case .enteringHeat(let previous), .restoringHeat(let previous), .preparingForSleep(let previous):
             return previous
         case .releasingControl(let previous): return previous
         }
@@ -191,6 +197,7 @@ enum ChargeTransition: Equatable {
         case .stoppingDischarge(let returnLimit): return "stoppingDischarge(returnLimit:\(returnLimit))"
         case .enteringHeat(let previous): return "enteringHeat(previous:\(previous.diagnosticLabel))"
         case .restoringHeat(let previous): return "restoringHeat(previous:\(previous.diagnosticLabel))"
+        case .preparingForSleep(let previous): return "preparingForSleep(previous:\(previous.diagnosticLabel))"
         case .recoveringMaintain(let limit): return "recoveringMaintain(limit:\(limit))"
         case .releasingControl(let previous):
             return "releasingControl(previous:\(previous?.diagnosticLabel ?? "none"))"
@@ -204,6 +211,7 @@ enum ChargeMode: Equatable {
     case toppingUp(returnLimit: Int)
     case discharging(target: Int, returnLimit: Int)
     case heatBlocked(previous: RestorableChargeMode)
+    case sleepProtected(previous: RestorableChargeMode, charge: Int?)
     case controlDisabled(lastLimit: Int)
     case transitioning(ChargeTransition)
     case externalDrift(expected: ReconciledChargeExpectation, observed: ObservedChargeMode)
@@ -220,6 +228,7 @@ enum ChargeMode: Equatable {
         case .discharging(let target, let returnLimit):
             return .discharging(target: target, returnLimit: returnLimit)
         case .heatBlocked(let previous): return previous
+        case .sleepProtected(let previous, _): return previous
         case .transitioning(let transition): return transition.previousMode
         case .externalDrift(let expected, _): return expected.restorableMode
         case .failed(let previous, _, _): return previous
@@ -235,6 +244,8 @@ enum ChargeMode: Equatable {
         case .discharging(let target, let returnLimit):
             return "discharging(target:\(target),returnLimit:\(returnLimit))"
         case .heatBlocked(let previous): return "heatBlocked(previous:\(previous.diagnosticLabel))"
+        case .sleepProtected(let previous, let charge):
+            return "sleepProtected(previous:\(previous.diagnosticLabel),charge:\(charge.map(String.init) ?? "unknown"))"
         case .controlDisabled(let lastLimit): return "controlDisabled(lastLimit:\(lastLimit))"
         case .transitioning(let transition): return "transitioning(\(transition.diagnosticLabel))"
         case .externalDrift(let expected, let observed):

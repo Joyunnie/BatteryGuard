@@ -58,11 +58,19 @@ final class UserSettingsTests: XCTestCase {
 
         XCTAssertEqual(settings.chargeLimit, 80)
         XCTAssertEqual(settings.heatProtectionThreshold, 40)
+        XCTAssertEqual(settings.sleepChargingStrategy, .disabled)
 
         settings.chargeLimit = 65
         settings.heatProtectionThreshold = 35
         XCTAssertEqual(defaults.integer(forKey: "chargeLimit"), 65)
         XCTAssertEqual(defaults.double(forKey: "heatThreshold"), 35)
+
+        settings.sleepChargingStrategy = .pauseOnSleep
+        let reloaded = UserSettings(
+            defaults: defaults,
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        XCTAssertEqual(reloaded.sleepChargingStrategy, .pauseOnSleep)
     }
 
     func testInvalidValuesAreClampedBeforePublicationAndPersistence() {
