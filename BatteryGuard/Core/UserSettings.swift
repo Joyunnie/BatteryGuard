@@ -141,6 +141,9 @@ final class UserSettings: ObservableObject {
     @Published var controlMagSafeLED: Bool {
         didSet { defaults.set(controlMagSafeLED, forKey: "controlMagSafe") }
     }
+    @Published var sleepChargingStrategy: SleepChargingStrategy {
+        didSet { defaults.set(sleepChargingStrategy.rawValue, forKey: "sleepChargingStrategy") }
+    }
 
     init(
         defaults: UserDefaults = .standard,
@@ -166,6 +169,9 @@ final class UserSettings: ObservableObject {
         self.launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
         self.heatProtectionEnabled = defaults.bool(forKey: "heatProtection")
         self.controlMagSafeLED = defaults.bool(forKey: "controlMagSafe")
+        self.sleepChargingStrategy = defaults.string(forKey: "sleepChargingStrategy")
+            .flatMap(SleepChargingStrategy.init(rawValue:))
+            ?? .pauseOnSleep
 
         let journalURL: URL?
         let journalResolutionError: String?

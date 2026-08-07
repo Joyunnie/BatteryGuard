@@ -46,7 +46,7 @@ enum ChargeShutdownPlanner {
             return .restoreMaintain(limit)
         case .transitioning(let transition):
             switch transition {
-            case .enteringHeat, .restoringHeat:
+            case .enteringHeat, .restoringHeat, .preparingForSleep:
                 return .keepChargingDisabled
             case .releasingControl:
                 return .releaseControl
@@ -55,7 +55,7 @@ enum ChargeShutdownPlanner {
                     transition.previousMode?.maintainLimit ?? context.effectiveLimit
                 )
             }
-        case .heatBlocked, .failed(_, _, .heatProtection):
+        case .heatBlocked, .sleepProtected, .failed(_, _, .heatProtection):
             return .keepChargingDisabled
         case .failed(let previous, _, .manualIntervention):
             return .restoreMaintain(previous?.maintainLimit ?? context.effectiveLimit)

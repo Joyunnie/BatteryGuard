@@ -27,6 +27,9 @@
 		AA000027 /* SafetyTemperatureCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100027 /* SafetyTemperatureCache.swift */; };
 		AA000028 /* HeatProtectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100028 /* HeatProtectionPolicy.swift */; };
 		AA000029 /* LongRunningChargePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100029 /* LongRunningChargePolicy.swift */; };
+		AA000030 /* SleepChargingProtection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100030 /* SleepChargingProtection.swift */; };
+		AA000031 /* SystemSleepInhibitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100031 /* SystemSleepInhibitor.swift */; };
+		AA000032 /* SystemPowerObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100032 /* SystemPowerObserver.swift */; };
 		BB000001 /* ChargeStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* ChargeStateTests.swift */; };
 		BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100003 /* ChargeReconciliationPolicyTests.swift */; };
 		BB000004 /* ChargeControllerSafetyTestCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100004 /* ChargeControllerSafetyTestCase.swift */; };
@@ -50,6 +53,7 @@
 		BB000022 /* ChargeControllerLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100022 /* ChargeControllerLifecycleTests.swift */; };
 		BB000023 /* ChargeControllerOwnershipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100023 /* ChargeControllerOwnershipTests.swift */; };
 		BB000024 /* ChargeControllerTemperatureSamplingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100024 /* ChargeControllerTemperatureSamplingTests.swift */; };
+		BB000025 /* SleepChargingProtectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100025 /* SleepChargingProtectionTests.swift */; };
 		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -87,6 +91,9 @@
 		AA100027 /* SafetyTemperatureCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyTemperatureCache.swift; sourceTree = "<group>"; };
 		AA100028 /* HeatProtectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeatProtectionPolicy.swift; sourceTree = "<group>"; };
 		AA100029 /* LongRunningChargePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongRunningChargePolicy.swift; sourceTree = "<group>"; };
+		AA100030 /* SleepChargingProtection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepChargingProtection.swift; sourceTree = "<group>"; };
+		AA100031 /* SystemSleepInhibitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemSleepInhibitor.swift; sourceTree = "<group>"; };
+		AA100032 /* SystemPowerObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPowerObserver.swift; sourceTree = "<group>"; };
 		BB100001 /* ChargeStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeStateTests.swift; sourceTree = "<group>"; };
 		BB100002 /* BatteryGuardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BatteryGuardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB100003 /* ChargeReconciliationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeReconciliationPolicyTests.swift; sourceTree = "<group>"; };
@@ -111,6 +118,7 @@
 		BB100022 /* ChargeControllerLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerLifecycleTests.swift; sourceTree = "<group>"; };
 		BB100023 /* ChargeControllerOwnershipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerOwnershipTests.swift; sourceTree = "<group>"; };
 		BB100024 /* ChargeControllerTemperatureSamplingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerTemperatureSamplingTests.swift; sourceTree = "<group>"; };
+		BB100025 /* SleepChargingProtectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepChargingProtectionTests.swift; sourceTree = "<group>"; };
 		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -160,6 +168,8 @@
 			children = (
 				AA100021 /* BatteryCommandRunner.swift */,
 				AA100002 /* SMCKit.swift */,
+				AA100032 /* SystemPowerObserver.swift */,
+				AA100031 /* SystemSleepInhibitor.swift */,
 			);
 			path = SMC;
 			sourceTree = "<group>";
@@ -179,6 +189,7 @@
 				AA100028 /* HeatProtectionPolicy.swift */,
 				AA100029 /* LongRunningChargePolicy.swift */,
 				AA100027 /* SafetyTemperatureCache.swift */,
+				AA100030 /* SleepChargingProtection.swift */,
 				AA100016 /* UserSettings.swift */,
 				AA100017 /* TopUpAndLED.swift */,
 			);
@@ -226,6 +237,7 @@
 				BB100013 /* ProcessLifecycleTests.swift */,
 				BB100003 /* ChargeReconciliationPolicyTests.swift */,
 				BB100014 /* SMCKitOperationSafetyTests.swift */,
+				BB100025 /* SleepChargingProtectionTests.swift */,
 				BB100006 /* TestSupport.swift */,
 				BB100012 /* StatusParsingTests.swift */,
 				BB100007 /* SafetyTemperatureCacheTests.swift */,
@@ -325,6 +337,9 @@
 				AA000026 /* ChargeLifecyclePolicy.swift in Sources */,
 				AA000028 /* HeatProtectionPolicy.swift in Sources */,
 				AA000029 /* LongRunningChargePolicy.swift in Sources */,
+				AA000030 /* SleepChargingProtection.swift in Sources */,
+				AA000031 /* SystemSleepInhibitor.swift in Sources */,
+				AA000032 /* SystemPowerObserver.swift in Sources */,
 				AA000002 /* SMCKit.swift in Sources */,
 				AA000009 /* BatteryHistory.swift in Sources */,
 				AA000010 /* BatteryMonitor.swift in Sources */,
@@ -362,6 +377,7 @@
 				BB000013 /* ProcessLifecycleTests.swift in Sources */,
 				BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */,
 				BB000014 /* SMCKitOperationSafetyTests.swift in Sources */,
+				BB000025 /* SleepChargingProtectionTests.swift in Sources */,
 				BB000006 /* TestSupport.swift in Sources */,
 				BB000012 /* StatusParsingTests.swift in Sources */,
 				BB000007 /* SafetyTemperatureCacheTests.swift in Sources */,

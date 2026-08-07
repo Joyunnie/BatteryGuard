@@ -9,7 +9,10 @@ final class ChargeControllerSafetyTests: XCTestCase {
         temperature: Double? = 30,
         charge: Int = 80,
         isCharging: Bool = false,
+        isPluggedIn: Bool = true,
         initialMode: ChargeMode? = nil,
+        sleepChargingStrategy: SleepChargingStrategy = .pauseOnSleep,
+        sleepInhibitor: SystemSleepInhibiting = FakeSystemSleepInhibitor(),
         history: BatteryHistory? = nil,
         diagnostics: DiagnosticLog = .disabled,
         now: @escaping @Sendable () -> Date = { Date() }
@@ -25,6 +28,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         monitor.batteryInfo = makeBatteryInfo(
             charge: charge,
             isCharging: isCharging,
+            isPluggedIn: isPluggedIn,
             temperature: temperature
         )
         let settings = UserSettings(
@@ -32,6 +36,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
             launchAtLoginService: FakeLaunchAtLoginService()
         )
         settings.heatProtectionEnabled = heatProtectionEnabled
+        settings.sleepChargingStrategy = sleepChargingStrategy
         return (
             ChargeController(
                 backend: backend,
@@ -41,6 +46,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 initialMode: initialMode,
                 history: history,
                 diagnostics: diagnostics,
+                sleepInhibitor: sleepInhibitor,
+                runsSystemPowerObservation: false,
                 now: now
             ),
             backend,

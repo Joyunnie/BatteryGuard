@@ -821,6 +821,8 @@ enum ChargeMode: Equatable {
 | 오래된 명령 완료 | operation ID 비교 후 무시 | state test | 불필요; 진단 로그만 기록 |
 | startup 상태 불일치 | 실제 CLI 상태로 reconciliation | state test | 실제 상태 표시와 필요 시 경고 |
 | sleep 중 상태 변경 | wake 시 온도와 CLI 재조회 | lifecycle test | 확인 중 상태 후 실제 상태 표시 |
+| lid-close 중 maintain worker 정지 | sleep acknowledgement 전 Top Up/Discharge 취소, charging-off tuple 검증 | sleep lifecycle test | 잠자기 보호 상태와 실패 원인 |
+| charge-to-limit sleep 보류 crash/timeout | durable lease와 watchdog으로 충전 및 BatteryGuard 소유 `SleepDisabled` 복원 | fixture test | 소유권 또는 외부 설정 상태 |
 | 외부 CLI 변경 | drift 감지 후 실제 상태 반영 | state test | 필요 시 외부 변경 안내 |
 | 온도 센서 실패 | 자동 보호 결정을 중단하거나 제한 | heat test | Heat Protection degraded 경고 |
 | Core Data 저장 실패 | 오류 기록, 앱 제어는 계속 | in-memory test | 필요 시 이력 저장 실패 표시 |
@@ -873,6 +875,7 @@ enum ChargeMode: Equatable {
 13. `[PR #10 구현]` Heat Protection decision을 pure policy로 분리하고 ownership·hysteresis·cooldown·fail-closed 경계 테스트 추가
 14. `[PR #10 누적 리뷰 보완]` failure Boolean을 typed disposition으로 교체하고 stale long-running probe가 shutdown/new operation 뒤 상태를 바꾸지 못하게 generation 검증
 15. `[PR #11 구현·혹독 리뷰 보완]` Top Up/Discharge long-running decision을 pure policy로 분리하고 target/liveness/recovery/drift 및 sleep assertion 수명 테스트 추가
+16. `[신규 독립 PR 구현]` IOKit sleep acknowledgement 전 verified charging-off, wake 시 Maintain 복원, 선택적 charge-to-limit sleep inhibition, durable ownership lease/watchdog와 외부 `SleepDisabled` 비간섭 테스트 추가
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -899,6 +902,7 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 - 여러 독립 Boolean이 충전 제어 상태의 경쟁하는 원본으로 남아 있다.
 - Heat Protection을 Top Up, Discharge, maintain 변경 또는 슬라이더가 우회할 수 있다.
 - startup, quit, crash, sleep/wake와 외부 CLI 변경 동작이 정의되지 않는다.
+- 뚜껑 닫힘 전에 충전 비활성 상태를 검증하지 않거나, BatteryGuard가 소유하지 않은 `SleepDisabled`를 해제한다.
 - timeout 후 프로세스가 남을 수 있다.
 - 오래된 비동기 완료가 최신 사용자 요청을 덮어쓸 수 있다.
 - 온도나 건강도 측정 실패를 정상적인 숫자로 표시한다.

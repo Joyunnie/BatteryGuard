@@ -152,6 +152,7 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
             (.stoppingDischarge(returnLimit: 70), .restoreMaintain(70)),
             (.enteringHeat(previous: previous), .keepChargingDisabled),
             (.restoringHeat(previous: previous), .keepChargingDisabled),
+            (.preparingForSleep(previous: previous), .keepChargingDisabled),
             (.recoveringMaintain(limit: 65), .restoreMaintain(65)),
             (.releasingControl(previous: previous), .releaseControl)
         ]

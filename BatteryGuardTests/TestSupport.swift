@@ -84,6 +84,34 @@ final class FakeLaunchAtLoginService: LaunchAtLoginManaging {
     }
 }
 
+actor FakeSystemSleepInhibitor: SystemSleepInhibiting {
+    private(set) var operations: [String] = []
+    var acquireOwnership: SleepInhibitionOwnership = .batteryGuard
+    var prepareError: Error?
+    var acquireError: Error?
+    var releaseError: Error?
+
+    func prepare() async throws {
+        operations.append("prepare")
+        if let prepareError { throw prepareError }
+    }
+
+    func acquire(until limit: Int, maximumDuration: TimeInterval) async throws -> SleepInhibitionOwnership {
+        operations.append("acquire:\(limit):\(Int(maximumDuration))")
+        if let acquireError { throw acquireError }
+        return acquireOwnership
+    }
+
+    func releaseOwnedInhibition() async throws {
+        operations.append("release")
+        if let releaseError { throw releaseError }
+    }
+
+    func setAcquireOwnership(_ ownership: SleepInhibitionOwnership) {
+        acquireOwnership = ownership
+    }
+}
+
 final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private let lock = NSLock()
     private var recordedOperations: [String] = []
