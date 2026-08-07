@@ -179,14 +179,23 @@ final class ChargeController: ObservableObject {
         return lastTemperature > settings.heatProtectionThreshold
     }
 
-    private var commandError: String? { didSet { updateIssueDate(&commandIssueDate, oldValue, commandError) } }
-    private var sensorError: String? { didSet { updateIssueDate(&sensorIssueDate, oldValue, sensorError) } }
-    private var ledError: String? { didSet { updateIssueDate(&ledIssueDate, oldValue, ledError) } }
-    private var driftError: String? { didSet { updateIssueDate(&driftIssueDate, oldValue, driftError) } }
-    private var commandIssueDate: Date?
-    private var sensorIssueDate: Date?
-    private var ledIssueDate: Date?
-    private var driftIssueDate: Date?
+    private var issueRegistry = BatteryIssueRegistry()
+    private var commandError: String? {
+        get { issueRegistry.message(for: .command) }
+        set { issueRegistry.set(.command, severity: .critical, message: newValue, at: now()) }
+    }
+    private var sensorError: String? {
+        get { issueRegistry.message(for: .sensor) }
+        set { issueRegistry.set(.sensor, severity: .warning, message: newValue, at: now()) }
+    }
+    private var ledError: String? {
+        get { issueRegistry.message(for: .led) }
+        set { issueRegistry.set(.led, severity: .warning, message: newValue, at: now()) }
+    }
+    private var driftError: String? {
+        get { issueRegistry.message(for: .externalDrift) }
+        set { issueRegistry.set(.externalDrift, severity: .blocking, message: newValue, at: now()) }
+    }
     private var controlTimer: Timer?
     private var smcTemperatureTimer: Timer?
     private var reconciliationTimer: Timer?
@@ -2247,23 +2256,7 @@ final class ChargeController: ObservableObject {
     }
 
     private func refreshDisplayedError() {
-        var current: [BatteryIssue] = []
-        if let commandError, let date = commandIssueDate {
-            current.append(BatteryIssue(source: .command, severity: .critical, message: commandError, occurredAt: date))
-        }
-        if let driftError, let date = driftIssueDate {
-            current.append(BatteryIssue(source: .externalDrift, severity: .blocking, message: driftError, occurredAt: date))
-        }
-        if let sensorError, let date = sensorIssueDate {
-            current.append(BatteryIssue(source: .sensor, severity: .warning, message: sensorError, occurredAt: date))
-        }
-        if let ledError, let date = ledIssueDate {
-            current.append(BatteryIssue(source: .led, severity: .warning, message: ledError, occurredAt: date))
-        }
-        issues = current.sorted {
-            if $0.severity != $1.severity { return $0.severity > $1.severity }
-            return $0.occurredAt > $1.occurredAt
-        }
+        issues = issueRegistry.orderedIssues
         lastError = issues.first?.message
     }
 
@@ -2283,13 +2276,6 @@ final class ChargeController: ObservableObject {
         return .allowed
     }
 
-    private func updateIssueDate(_ date: inout Date?, _ oldValue: String?, _ newValue: String?) {
-        if let newValue {
-            if newValue != oldValue { date = now() }
-        } else {
-            date = nil
-        }
-    }
 }
 
 private extension Result where Success == Void, Failure == Error {

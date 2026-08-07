@@ -265,7 +265,7 @@ enum ChargeFailureDisposition: String, Equatable, Sendable {
     case manualIntervention
 }
 
-enum BatteryIssueSource: String, Equatable, Sendable {
+enum BatteryIssueSource: String, Hashable, Sendable {
     case command
     case lifecycle
     case externalDrift
@@ -287,6 +287,40 @@ struct BatteryIssue: Identifiable, Equatable, Sendable {
     let message: String
     let occurredAt: Date
     var id: String { "\(source.rawValue):\(message)" }
+}
+
+struct BatteryIssueRegistry: Sendable {
+    private var entries: [BatteryIssueSource: BatteryIssue] = [:]
+
+    mutating func set(
+        _ source: BatteryIssueSource,
+        severity: BatteryIssueSeverity,
+        message: String?,
+        at date: Date
+    ) {
+        guard let message else {
+            entries[source] = nil
+            return
+        }
+        if entries[source]?.message == message { return }
+        entries[source] = BatteryIssue(
+            source: source,
+            severity: severity,
+            message: message,
+            occurredAt: date
+        )
+    }
+
+    func message(for source: BatteryIssueSource) -> String? {
+        entries[source]?.message
+    }
+
+    var orderedIssues: [BatteryIssue] {
+        entries.values.sorted {
+            if $0.severity != $1.severity { return $0.severity > $1.severity }
+            return $0.occurredAt > $1.occurredAt
+        }
+    }
 }
 
 enum SafetyTemperatureSource: String, Equatable, Sendable {
