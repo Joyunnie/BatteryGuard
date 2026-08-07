@@ -712,15 +712,10 @@ final class ChargeController: ObservableObject {
     private func updateDisplayState() {
         guard let info = monitor.batteryInfo else {
             setSensorError("배터리 상태를 읽을 수 없습니다.")
-            switch mode {
-            case .toppingUp, .discharging:
-                checkLongRunningOperation(
-                    expectedMode: mode,
-                    fallbackMessage: "배터리 측정값이 없는 동안 장기 실행 프로세스가 종료되었습니다."
-                )
-            default:
-                break
-            }
+            applyLongRunningProgressDecision(
+                LongRunningChargePolicy.progress(mode: mode, currentCharge: nil),
+                batteryMeasurementAvailable: false
+            )
             if settings.heatProtectionEnabled {
                 evaluateHeatProtectionWithoutBatteryInfo(temperature: recentSMCTemperature())
             }
@@ -753,22 +748,13 @@ final class ChargeController: ObservableObject {
             }
         }
 
-        switch mode {
-        case .toppingUp:
-            if info.currentCharge >= 100 {
-                stopTopUp(operation: "complete Top Up and resume maintain")
-            } else {
-                checkLongRunningOperation(expectedMode: mode, fallbackMessage: "Top Up 프로세스가 목표 도달 전에 종료되었습니다.")
-            }
-        case .discharging(let target, _):
-            if info.currentCharge <= target {
-                stopDischarge(operation: "complete Discharge and resume maintain")
-            } else {
-                checkLongRunningOperation(expectedMode: mode, fallbackMessage: "Discharge 프로세스가 목표 도달 전에 종료되었습니다.")
-            }
-        default:
-            break
-        }
+        applyLongRunningProgressDecision(
+            LongRunningChargePolicy.progress(
+                mode: mode,
+                currentCharge: info.currentCharge
+            ),
+            batteryMeasurementAvailable: true
+        )
         updateLED()
     }
 
@@ -1290,7 +1276,40 @@ final class ChargeController: ObservableObject {
         )
     }
 
-    private func checkLongRunningOperation(expectedMode: ChargeMode, fallbackMessage: String) {
+    private func applyLongRunningProgressDecision(
+        _ decision: LongRunningProgressDecision,
+        batteryMeasurementAvailable: Bool
+    ) {
+        switch decision {
+        case .none:
+            break
+        case .checkLiveness(let session):
+            let fallbackMessage: String
+            if !batteryMeasurementAvailable {
+                fallbackMessage = "배터리 측정값이 없는 동안 장기 실행 프로세스가 종료되었습니다."
+            } else {
+                switch session {
+                case .topUp:
+                    fallbackMessage = "Top Up 프로세스가 목표 도달 전에 종료되었습니다."
+                case .discharge:
+                    fallbackMessage = "Discharge 프로세스가 목표 도달 전에 종료되었습니다."
+                }
+            }
+            checkLongRunningOperation(session: session, fallbackMessage: fallbackMessage)
+        case .complete(let session):
+            switch session {
+            case .topUp:
+                stopTopUp(operation: "complete Top Up and resume maintain")
+            case .discharge:
+                stopDischarge(operation: "complete Discharge and resume maintain")
+            }
+        }
+    }
+
+    private func checkLongRunningOperation(
+        session: LongRunningChargeSession,
+        fallbackMessage: String
+    ) {
         guard longRunningCheckTask == nil else { return }
         longRunningCheckGeneration &+= 1
         let checkID = longRunningCheckGeneration
@@ -1305,12 +1324,12 @@ final class ChargeController: ObservableObject {
             guard self.readiness == .ready,
                   !self.isShuttingDown,
                   self.operationGeneration == operationGeneration,
-                  self.mode == expectedMode,
+                  LongRunningChargePolicy.session(from: self.mode) == session,
                   !isActive else { return }
             let detail = result?.combinedOutput ?? ""
             let message = detail.isEmpty ? fallbackMessage : "\(fallbackMessage) \(detail)"
             await self.handleUnexpectedLongRunningExit(
-                expectedMode: expectedMode,
+                session: session,
                 operationGeneration: operationGeneration,
                 message: message
             )
@@ -1318,16 +1337,15 @@ final class ChargeController: ObservableObject {
     }
 
     private func handleUnexpectedLongRunningExit(
-        expectedMode: ChargeMode,
+        session: LongRunningChargeSession,
         operationGeneration: UInt64,
         message: String
     ) async {
         guard readiness == .ready,
               !isShuttingDown,
               self.operationGeneration == operationGeneration,
-              mode == expectedMode,
-              activeOperationID == nil,
-              let expectation = ChargeReconciliationPolicy.expectation(fromActiveMode: expectedMode) else {
+              LongRunningChargePolicy.session(from: mode) == session,
+              activeOperationID == nil else {
             return
         }
 
@@ -1337,40 +1355,39 @@ final class ChargeController: ObservableObject {
             guard readiness == .ready,
                   !isShuttingDown,
                   self.operationGeneration == operationGeneration,
-                  mode == expectedMode,
+                  LongRunningChargePolicy.session(from: mode) == session,
                   activeOperationID == nil else { return }
             observed = ChargeReconciliationPolicy.observedMode(from: status)
         } catch {
             guard readiness == .ready,
                   !isShuttingDown,
                   self.operationGeneration == operationGeneration,
-                  mode == expectedMode,
+                  LongRunningChargePolicy.session(from: mode) == session,
                   activeOperationID == nil else { return }
             observed = .unavailable(error.localizedDescription)
         }
 
-        if observed == .chargingDisabled {
-            let limit = expectation.restorableMode.maintainLimit
+        switch LongRunningChargePolicy.unexpectedExit(
+            session: session,
+            observed: observed
+        ) {
+        case .recoverMaintain(let limit):
             recoverMaintainAfterUnexpectedExit(limit: limit, message: message)
-            return
-        }
-
-        let recoveryExpectation = ReconciledChargeExpectation.maintaining(
-            limit: expectation.restorableMode.maintainLimit
-        )
-        mode = .externalDrift(expected: recoveryExpectation, observed: observed)
-        driftError = "외부 CLI 상태 감지: \(observed.userDescription). \(message)"
-        refreshDisplayedError()
-        await diagnostics.record(
-            DiagnosticEvent(
-                category: .control,
-                operation: "long-running ownership lost",
-                outcome: .drifted,
-                message: message,
-                stateBefore: expectedMode.diagnosticLabel,
-                stateAfter: mode.diagnosticLabel
+        case .externalDrift(let expectation, let observed):
+            mode = .externalDrift(expected: expectation, observed: observed)
+            driftError = "외부 CLI 상태 감지: \(observed.userDescription). \(message)"
+            refreshDisplayedError()
+            await diagnostics.record(
+                DiagnosticEvent(
+                    category: .control,
+                    operation: "long-running ownership lost",
+                    outcome: .drifted,
+                    message: message,
+                    stateBefore: session.expectedMode.diagnosticLabel,
+                    stateAfter: mode.diagnosticLabel
+                )
             )
-        )
+        }
     }
 
     private func cancelLongRunningOperationCheck() {
