@@ -1,0 +1,495 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA000001 /* BatteryGuardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100001 /* BatteryGuardApp.swift */; };
+		AA000002 /* SMCKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100002 /* SMCKit.swift */; };
+		AA000009 /* BatteryHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100009 /* BatteryHistory.swift */; };
+		AA000010 /* BatteryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100010 /* BatteryMonitor.swift */; };
+		AA000011 /* ChargeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100011 /* ChargeController.swift */; };
+		AA000014 /* ChargeState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100014 /* ChargeState.swift */; };
+		AA000016 /* UserSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100016 /* UserSettings.swift */; };
+		AA000017 /* TopUpAndLED.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100017 /* TopUpAndLED.swift */; };
+		AA000018 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100018 /* MenuBarView.swift */; };
+		AA000019 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100019 /* DashboardView.swift */; };
+		AA000020 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100020 /* SettingsView.swift */; };
+		BB000001 /* BatteryGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* BatteryGuardTests.swift */; };
+		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BB300001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA700001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA400001;
+			remoteInfo = BatteryGuard;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		AA100001 /* BatteryGuardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardApp.swift; sourceTree = "<group>"; };
+		AA100002 /* SMCKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMCKit.swift; sourceTree = "<group>"; };
+		AA100004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA100005 /* BatteryGuard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BatteryGuard.entitlements; sourceTree = "<group>"; };
+		AA100006 /* BatteryGuard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BatteryGuard.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA100009 /* BatteryHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryHistory.swift; sourceTree = "<group>"; };
+		AA100010 /* BatteryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryMonitor.swift; sourceTree = "<group>"; };
+		AA100011 /* ChargeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeController.swift; sourceTree = "<group>"; };
+		AA100014 /* ChargeState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeState.swift; sourceTree = "<group>"; };
+		AA100016 /* UserSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserSettings.swift; sourceTree = "<group>"; };
+		AA100017 /* TopUpAndLED.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopUpAndLED.swift; sourceTree = "<group>"; };
+		AA100018 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
+		AA100019 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		AA100020 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		BB100001 /* BatteryGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardTests.swift; sourceTree = "<group>"; };
+		BB100002 /* BatteryGuardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BatteryGuardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		AA200001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB200001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AA300001 = {
+			isa = PBXGroup;
+			children = (
+				AA300002 /* BatteryGuard */,
+				BB300002 /* BatteryGuardTests */,
+				AA300005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AA300002 /* BatteryGuard */ = {
+			isa = PBXGroup;
+			children = (
+				AA100001 /* BatteryGuardApp.swift */,
+				CC100001 /* Assets.xcassets */,
+				AA100004 /* Info.plist */,
+				AA100005 /* BatteryGuard.entitlements */,
+				AA300003 /* SMC */,
+				AA300004 /* Core */,
+				AA300007 /* UI */,
+			);
+			path = BatteryGuard;
+			sourceTree = "<group>";
+		};
+		AA300003 /* SMC */ = {
+			isa = PBXGroup;
+			children = (
+				AA100002 /* SMCKit.swift */,
+			);
+			path = SMC;
+			sourceTree = "<group>";
+		};
+		AA300004 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				AA100009 /* BatteryHistory.swift */,
+				AA100010 /* BatteryMonitor.swift */,
+				AA100011 /* ChargeController.swift */,
+				AA100014 /* ChargeState.swift */,
+				AA100016 /* UserSettings.swift */,
+				AA100017 /* TopUpAndLED.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		AA300005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AA100006 /* BatteryGuard.app */,
+				BB100002 /* BatteryGuardTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		AA300007 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				AA100018 /* MenuBarView.swift */,
+				AA100019 /* DashboardView.swift */,
+				AA100020 /* SettingsView.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		BB300002 /* BatteryGuardTests */ = {
+			isa = PBXGroup;
+			children = (
+				BB100001 /* BatteryGuardTests.swift */,
+			);
+			path = BatteryGuardTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AA400001 /* BatteryGuard */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA600001 /* Build configuration list for PBXNativeTarget "BatteryGuard" */;
+			buildPhases = (
+				AA500001 /* Sources */,
+				AA200001 /* Frameworks */,
+				CC200001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BatteryGuard;
+			productName = BatteryGuard;
+			productReference = AA100006 /* BatteryGuard.app */;
+			productType = "com.apple.product-type.application";
+		};
+		BB400001 /* BatteryGuardTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB600001 /* Build configuration list for PBXNativeTarget "BatteryGuardTests" */;
+			buildPhases = (
+				BB500001 /* Sources */,
+				BB200001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BB400002 /* PBXTargetDependency */,
+			);
+			name = BatteryGuardTests;
+			productName = BatteryGuardTests;
+			productReference = BB100002 /* BatteryGuardTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AA700001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 2640;
+			};
+			buildConfigurationList = AA600003 /* Build configuration list for PBXProject "BatteryGuard" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = AA300001;
+			productRefGroup = AA300005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AA400001 /* BatteryGuard */,
+				BB400001 /* BatteryGuardTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		CC200001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AA500001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000001 /* BatteryGuardApp.swift in Sources */,
+				AA000002 /* SMCKit.swift in Sources */,
+				AA000009 /* BatteryHistory.swift in Sources */,
+				AA000010 /* BatteryMonitor.swift in Sources */,
+				AA000011 /* ChargeController.swift in Sources */,
+				AA000014 /* ChargeState.swift in Sources */,
+				AA000016 /* UserSettings.swift in Sources */,
+				AA000017 /* TopUpAndLED.swift in Sources */,
+				AA000018 /* MenuBarView.swift in Sources */,
+				AA000019 /* DashboardView.swift in Sources */,
+				AA000020 /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB500001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB000001 /* BatteryGuardTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BB400002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA400001 /* BatteryGuard */;
+			targetProxy = BB300001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		AA800001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = BatteryGuard/BatteryGuard.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BatteryGuard/Info.plist;
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMainNibFile = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jiwon.batteryguard;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		AA800002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = BatteryGuard/BatteryGuard.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BatteryGuard/Info.plist;
+				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSMainNibFile = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jiwon.batteryguard;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		AA800003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AA800004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		BB800001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jiwon.batteryguard.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BatteryGuard.app/Contents/MacOS/BatteryGuard";
+			};
+			name = Debug;
+		};
+		BB800002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jiwon.batteryguard.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BatteryGuard.app/Contents/MacOS/BatteryGuard";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		AA600001 /* Build configuration list for PBXNativeTarget "BatteryGuard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA800001 /* Debug */,
+				AA800002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA600003 /* Build configuration list for PBXProject "BatteryGuard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA800003 /* Debug */,
+				AA800004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB600001 /* Build configuration list for PBXNativeTarget "BatteryGuardTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB800001 /* Debug */,
+				BB800002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AA700001 /* Project object */;
+}
