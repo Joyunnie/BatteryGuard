@@ -27,14 +27,29 @@
 		AA000027 /* SafetyTemperatureCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100027 /* SafetyTemperatureCache.swift */; };
 		AA000028 /* HeatProtectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100028 /* HeatProtectionPolicy.swift */; };
 		AA000029 /* LongRunningChargePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100029 /* LongRunningChargePolicy.swift */; };
-		BB000001 /* BatteryGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* BatteryGuardTests.swift */; };
+		BB000001 /* ChargeStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* ChargeStateTests.swift */; };
 		BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100003 /* ChargeReconciliationPolicyTests.swift */; };
-		BB000004 /* ChargeControllerSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100004 /* ChargeControllerSafetyTests.swift */; };
+		BB000004 /* ChargeControllerSafetyTestCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100004 /* ChargeControllerSafetyTestCase.swift */; };
 		BB000005 /* ChargeLifecyclePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100005 /* ChargeLifecyclePolicyTests.swift */; };
 		BB000006 /* TestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100006 /* TestSupport.swift */; };
 		BB000007 /* SafetyTemperatureCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100007 /* SafetyTemperatureCacheTests.swift */; };
 		BB000008 /* HeatProtectionPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100008 /* HeatProtectionPolicyTests.swift */; };
 		BB000009 /* LongRunningChargePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100009 /* LongRunningChargePolicyTests.swift */; };
+		BB000010 /* UserSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100010 /* UserSettingsTests.swift */; };
+		BB000011 /* AppActivationControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100011 /* AppActivationControllerTests.swift */; };
+		BB000012 /* StatusParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100012 /* StatusParsingTests.swift */; };
+		BB000013 /* ProcessLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100013 /* ProcessLifecycleTests.swift */; };
+		BB000014 /* SMCKitOperationSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100014 /* SMCKitOperationSafetyTests.swift */; };
+		BB000015 /* BatteryValueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100015 /* BatteryValueTests.swift */; };
+		BB000016 /* DiagnosticLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100016 /* DiagnosticLogTests.swift */; };
+		BB000017 /* BatteryHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100017 /* BatteryHistoryTests.swift */; };
+		BB000018 /* MagSafeLEDStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100018 /* MagSafeLEDStateTests.swift */; };
+		BB000019 /* ChargeControllerInitializationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100019 /* ChargeControllerInitializationTests.swift */; };
+		BB000020 /* ChargeControllerHeatProtectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100020 /* ChargeControllerHeatProtectionTests.swift */; };
+		BB000021 /* ChargeControllerReconciliationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100021 /* ChargeControllerReconciliationTests.swift */; };
+		BB000022 /* ChargeControllerLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100022 /* ChargeControllerLifecycleTests.swift */; };
+		BB000023 /* ChargeControllerOwnershipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100023 /* ChargeControllerOwnershipTests.swift */; };
+		BB000024 /* ChargeControllerTemperatureSamplingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100024 /* ChargeControllerTemperatureSamplingTests.swift */; };
 		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -72,15 +87,30 @@
 		AA100027 /* SafetyTemperatureCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyTemperatureCache.swift; sourceTree = "<group>"; };
 		AA100028 /* HeatProtectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeatProtectionPolicy.swift; sourceTree = "<group>"; };
 		AA100029 /* LongRunningChargePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongRunningChargePolicy.swift; sourceTree = "<group>"; };
-		BB100001 /* BatteryGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardTests.swift; sourceTree = "<group>"; };
+		BB100001 /* ChargeStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeStateTests.swift; sourceTree = "<group>"; };
 		BB100002 /* BatteryGuardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BatteryGuardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB100003 /* ChargeReconciliationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeReconciliationPolicyTests.swift; sourceTree = "<group>"; };
-		BB100004 /* ChargeControllerSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerSafetyTests.swift; sourceTree = "<group>"; };
+		BB100004 /* ChargeControllerSafetyTestCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerSafetyTestCase.swift; sourceTree = "<group>"; };
 		BB100005 /* ChargeLifecyclePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeLifecyclePolicyTests.swift; sourceTree = "<group>"; };
 		BB100006 /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
 		BB100007 /* SafetyTemperatureCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyTemperatureCacheTests.swift; sourceTree = "<group>"; };
 		BB100008 /* HeatProtectionPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeatProtectionPolicyTests.swift; sourceTree = "<group>"; };
 		BB100009 /* LongRunningChargePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongRunningChargePolicyTests.swift; sourceTree = "<group>"; };
+		BB100010 /* UserSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserSettingsTests.swift; sourceTree = "<group>"; };
+		BB100011 /* AppActivationControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppActivationControllerTests.swift; sourceTree = "<group>"; };
+		BB100012 /* StatusParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusParsingTests.swift; sourceTree = "<group>"; };
+		BB100013 /* ProcessLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessLifecycleTests.swift; sourceTree = "<group>"; };
+		BB100014 /* SMCKitOperationSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMCKitOperationSafetyTests.swift; sourceTree = "<group>"; };
+		BB100015 /* BatteryValueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryValueTests.swift; sourceTree = "<group>"; };
+		BB100016 /* DiagnosticLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticLogTests.swift; sourceTree = "<group>"; };
+		BB100017 /* BatteryHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryHistoryTests.swift; sourceTree = "<group>"; };
+		BB100018 /* MagSafeLEDStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MagSafeLEDStateTests.swift; sourceTree = "<group>"; };
+		BB100019 /* ChargeControllerInitializationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerInitializationTests.swift; sourceTree = "<group>"; };
+		BB100020 /* ChargeControllerHeatProtectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerHeatProtectionTests.swift; sourceTree = "<group>"; };
+		BB100021 /* ChargeControllerReconciliationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerReconciliationTests.swift; sourceTree = "<group>"; };
+		BB100022 /* ChargeControllerLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerLifecycleTests.swift; sourceTree = "<group>"; };
+		BB100023 /* ChargeControllerOwnershipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerOwnershipTests.swift; sourceTree = "<group>"; };
+		BB100024 /* ChargeControllerTemperatureSamplingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerTemperatureSamplingTests.swift; sourceTree = "<group>"; };
 		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -177,14 +207,29 @@
 		BB300002 /* BatteryGuardTests */ = {
 			isa = PBXGroup;
 			children = (
-				BB100001 /* BatteryGuardTests.swift */,
-				BB100004 /* ChargeControllerSafetyTests.swift */,
+				BB100001 /* ChargeStateTests.swift */,
+				BB100011 /* AppActivationControllerTests.swift */,
+				BB100017 /* BatteryHistoryTests.swift */,
+				BB100015 /* BatteryValueTests.swift */,
+				BB100004 /* ChargeControllerSafetyTestCase.swift */,
+				BB100020 /* ChargeControllerHeatProtectionTests.swift */,
+				BB100019 /* ChargeControllerInitializationTests.swift */,
+				BB100022 /* ChargeControllerLifecycleTests.swift */,
+				BB100023 /* ChargeControllerOwnershipTests.swift */,
+				BB100021 /* ChargeControllerReconciliationTests.swift */,
+				BB100024 /* ChargeControllerTemperatureSamplingTests.swift */,
 				BB100005 /* ChargeLifecyclePolicyTests.swift */,
+				BB100016 /* DiagnosticLogTests.swift */,
 				BB100008 /* HeatProtectionPolicyTests.swift */,
 				BB100009 /* LongRunningChargePolicyTests.swift */,
+				BB100018 /* MagSafeLEDStateTests.swift */,
+				BB100013 /* ProcessLifecycleTests.swift */,
 				BB100003 /* ChargeReconciliationPolicyTests.swift */,
+				BB100014 /* SMCKitOperationSafetyTests.swift */,
 				BB100006 /* TestSupport.swift */,
+				BB100012 /* StatusParsingTests.swift */,
 				BB100007 /* SafetyTemperatureCacheTests.swift */,
+				BB100010 /* UserSettingsTests.swift */,
 			);
 			path = BatteryGuardTests;
 			sourceTree = "<group>";
@@ -298,14 +343,29 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				BB000001 /* BatteryGuardTests.swift in Sources */,
-				BB000004 /* ChargeControllerSafetyTests.swift in Sources */,
+				BB000001 /* ChargeStateTests.swift in Sources */,
+				BB000011 /* AppActivationControllerTests.swift in Sources */,
+				BB000017 /* BatteryHistoryTests.swift in Sources */,
+				BB000015 /* BatteryValueTests.swift in Sources */,
+				BB000004 /* ChargeControllerSafetyTestCase.swift in Sources */,
+				BB000020 /* ChargeControllerHeatProtectionTests.swift in Sources */,
+				BB000019 /* ChargeControllerInitializationTests.swift in Sources */,
+				BB000022 /* ChargeControllerLifecycleTests.swift in Sources */,
+				BB000023 /* ChargeControllerOwnershipTests.swift in Sources */,
+				BB000021 /* ChargeControllerReconciliationTests.swift in Sources */,
+				BB000024 /* ChargeControllerTemperatureSamplingTests.swift in Sources */,
 				BB000005 /* ChargeLifecyclePolicyTests.swift in Sources */,
+				BB000016 /* DiagnosticLogTests.swift in Sources */,
 				BB000008 /* HeatProtectionPolicyTests.swift in Sources */,
 				BB000009 /* LongRunningChargePolicyTests.swift in Sources */,
+				BB000018 /* MagSafeLEDStateTests.swift in Sources */,
+				BB000013 /* ProcessLifecycleTests.swift in Sources */,
 				BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */,
+				BB000014 /* SMCKitOperationSafetyTests.swift in Sources */,
 				BB000006 /* TestSupport.swift in Sources */,
+				BB000012 /* StatusParsingTests.swift in Sources */,
 				BB000007 /* SafetyTemperatureCacheTests.swift in Sources */,
+				BB000010 /* UserSettingsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
