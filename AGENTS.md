@@ -42,7 +42,10 @@ IOKit readings ---+                    result + verified CLI status
 - Treat cleanup failure as a terminal runner failure and reject later commands instead of continuing in an unknown state.
 - Verify control-changing commands with a subsequent status read before updating UI state.
 - Verify the complete expected control tuple: charging, discharging, maintain level, and exact worker state; a matching subset is not success.
+- For battery CLI v1.3.4 force discharge, the verified tuple is charging enabled, discharging true, and the Maintain worker stopped. Do not require charging disabled: `CHTE=00` permits the forced `CHIE=08` discharge path.
 - Treat maintain as valid only when exactly one worker with the expected target exists and the PID file points to it; stale, mismatched, or duplicate workers are failures.
+- Bind every worker selected for termination to its process start identity and revalidate that identity immediately before each signal; a reused PID must never be signaled.
+- Never trust the CLI's “killing old maintain process” log by itself. Re-read the PID file and exact command line; the script can leave an orphaned stale worker after external commands.
 - Read PID files without following links or blocking on special files; accept only bounded, current-user-owned regular files.
 - Stop exact maintain worker PIDs before Top Up, Discharge, or charging-off transitions. Never signal an unrelated process group.
 - Coalesce rapid slider changes and block conflicting or duplicate operations.
@@ -80,13 +83,17 @@ IOKit readings ---+                    result + verified CLI status
 - Quit during Top Up or Discharge must cancel the long operation, restore the recorded maintain limit, and verify level, worker liveness, and non-discharge state before exit.
 - Delay AppKit termination until safety cleanup succeeds; a timeout or cleanup failure must cancel normal termination instead of merely logging and exiting.
 - Tear down monitoring and observers only after verified shutdown cleanup; keep failed shutdowns alive and retryable.
+- Keep the Discharge sleep assertion until cancellation and verified safe-state recovery succeed; a failed cleanup must retain it for retry.
+- If initialization fails before the backend becomes available, quit through local teardown without issuing hardware cleanup commands to the unavailable backend.
 - Reject normal quit while an externally owned charge/discharge or unknown control state is active, without tearing down the controller, so the user can correct the state and retry.
 - Re-read external drift immediately before choosing the quit policy; never trust a periodic snapshot for shutdown safety.
 - Do not expose a stop/disable command unless its result can be verified through an observable CLI state.
 - If temperature sensing is unavailable while heat protection is enabled, surface the degraded protection clearly and avoid unsafe automatic charging decisions.
 - Preserve external drift across wake with read-only reconciliation; never silently reapply Maintain over it.
 - When LED control is disabled or external power is removed, restore automatic LED behavior.
+- Treat LED restoration as best-effort peripheral cleanup after verified battery cleanup; report its failure without trapping the app in termination.
 - Route every LED intent through one generation-ordered actor/worker; stale writes and blink tasks must not outlive newer intent.
+- Apply one freshness policy to cached SMC temperatures on every Heat Protection path, including disable/re-enable transitions; stale data is unavailable.
 
 ## Testing
 
