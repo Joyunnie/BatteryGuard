@@ -207,7 +207,11 @@ enum ChargeMode: Equatable {
     case controlDisabled(lastLimit: Int)
     case transitioning(ChargeTransition)
     case externalDrift(expected: ReconciledChargeExpectation, observed: ObservedChargeMode)
-    case failed(previous: RestorableChargeMode?, message: String, controlsBlocked: Bool)
+    case failed(
+        previous: RestorableChargeMode?,
+        message: String,
+        disposition: ChargeFailureDisposition
+    )
 
     var restorableMode: RestorableChargeMode? {
         switch self {
@@ -235,10 +239,19 @@ enum ChargeMode: Equatable {
         case .transitioning(let transition): return "transitioning(\(transition.diagnosticLabel))"
         case .externalDrift(let expected, let observed):
             return "externalDrift(expected:\(expected.diagnosticLabel),observed:\(observed.diagnosticLabel))"
-        case .failed(let previous, let message, let controlsBlocked):
-            return "failed(previous:\(previous?.diagnosticLabel ?? "none"),blocked:\(controlsBlocked),message:\(message))"
+        case .failed(let previous, let message, let disposition):
+            return "failed(previous:\(previous?.diagnosticLabel ?? "none"),disposition:\(disposition.rawValue),message:\(message))"
         }
     }
+}
+
+enum ChargeFailureDisposition: String, Equatable, Sendable {
+    /// The previous verified tuple may recover through read-only reconciliation.
+    case recoverPrevious
+    /// Heat Protection owns this failure and may retry its fail-closed transition.
+    case heatProtection
+    /// Hardware state is uncertain; no automatic recovery policy may reinterpret it.
+    case manualIntervention
 }
 
 enum BatteryDisplay {

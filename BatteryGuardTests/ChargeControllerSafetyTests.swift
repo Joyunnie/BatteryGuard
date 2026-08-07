@@ -801,8 +801,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
 
         controller.startDischarge()
         let recoveredFailure = await eventually {
-            if case .failed(let previous, _, let blocked) = controller.mode {
-                return previous == .maintaining(limit: 80) && !blocked
+            if case .failed(let previous, _, let disposition) = controller.mode {
+                return previous == .maintaining(limit: 80) && disposition == .recoverPrevious
             }
             return false
         }
@@ -814,8 +814,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
         blockedBackend.failNext("maintain")
         blockedController.startDischarge()
         let blockedFailure = await eventually {
-            if case .failed(let previous, _, let blocked) = blockedController.mode {
-                return previous == .maintaining(limit: 80) && blocked
+            if case .failed(let previous, _, let disposition) = blockedController.mode {
+                return previous == .maintaining(limit: 80) && disposition == .manualIntervention
             }
             return false
         }
@@ -884,7 +884,11 @@ final class ChargeControllerSafetyTests: XCTestCase {
     func testRecoverableFailureCanReturnToVerifiedPreviousMode() async {
         let previous = RestorableChargeMode.maintaining(limit: 80)
         let (controller, _, _, _) = makeSUT(
-            initialMode: .failed(previous: previous, message: "temporary", controlsBlocked: false)
+            initialMode: .failed(
+                previous: previous,
+                message: "temporary",
+                disposition: .recoverPrevious
+            )
         )
 
         await controller.reconcileExternalState()
@@ -892,10 +896,14 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertEqual(controller.mode, .maintaining(limit: 80))
     }
 
-    func testBlockedFailureOnlyRecoversToHeatBlockedAfterDisabledTupleIsVerified() async {
+    func testHeatFailureOnlyRecoversToHeatBlockedAfterDisabledTupleIsVerified() async {
         let previous = RestorableChargeMode.maintaining(limit: 80)
         let (controller, backend, _, _) = makeSUT(
-            initialMode: .failed(previous: previous, message: "temporary", controlsBlocked: true)
+            initialMode: .failed(
+                previous: previous,
+                message: "temporary",
+                disposition: .heatProtection
+            )
         )
         backend.setControlStatus(
             BatteryControlStatus(
@@ -909,6 +917,59 @@ final class ChargeControllerSafetyTests: XCTestCase {
         await controller.reconcileExternalState()
 
         XCTAssertEqual(controller.mode, .heatBlocked(previous: previous))
+    }
+
+    func testManualFailureIsNotAutomaticallyRestoredByHeatProtection() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, settings) = makeSUT(
+            initialMode: .failed(
+                previous: previous,
+                message: "hardware state unknown",
+                disposition: .manualIntervention
+            )
+        )
+        settings.heatProtectionEnabled = true
+        let controlOperationsBefore = backend.operations.filter {
+            $0.hasPrefix("maintain:") || $0.hasPrefix("top-up:") || $0.hasPrefix("discharge:")
+        }
+
+        controller.processBatteryInfo(makeBatteryInfo(temperature: 30))
+        await Task.yield()
+
+        XCTAssertEqual(
+            backend.operations.filter {
+                $0.hasPrefix("maintain:") || $0.hasPrefix("top-up:") || $0.hasPrefix("discharge:")
+            },
+            controlOperationsBefore
+        )
+        XCTAssertEqual(
+            controller.mode,
+            .failed(
+                previous: previous,
+                message: "hardware state unknown",
+                disposition: .manualIntervention
+            )
+        )
+    }
+
+    func testStaleLongRunningProbeCannotMutateStateAfterShutdownStarts() async throws {
+        let previous = RestorableChargeMode.toppingUp(returnLimit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            charge: 70,
+            initialMode: .toppingUp(returnLimit: 80)
+        )
+        backend.setLongRunningProbeDelay(0.25)
+
+        controller.processBatteryInfo(makeBatteryInfo(charge: 70))
+        let probeStarted = await eventually { backend.operations.contains("check-long-running") }
+        XCTAssertTrue(probeStarted)
+
+        try await controller.shutdown()
+        await Task.yield()
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertEqual(controller.mode.restorableMode, previous)
+        XCTAssertFalse(controller.hasExternalControlDrift)
     }
 
     func testStaleReconciliationCannotOverwriteWakeRecovery() async {
@@ -1136,8 +1197,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
         } catch {
             XCTAssertTrue(controller.lastError?.contains("종료 안전 정리 실패") == true)
             XCTAssertEqual(controller.readiness, .ready)
-            if case .failed(_, _, let controlsBlocked) = controller.mode {
-                XCTAssertTrue(controlsBlocked)
+            if case .failed(_, _, let disposition) = controller.mode {
+                XCTAssertEqual(disposition, .manualIntervention)
             } else {
                 XCTFail("Expected retryable failed state")
             }

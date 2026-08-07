@@ -76,7 +76,7 @@ enum HeatProtectionPolicy {
                 temperature: temperature,
                 action: .restore(previous: blockedPrevious)
             )
-        case .failed(let failedPrevious?, _, true)
+        case .failed(let failedPrevious?, _, .heatProtection)
             where input.measurementContext == .batteryInfoAvailable && retryAllowed:
             return HeatProtectionEvaluation(
                 temperature: temperature,

@@ -85,7 +85,7 @@ final class HeatProtectionPolicyTests: XCTestCase {
         let failed = ChargeMode.failed(
             previous: .maintaining(limit: 75),
             message: "injected",
-            controlsBlocked: true
+            disposition: .heatProtection
         )
 
         XCTAssertEqual(
@@ -112,6 +112,16 @@ final class HeatProtectionPolicyTests: XCTestCase {
             ).action,
             .restore(previous: .maintaining(limit: 75))
         )
+    }
+
+    func testManualFailureIsNeverReinterpretedAsHeatRestore() {
+        let failed = ChargeMode.failed(
+            previous: .maintaining(limit: 75),
+            message: "hardware state unknown",
+            disposition: .manualIntervention
+        )
+
+        XCTAssertEqual(evaluate(temperature: 30, mode: failed).action, .none)
     }
 
     func testEntryCooldownAndExistingSafetyTransitionsPreventDuplicateEntry() {

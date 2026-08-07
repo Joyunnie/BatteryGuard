@@ -132,8 +132,8 @@ final class ChargeController: ObservableObject {
         case .transitioning(let transition):
             if case .enteringHeat = transition { return true }
             if case .restoringHeat = transition { return true }
-        case .failed(_, _, let controlsBlocked):
-            if controlsBlocked { return true }
+        case .failed(_, _, .heatProtection):
+            return true
         default:
             break
         }
@@ -160,7 +160,8 @@ final class ChargeController: ObservableObject {
     private var operationGeneration: UInt64 = 0
     private var activeOperationID: UInt64?
     private var activeOperationTask: Task<Void, Never>?
-    private var isCheckingLongRunningOperation = false
+    private var longRunningCheckGeneration: UInt64 = 0
+    private var longRunningCheckTask: Task<Void, Never>?
     private var safetyTemperatureCache = SafetyTemperatureCache()
     private var lastTemperature: Double?
     private var isSamplingSMCTemperature = false
@@ -293,7 +294,11 @@ final class ChargeController: ObservableObject {
         } catch {
             if !isShuttingDown, !Task.isCancelled {
                 cleanupAfterFailedInitialization()
-                mode = .failed(previous: mode.restorableMode, message: error.localizedDescription, controlsBlocked: true)
+                mode = .failed(
+                    previous: mode.restorableMode,
+                    message: error.localizedDescription,
+                    disposition: .manualIntervention
+                )
                 readiness = .failed(error.localizedDescription)
                 recordDiagnostic(
                     category: .lifecycle,
@@ -396,7 +401,7 @@ final class ChargeController: ObservableObject {
                 mode = .failed(
                     previous: modeBeforeShutdown.restorableMode ?? .maintaining(limit: requestedLimit),
                     message: error.localizedDescription,
-                    controlsBlocked: true
+                    disposition: .manualIntervention
                 )
             }
             commandError = "종료 안전 정리 실패: \(error.localizedDescription)"
@@ -435,6 +440,7 @@ final class ChargeController: ObservableObject {
     }
 
     private func prepareLocalShutdown() {
+        cancelLongRunningOperationCheck()
         activeOperationTask?.cancel()
         activeOperationTask = nil
         activeOperationID = nil
@@ -567,7 +573,7 @@ final class ChargeController: ObservableObject {
         operation: String,
         transition: ChargeTransition,
         preemptCurrentOperation: Bool = false,
-        controlsBlockedOnFailure: Bool = false,
+        failureDisposition: ChargeFailureDisposition = .recoverPrevious,
         checkCancellationAfterWork: Bool = true,
         work: @escaping @MainActor () async throws -> Void,
         onSuccess: @escaping @MainActor () -> Void,
@@ -583,6 +589,7 @@ final class ChargeController: ObservableObject {
         if preemptCurrentOperation {
             activeOperationTask?.cancel()
         }
+        cancelLongRunningOperationCheck()
 
         operationGeneration &+= 1
         let operationID = operationGeneration
@@ -634,7 +641,11 @@ final class ChargeController: ObservableObject {
                 if let onFailure {
                     onFailure(error)
                 } else {
-                    self.mode = .failed(previous: transition.previousMode, message: error.localizedDescription, controlsBlocked: controlsBlockedOnFailure)
+                    self.mode = .failed(
+                        previous: transition.previousMode,
+                        message: error.localizedDescription,
+                        disposition: failureDisposition
+                    )
                 }
             }
             self.refreshDisplayedError()
@@ -737,7 +748,7 @@ final class ChargeController: ObservableObject {
             clearSensorError()
             if case .heatBlocked(let previous) = mode {
                 restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
-            } else if case .failed(let previous?, _, true) = mode {
+            } else if case .failed(let previous?, _, .heatProtection) = mode {
                 restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
             }
         }
@@ -852,7 +863,7 @@ final class ChargeController: ObservableObject {
             operation: "enable Heat Protection",
             transition: .enteringHeat(previous: previous),
             preemptCurrentOperation: preemptingCurrentOperation,
-            controlsBlockedOnFailure: true,
+            failureDisposition: .heatProtection,
             work: {
                 try await backend.cancelLongRunningOperation()
                 try await backend.disableCharging()
@@ -866,7 +877,11 @@ final class ChargeController: ObservableObject {
             onFailure: { [weak self] error in
                 guard let self else { return }
                 self.heatProtectionRetryAfter = self.now().addingTimeInterval(10)
-                self.mode = .failed(previous: previous, message: error.localizedDescription, controlsBlocked: true)
+                self.mode = .failed(
+                    previous: previous,
+                    message: error.localizedDescription,
+                    disposition: .heatProtection
+                )
             }
         )
     }
@@ -877,7 +892,7 @@ final class ChargeController: ObservableObject {
         _ = runBattery(
             operation: "restore after Heat Protection",
             transition: .restoringHeat(previous: previous),
-            controlsBlockedOnFailure: true,
+            failureDisposition: .heatProtection,
             work: { [weak self] in
                 guard let self else { throw CancellationError() }
                 do {
@@ -929,7 +944,11 @@ final class ChargeController: ObservableObject {
                 if error is HeatRestoreReblockedError {
                     self.mode = .heatBlocked(previous: previous)
                 } else {
-                    self.mode = .failed(previous: previous, message: error.localizedDescription, controlsBlocked: true)
+                    self.mode = .failed(
+                        previous: previous,
+                        message: error.localizedDescription,
+                        disposition: .heatProtection
+                    )
                 }
             }
         )
@@ -965,7 +984,7 @@ final class ChargeController: ObservableObject {
             }
         } else if case .heatBlocked(let previous) = mode {
             restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
-        } else if case .failed(let previous?, _, true) = mode {
+        } else if case .failed(let previous?, _, .heatProtection) = mode {
             restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
         }
     }
@@ -1003,7 +1022,7 @@ final class ChargeController: ObservableObject {
         _ = runBattery(
             operation: "release BatteryGuard control",
             transition: .releasingControl(previous: previous),
-            controlsBlockedOnFailure: true,
+            failureDisposition: .manualIntervention,
             checkCancellationAfterWork: false,
             work: { [weak self] in
                 guard let self else { throw CancellationError() }
@@ -1140,7 +1159,9 @@ final class ChargeController: ObservableObject {
                 self?.mode = .failed(
                     previous: .maintaining(limit: limit),
                     message: error.localizedDescription,
-                    controlsBlocked: error is ControlCompensationError
+                    disposition: error is ControlCompensationError
+                        ? .manualIntervention
+                        : .recoverPrevious
                 )
             }
         )
@@ -1200,7 +1221,9 @@ final class ChargeController: ObservableObject {
                 self?.mode = .failed(
                     previous: .maintaining(limit: returnLimit),
                     message: error.localizedDescription,
-                    controlsBlocked: error is ControlCompensationError
+                    disposition: error is ControlCompensationError
+                        ? .manualIntervention
+                        : .recoverPrevious
                 )
             }
         )
@@ -1268,23 +1291,41 @@ final class ChargeController: ObservableObject {
     }
 
     private func checkLongRunningOperation(expectedMode: ChargeMode, fallbackMessage: String) {
-        guard !isCheckingLongRunningOperation else { return }
-        isCheckingLongRunningOperation = true
+        guard longRunningCheckTask == nil else { return }
+        longRunningCheckGeneration &+= 1
+        let checkID = longRunningCheckGeneration
+        let operationGeneration = operationGeneration
         let backend = self.backend
-        Task { [weak self] in
+        longRunningCheckTask = Task { [weak self] in
             let isActive = await backend.isLongRunningOperationActive()
             let result = isActive ? nil : await backend.longRunningOperationResult()
             guard let self else { return }
-            self.isCheckingLongRunningOperation = false
-            guard self.mode == expectedMode, !isActive else { return }
+            guard self.longRunningCheckGeneration == checkID else { return }
+            self.longRunningCheckTask = nil
+            guard self.readiness == .ready,
+                  !self.isShuttingDown,
+                  self.operationGeneration == operationGeneration,
+                  self.mode == expectedMode,
+                  !isActive else { return }
             let detail = result?.combinedOutput ?? ""
             let message = detail.isEmpty ? fallbackMessage : "\(fallbackMessage) \(detail)"
-            await self.handleUnexpectedLongRunningExit(expectedMode: expectedMode, message: message)
+            await self.handleUnexpectedLongRunningExit(
+                expectedMode: expectedMode,
+                operationGeneration: operationGeneration,
+                message: message
+            )
         }
     }
 
-    private func handleUnexpectedLongRunningExit(expectedMode: ChargeMode, message: String) async {
-        guard mode == expectedMode,
+    private func handleUnexpectedLongRunningExit(
+        expectedMode: ChargeMode,
+        operationGeneration: UInt64,
+        message: String
+    ) async {
+        guard readiness == .ready,
+              !isShuttingDown,
+              self.operationGeneration == operationGeneration,
+              mode == expectedMode,
               activeOperationID == nil,
               let expectation = ChargeReconciliationPolicy.expectation(fromActiveMode: expectedMode) else {
             return
@@ -1293,10 +1334,18 @@ final class ChargeController: ObservableObject {
         let observed: ObservedChargeMode
         do {
             let status = try await backend.readControlStatus()
-            guard mode == expectedMode, activeOperationID == nil else { return }
+            guard readiness == .ready,
+                  !isShuttingDown,
+                  self.operationGeneration == operationGeneration,
+                  mode == expectedMode,
+                  activeOperationID == nil else { return }
             observed = ChargeReconciliationPolicy.observedMode(from: status)
         } catch {
-            guard mode == expectedMode, activeOperationID == nil else { return }
+            guard readiness == .ready,
+                  !isShuttingDown,
+                  self.operationGeneration == operationGeneration,
+                  mode == expectedMode,
+                  activeOperationID == nil else { return }
             observed = .unavailable(error.localizedDescription)
         }
 
@@ -1322,6 +1371,12 @@ final class ChargeController: ObservableObject {
                 stateAfter: mode.diagnosticLabel
             )
         )
+    }
+
+    private func cancelLongRunningOperationCheck() {
+        longRunningCheckGeneration &+= 1
+        longRunningCheckTask?.cancel()
+        longRunningCheckTask = nil
     }
 
     private func recoverMaintainAfterUnexpectedExit(limit: Int, message: String) {
@@ -1508,11 +1563,11 @@ final class ChargeController: ObservableObject {
             return .discharging(target: target, returnLimit: returnLimit)
         case .heatBlocked(let previous): return .chargingDisabled(previous: previous)
         case .externalDrift(let expected, _): return expected
-        case .failed(let previous?, _, let controlsBlocked):
-            return controlsBlocked
-                ? .chargingDisabled(previous: previous)
-                : ChargeReconciliationPolicy.expectation(from: previous)
-        case .idle, .transitioning, .failed(previous: nil, message: _, controlsBlocked: _): return nil
+        case .failed(let previous?, _, .heatProtection):
+            return .chargingDisabled(previous: previous)
+        case .failed(let previous?, _, .recoverPrevious):
+            return ChargeReconciliationPolicy.expectation(from: previous)
+        case .idle, .transitioning, .failed: return nil
         }
     }
 
@@ -1587,7 +1642,11 @@ final class ChargeController: ObservableObject {
         } catch {
             guard activeOperationID == reconciliationID else { return }
             activeOperationID = nil
-            mode = .failed(previous: prior, message: error.localizedDescription, controlsBlocked: true)
+            mode = .failed(
+                previous: prior,
+                message: error.localizedDescription,
+                disposition: .manualIntervention
+            )
             readiness = .failed(error.localizedDescription)
             commandError = "Wake reconciliation 실패: \(error.localizedDescription)"
             refreshDisplayedError()

@@ -55,8 +55,10 @@ enum ChargeShutdownPlanner {
                     transition.previousMode?.maintainLimit ?? context.effectiveLimit
                 )
             }
-        case .heatBlocked, .failed(_, _, true):
+        case .heatBlocked, .failed(_, _, .heatProtection):
             return .keepChargingDisabled
+        case .failed(let previous, _, .manualIntervention):
+            return .restoreMaintain(previous?.maintainLimit ?? context.effectiveLimit)
         case .externalDrift(_, let observed):
             switch observed {
             case .maintaining:
@@ -66,7 +68,7 @@ enum ChargeShutdownPlanner {
             case .charging, .discharging, .unavailable, .inconsistent:
                 throw ChargeShutdownPlanningError.unsafeExternalState(observed)
             }
-        case .idle, .maintaining, .failed:
+        case .idle, .maintaining, .failed(_, _, .recoverPrevious):
             return .preserveMaintain
         }
     }
