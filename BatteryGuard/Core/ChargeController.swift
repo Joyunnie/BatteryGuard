@@ -164,7 +164,8 @@ final class ChargeController: ObservableObject {
     private var longRunningCheckTask: Task<Void, Never>?
     private var safetyTemperatureCache = SafetyTemperatureCache()
     private var lastTemperature: Double?
-    private var isSamplingSMCTemperature = false
+    private var smcTemperatureSampleGeneration: UInt64 = 0
+    private var smcTemperatureSampleTask: Task<Void, Never>?
     private var heatProtectionRetryAfter: Date?
     private var ledIntent: MagSafeLEDIntent?
     private var ledGeneration: UInt64 = 0
@@ -286,9 +287,9 @@ final class ChargeController: ObservableObject {
 
             guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
             startDisplayLoop()
-            startSMCTemperatureLoop()
             setupSleepWakeObservers()
             readiness = .ready
+            startSMCTemperatureLoop()
             startExternalReconciliation()
             refreshDisplayedError()
         } catch {
@@ -312,6 +313,7 @@ final class ChargeController: ObservableObject {
     }
 
     private func cleanupAfterFailedInitialization() {
+        cancelSMCTemperatureSample(clearCache: true)
         controlTimer?.invalidate()
         controlTimer = nil
         smcTemperatureTimer?.invalidate()
@@ -440,6 +442,7 @@ final class ChargeController: ObservableObject {
     }
 
     private func prepareLocalShutdown() {
+        cancelSMCTemperatureSample(clearCache: true)
         cancelLongRunningOperationCheck()
         activeOperationTask?.cancel()
         activeOperationTask = nil
@@ -494,6 +497,7 @@ final class ChargeController: ObservableObject {
     }
 
     private func finishLocalShutdown() {
+        cancelSMCTemperatureSample(clearCache: true)
         controlTimer?.invalidate()
         controlTimer = nil
         smcTemperatureTimer?.invalidate()
@@ -672,6 +676,8 @@ final class ChargeController: ObservableObject {
     }
 
     private func startSMCTemperatureLoop() {
+        smcTemperatureTimer?.invalidate()
+        cancelSMCTemperatureSample(clearCache: false)
         smcTemperatureTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sampleSMCTemperature() }
         }
@@ -679,10 +685,15 @@ final class ChargeController: ObservableObject {
     }
 
     private func sampleSMCTemperature() {
-        guard settings.heatProtectionEnabled, !isSamplingSMCTemperature else { return }
-        isSamplingSMCTemperature = true
+        guard readiness == .ready,
+              !isShuttingDown,
+              settings.heatProtectionEnabled,
+              case .batteryGuard = settings.batteryControlOwnership,
+              smcTemperatureSampleTask == nil else { return }
+        smcTemperatureSampleGeneration &+= 1
+        let generation = smcTemperatureSampleGeneration
         let backend = self.backend
-        Task { [weak self] in
+        smcTemperatureSampleTask = Task { [weak self] in
             let result: Result<Double, Error>
             do {
                 let rawValue = Double(try await backend.readBatteryTemperature())
@@ -693,7 +704,13 @@ final class ChargeController: ObservableObject {
             }
             catch { result = .failure(error) }
             guard let self else { return }
-            self.isSamplingSMCTemperature = false
+            guard self.smcTemperatureSampleGeneration == generation else { return }
+            self.smcTemperatureSampleTask = nil
+            guard !Task.isCancelled,
+                  self.readiness == .ready,
+                  !self.isShuttingDown,
+                  self.settings.heatProtectionEnabled,
+                  case .batteryGuard = self.settings.batteryControlOwnership else { return }
             switch result {
             case .success(let temperature):
                 self.safetyTemperatureCache.record(temperature, at: self.now())
@@ -706,6 +723,16 @@ final class ChargeController: ObservableObject {
                     self.evaluateHeatProtectionWithoutBatteryInfo(temperature: nil)
                 }
             }
+        }
+    }
+
+    private func cancelSMCTemperatureSample(clearCache: Bool) {
+        smcTemperatureSampleGeneration &+= 1
+        smcTemperatureSampleTask?.cancel()
+        smcTemperatureSampleTask = nil
+        if clearCache {
+            safetyTemperatureCache.clear()
+            lastTemperature = nil
         }
     }
 
@@ -961,12 +988,12 @@ final class ChargeController: ObservableObject {
             refreshDisplayedError()
             return
         }
+        cancelSMCTemperatureSample(clearCache: true)
         settings.heatProtectionEnabled = enabled
         if enabled {
+            sampleSMCTemperature()
             if let info = monitor.batteryInfo {
                 evaluateHeatProtection(using: info)
-            } else {
-                evaluateHeatProtectionWithoutBatteryInfo(temperature: recentSMCTemperature())
             }
         } else if case .heatBlocked(let previous) = mode {
             restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
@@ -1606,7 +1633,7 @@ final class ChargeController: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.cancelPendingChargeLimit(reason: "Sleep으로 대기 중인 Charge Limit 변경이 취소됐습니다.") }
+            Task { @MainActor in self?.prepareForSleep() }
         }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
@@ -1617,8 +1644,14 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    private func prepareForSleep() {
+        cancelPendingChargeLimit(reason: "Sleep으로 대기 중인 Charge Limit 변경이 취소됐습니다.")
+        cancelSMCTemperatureSample(clearCache: true)
+    }
+
     func reconcileAfterWake() async {
         guard !isShuttingDown else { return }
+        cancelSMCTemperatureSample(clearCache: true)
         if case .externalDrift(let expectation, _) = mode {
             await reconcileExternalDriftAfterWake(expectation: expectation)
             return
@@ -1781,6 +1814,7 @@ final class ChargeController: ObservableObject {
     }
 
     private func completeControlRelease(lastLimit: Int) async throws {
+        cancelSMCTemperatureSample(clearCache: true)
         try settings.completeBatteryControlRelease(lastLimit: lastLimit)
         settings.heatProtectionEnabled = false
         settings.controlMagSafeLED = false

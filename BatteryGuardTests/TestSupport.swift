@@ -36,6 +36,23 @@ final class TestClock: @unchecked Sendable {
     }
 }
 
+final class TestBatteryInfoSource: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: BatteryInfo?
+
+    init(_ value: BatteryInfo?) {
+        self.value = value
+    }
+
+    func read() -> BatteryInfo? {
+        lock.withLock { value }
+    }
+
+    func set(_ value: BatteryInfo?) {
+        lock.withLock { self.value = value }
+    }
+}
+
 func shellQuote(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
 }
@@ -83,6 +100,8 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var releaseDelayValue: TimeInterval = 0
     private var restoreLEDDelayValue: TimeInterval = 0
     private var temperatureSequence: [Float?] = []
+    private var temperatureReadDelays: [TimeInterval] = []
+    private var ignoresTemperatureReadCancellation = false
     private var ledDelayByRawValue: [UInt8: TimeInterval] = [:]
     private var controlStatusOverride: BatteryControlStatus?
     private var controlStatusDelayValue: TimeInterval = 0
@@ -162,6 +181,16 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func enqueueTemperatures(_ values: [Float?]) {
         lock.withLock { temperatureSequence.append(contentsOf: values) }
+    }
+
+    func enqueueTemperatureReadDelays(
+        _ delays: [TimeInterval],
+        ignoringCancellation: Bool = false
+    ) {
+        lock.withLock {
+            temperatureReadDelays.append(contentsOf: delays)
+            ignoresTemperatureReadCancellation = ignoringCancellation
+        }
     }
 
     func setLEDDelay(_ delay: TimeInterval, for state: MagSafeLEDState) {
@@ -305,10 +334,21 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func readBatteryTemperature() async throws -> Float {
         try record("read-temperature")
-        let nextTemperature = lock.withLock {
-            temperatureSequence.isEmpty ? temperatureValue : temperatureSequence.removeFirst()
+        let read = lock.withLock {
+            let temperature = temperatureSequence.isEmpty ? temperatureValue : temperatureSequence.removeFirst()
+            let delay = temperatureReadDelays.isEmpty ? 0 : temperatureReadDelays.removeFirst()
+            return (temperature, delay, ignoresTemperatureReadCancellation)
         }
-        guard let nextTemperature else {
+        if read.1 > 0 {
+            if read.2 {
+                await Task.detached {
+                    try? await Task.sleep(nanoseconds: UInt64(read.1 * 1_000_000_000))
+                }.value
+            } else {
+                try await Task.sleep(nanoseconds: UInt64(read.1 * 1_000_000_000))
+            }
+        }
+        guard let nextTemperature = read.0 else {
             throw BatteryError.commandFailed("temperature", 1, "sensor unavailable")
         }
         return nextTemperature
