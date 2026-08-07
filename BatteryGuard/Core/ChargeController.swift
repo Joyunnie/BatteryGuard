@@ -11,14 +11,6 @@ final class ChargeController: ObservableObject {
     private static let defaultReconciliationInterval: TimeInterval = 60
     private static let minimumReconciliationInterval: TimeInterval = 1
 
-    private enum ShutdownControlPolicy: Sendable {
-        case preserveMaintain
-        case preserveReleasedControl
-        case releaseControl
-        case restoreMaintain(Int)
-        case keepChargingDisabled
-    }
-
     private struct HeatRestoreReblockedError: LocalizedError {
         let underlying: Error
         var errorDescription: String? {
@@ -169,8 +161,7 @@ final class ChargeController: ObservableObject {
     private var activeOperationID: UInt64?
     private var activeOperationTask: Task<Void, Never>?
     private var isCheckingLongRunningOperation = false
-    private var cachedSMCTemperature: Double?
-    private var cachedSMCTemperatureAt: Date?
+    private var safetyTemperatureCache = SafetyTemperatureCache()
     private var lastTemperature: Double?
     private var isSamplingSMCTemperature = false
     private var heatProtectionRetryAfter: Date?
@@ -352,54 +343,30 @@ final class ChargeController: ObservableObject {
         let modeBeforeShutdown = mode
         let readinessBeforeShutdown = readiness
         let requestedLimit = effectiveChargeLimit
-        let requestedPolicy: ShutdownControlPolicy
-        if settings.batteryControlReleasePending {
-            requestedPolicy = .releaseControl
-        } else if !settings.batteryControlEnabled {
-            requestedPolicy = .preserveReleasedControl
-        } else {
-            switch modeBeforeShutdown {
-        case .controlDisabled:
-            requestedPolicy = .preserveReleasedControl
-        case .toppingUp(let limit), .discharging(_, let limit):
-            requestedPolicy = .restoreMaintain(limit)
-        case .transitioning(let transition):
-            switch transition {
-            case .enteringHeat, .restoringHeat:
-                requestedPolicy = .keepChargingDisabled
-            case .releasingControl:
-                requestedPolicy = .releaseControl
-            default:
-                requestedPolicy = .restoreMaintain(transition.previousMode?.maintainLimit ?? requestedLimit)
-            }
-        case .heatBlocked, .failed(_, _, true):
-            requestedPolicy = settings.batteryControlReleasePending
-                ? .releaseControl
-                : .keepChargingDisabled
-        case .externalDrift(_, let observed):
-            switch observed {
-            case .maintaining:
-                requestedPolicy = .preserveMaintain
-            case .chargingDisabled:
-                requestedPolicy = .keepChargingDisabled
-            case .charging, .discharging, .unavailable, .inconsistent:
-                let message = "외부 CLI 변경 상태를 먼저 해결해야 안전하게 종료할 수 있습니다: \(observed.userDescription)"
-                commandError = message
-                refreshDisplayedError()
-                await diagnostics.record(
-                    DiagnosticEvent(
-                        category: .lifecycle,
-                        operation: "shutdown rejected",
-                        outcome: .failed,
-                        message: message,
-                        stateBefore: mode.diagnosticLabel
-                    )
+        let requestedPolicy: ChargeShutdownPolicy
+        do {
+            requestedPolicy = try ChargeShutdownPlanner.requestedPolicy(
+                for: ChargeShutdownContext(
+                    releasePending: settings.batteryControlReleasePending,
+                    controlEnabled: settings.batteryControlEnabled,
+                    mode: modeBeforeShutdown,
+                    effectiveLimit: requestedLimit
                 )
-                throw BatteryError.unsupported(message)
-            }
-        default:
-            requestedPolicy = .preserveMaintain
-            }
+            )
+        } catch {
+            let message = error.localizedDescription
+            commandError = message
+            refreshDisplayedError()
+            await diagnostics.record(
+                DiagnosticEvent(
+                    category: .lifecycle,
+                    operation: "shutdown rejected",
+                    outcome: .failed,
+                    message: message,
+                    stateBefore: mode.diagnosticLabel
+                )
+            )
+            throw BatteryError.unsupported(message)
         }
 
         isShuttingDown = true
@@ -479,35 +446,16 @@ final class ChargeController: ObservableObject {
     }
 
     private func performVerifiedBatteryShutdown(
-        requestedPolicy: ShutdownControlPolicy,
+        requestedPolicy: ChargeShutdownPolicy,
         requestedLimit: Int
     ) async throws {
         try await backend.requestCancellation()
         let freshStatus = try await backend.readControlStatus()
-        let shutdownPolicy: ShutdownControlPolicy
-        if case .preserveMaintain = requestedPolicy,
-           let actualLimit = freshStatus.maintainLevel,
-           freshStatus.isVerifiedMaintain(level: actualLimit) {
-            shutdownPolicy = .preserveMaintain
-        } else {
-            switch requestedPolicy {
-            case .keepChargingDisabled:
-                shutdownPolicy = .keepChargingDisabled
-            case .preserveReleasedControl:
-                guard freshStatus.isCompatibleWithReleasedControl else {
-                    throw BatteryError.commandFailed(
-                        "shutdown released control",
-                        -1,
-                        "BatteryGuard control was no longer released: \(freshStatus.diagnosticDescription)"
-                    )
-                }
-                shutdownPolicy = .preserveReleasedControl
-            case .releaseControl:
-                shutdownPolicy = .releaseControl
-            case .preserveMaintain, .restoreMaintain:
-                shutdownPolicy = .restoreMaintain(requestedLimit)
-            }
-        }
+        let shutdownPolicy = try ChargeShutdownPlanner.verifiedPolicy(
+            requested: requestedPolicy,
+            status: freshStatus,
+            restoreLimit: requestedLimit
+        )
         switch shutdownPolicy {
         case .preserveMaintain:
             break
@@ -738,14 +686,12 @@ final class ChargeController: ObservableObject {
             self.isSamplingSMCTemperature = false
             switch result {
             case .success(let temperature):
-                self.cachedSMCTemperature = temperature
-                self.cachedSMCTemperatureAt = self.now()
+                self.safetyTemperatureCache.record(temperature, at: self.now())
                 if self.monitor.batteryInfo == nil {
                     self.evaluateHeatProtectionWithoutBatteryInfo(temperature: temperature)
                 }
             case .failure:
-                self.cachedSMCTemperature = nil
-                self.cachedSMCTemperatureAt = nil
+                self.safetyTemperatureCache.clear()
                 if self.monitor.batteryInfo == nil {
                     self.evaluateHeatProtectionWithoutBatteryInfo(temperature: nil)
                 }
@@ -830,12 +776,10 @@ final class ChargeController: ObservableObject {
             guard let value = BatteryMonitor.validatedTemperature(rawValue) else {
                 throw BatteryError.unsupported("SMC가 유효하지 않은 배터리 온도 \(rawValue)°C를 반환했습니다.")
             }
-            cachedSMCTemperature = value
-            cachedSMCTemperatureAt = now()
+            safetyTemperatureCache.record(value, at: now())
             values.append(value)
         } catch {
-            cachedSMCTemperature = nil
-            cachedSMCTemperatureAt = nil
+            safetyTemperatureCache.clear()
         }
         let freshInfo = monitor.readBatteryInfo() ?? fallbackInfo
         if let freshInfo {
@@ -1017,13 +961,7 @@ final class ChargeController: ObservableObject {
     }
 
     private func recentSMCTemperature(maxAge: TimeInterval = 15) -> Double? {
-        guard let cachedSMCTemperature,
-              let cachedSMCTemperatureAt else {
-            return nil
-        }
-        let age = now().timeIntervalSince(cachedSMCTemperatureAt)
-        guard age >= 0, age <= maxAge else { return nil }
-        return cachedSMCTemperature
+        safetyTemperatureCache.recentValue(at: now(), maxAge: maxAge)
     }
 
     // MARK: - User actions
@@ -1633,8 +1571,7 @@ final class ChargeController: ObservableObject {
         let reconciliationID = operationGeneration
         activeOperationID = reconciliationID
         readiness = .reconciling
-        cachedSMCTemperature = nil
-        cachedSMCTemperatureAt = nil
+        safetyTemperatureCache.clear()
         ledIntent = nil
         do {
             try await backend.requestCancellation()
@@ -1684,8 +1621,7 @@ final class ChargeController: ObservableObject {
         let reconciliationID = operationGeneration
         activeOperationID = reconciliationID
         readiness = .reconciling
-        cachedSMCTemperature = nil
-        cachedSMCTemperatureAt = nil
+        safetyTemperatureCache.clear()
         ledIntent = nil
 
         do {
