@@ -25,7 +25,7 @@ final class LongRunningChargePolicyTests: XCTestCase {
         )
         XCTAssertEqual(
             LongRunningChargePolicy.progress(mode: session.expectedMode, currentCharge: 100),
-            .complete(session)
+            .finishAndRestoreMaintain(session)
         )
     }
 
@@ -38,11 +38,11 @@ final class LongRunningChargePolicyTests: XCTestCase {
         )
         XCTAssertEqual(
             LongRunningChargePolicy.progress(mode: session.expectedMode, currentCharge: 60),
-            .complete(session)
+            .finishAndRestoreMaintain(session)
         )
         XCTAssertEqual(
             LongRunningChargePolicy.progress(mode: session.expectedMode, currentCharge: 59),
-            .complete(session)
+            .finishAndRestoreMaintain(session)
         )
     }
 
@@ -67,7 +67,7 @@ final class LongRunningChargePolicyTests: XCTestCase {
                 session: session,
                 observed: .chargingDisabled
             ),
-            .recoverMaintain(limit: 75)
+            .recoverMaintain(session)
         )
         XCTAssertEqual(
             LongRunningChargePolicy.unexpectedExit(
@@ -86,5 +86,29 @@ final class LongRunningChargePolicyTests: XCTestCase {
                 observed: .unavailable("status failed")
             )
         )
+    }
+
+    func testEveryNonDisabledObservationBecomesReadOnlyDrift() {
+        let session = LongRunningChargeSession.topUp(returnLimit: 70)
+        let observations: [ObservedChargeMode] = [
+            .maintaining(limit: 60),
+            .charging,
+            .discharging,
+            .unavailable("status failed"),
+            .inconsistent("conflicting tuple")
+        ]
+
+        for observed in observations {
+            XCTAssertEqual(
+                LongRunningChargePolicy.unexpectedExit(
+                    session: session,
+                    observed: observed
+                ),
+                .externalDrift(
+                    expected: .maintaining(limit: 70),
+                    observed: observed
+                )
+            )
+        }
     }
 }

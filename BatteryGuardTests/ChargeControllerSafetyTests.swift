@@ -239,6 +239,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         controller.startDischarge()
         let dischargeStarted = await eventually { controller.isDischarging }
         XCTAssertTrue(dischargeStarted)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
 
         backend.temperature = 45
         let hotInfo = makeBatteryInfo(charge: 90, isCharging: false, temperature: 45)
@@ -751,6 +752,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         )
         await controller.reconcileExternalState()
         XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(monitor.isSleepPreventionActive)
     }
 
     func testLostDischargeOwnershipSurfacesExternalDriftWithoutOverwritingIt() async {
@@ -759,6 +761,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         controller.startDischarge()
         let dischargeStarted = await eventually { controller.isDischarging }
         XCTAssertTrue(dischargeStarted)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
         backend.setOwnedLongRunningOperation(false)
         backend.setControlStatus(
             BatteryControlStatus(
@@ -776,6 +779,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
 
         let driftDetected = await eventually { controller.hasExternalControlDrift }
         XCTAssertTrue(driftDetected)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
         XCTAssertEqual(
             backend.operations.filter { $0.hasPrefix("maintain:") }.count,
             maintainCount
@@ -792,6 +796,62 @@ final class ChargeControllerSafetyTests: XCTestCase {
         )
         await controller.reconcileExternalState()
         XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+    }
+
+    func testUnexpectedDischargeExitReleasesSleepOnlyAfterMaintainRecoverySucceeds() async {
+        let (controller, backend, monitor, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
+
+        backend.setOwnedLongRunningOperation(false)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        controller.processBatteryInfo(makeBatteryInfo(charge: 90))
+
+        let recovered = await eventually { controller.mode == .maintaining(limit: 80) }
+        XCTAssertTrue(recovered)
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+    }
+
+    func testUnexpectedDischargeExitKeepsSleepAssertionWhenMaintainRecoveryFails() async {
+        let (controller, backend, monitor, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
+
+        backend.setOwnedLongRunningOperation(false)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        backend.failNext("maintain")
+        controller.processBatteryInfo(makeBatteryInfo(charge: 90))
+
+        let failed = await eventually {
+            if case .failed(let previous, _, let disposition) = controller.mode {
+                return previous == .maintaining(limit: 80) && disposition == .recoverPrevious
+            }
+            return false
+        }
+        XCTAssertTrue(failed)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
     }
 
     func testDischargeStartFailureRecordsMaintainAsPreviousAndBlocksIfRecoveryFails() async {

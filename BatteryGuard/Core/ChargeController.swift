@@ -1296,7 +1296,7 @@ final class ChargeController: ObservableObject {
                 }
             }
             checkLongRunningOperation(session: session, fallbackMessage: fallbackMessage)
-        case .complete(let session):
+        case .finishAndRestoreMaintain(let session):
             switch session {
             case .topUp:
                 stopTopUp(operation: "complete Top Up and resume maintain")
@@ -1371,8 +1371,8 @@ final class ChargeController: ObservableObject {
             session: session,
             observed: observed
         ) {
-        case .recoverMaintain(let limit):
-            recoverMaintainAfterUnexpectedExit(limit: limit, message: message)
+        case .recoverMaintain(let session):
+            recoverMaintainAfterUnexpectedExit(session: session, message: message)
         case .externalDrift(let expectation, let observed):
             mode = .externalDrift(expected: expectation, observed: observed)
             driftError = "외부 CLI 상태 감지: \(observed.userDescription). \(message)"
@@ -1396,17 +1396,24 @@ final class ChargeController: ObservableObject {
         longRunningCheckTask = nil
     }
 
-    private func recoverMaintainAfterUnexpectedExit(limit: Int, message: String) {
+    private func recoverMaintainAfterUnexpectedExit(
+        session: LongRunningChargeSession,
+        message: String
+    ) {
         guard activeOperationID == nil else { return }
-        monitor.allowSleep()
+        let limit = session.returnLimit
         let backend = self.backend
         _ = runBattery(
             operation: "recover maintain after unexpected process exit",
             transition: .recoveringMaintain(limit: limit),
             work: { try await backend.applyMaintain(level: limit) },
             onSuccess: { [weak self] in
-                self?.mode = .maintaining(limit: limit)
-                self?.commandError = message
+                guard let self else { return }
+                if case .discharge = session {
+                    self.monitor.allowSleep()
+                }
+                self.mode = .maintaining(limit: limit)
+                self.commandError = message
             }
         )
     }
@@ -1485,6 +1492,9 @@ final class ChargeController: ObservableObject {
                 }
                 let reconciledMode = expectation.reconciledMode
                 if mode != reconciledMode {
+                    if case .maintaining = expectation {
+                        monitor.allowSleep()
+                    }
                     mode = reconciledMode
                     if recoveredFromFailure { commandError = nil }
                     driftError = nil
@@ -1715,6 +1725,9 @@ final class ChargeController: ObservableObject {
             let snapshot = try await readReconciliationSnapshot(for: expectation)
             guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
             if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
+                if case .maintaining = expectation {
+                    monitor.allowSleep()
+                }
                 mode = expectation.reconciledMode
                 driftError = nil
             } else {

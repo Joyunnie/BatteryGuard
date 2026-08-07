@@ -30,7 +30,7 @@ IOKit readings ---+                    result + verified CLI status
 - Give shared observable UI state explicit main-actor isolation; keep Core Data work on its configured context/queue.
 - Model asynchronous store readiness explicitly and await it; never use fixed sleeps as an initialization contract.
 - Keep abstractions minimal: use `ChargeBackend` plus an in-memory Core Data configuration; add a `BatteryHistoryStore` protocol only if a second implementation becomes necessary.
-- Keep the POSIX ownership journal implementation in `BatteryControlOwnershipJournal`; `UserSettings` retains ownership loading, transitions, and persistence errors. Keep tuple matching and observed-state interpretation in `ChargeReconciliationPolicy`, shutdown mapping in `ChargeShutdownPlanner`, Heat Protection decisions in `HeatProtectionPolicy`, temperature freshness in `SafetyTemperatureCache`, and state presentation in `ChargeState`. Hardware reads, task ownership, and published state remain in `ChargeController`.
+- Keep the POSIX ownership journal implementation in `BatteryControlOwnershipJournal`; `UserSettings` retains ownership loading, transitions, and persistence errors. Keep tuple matching and observed-state interpretation in `ChargeReconciliationPolicy`, shutdown mapping in `ChargeShutdownPlanner`, Heat Protection decisions in `HeatProtectionPolicy`, Top Up/Discharge progress and exit decisions in `LongRunningChargePolicy`, temperature freshness in `SafetyTemperatureCache`, and state presentation in `ChargeState`. Hardware reads, task ownership, and published state remain in `ChargeController`.
 - Reuse existing views, IOKit monitoring, and history code. Replace unsafe process/state internals incrementally; do not rewrite the app wholesale.
 
 ## Hardware and Command Safety
@@ -86,6 +86,7 @@ IOKit readings ---+                    result + verified CLI status
 - Delay AppKit termination until safety cleanup succeeds; a timeout or cleanup failure must cancel normal termination instead of merely logging and exiting.
 - Tear down monitoring and observers only after verified shutdown cleanup; keep failed shutdowns alive and retryable.
 - Keep the Discharge sleep assertion until cancellation and verified safe-state recovery succeed; a failed cleanup must retain it for retry.
+- If an owned Discharge process is lost, retain its sleep assertion through external drift and release it only after a full Maintain tuple is verified.
 - If initialization fails before the backend becomes available, quit through local teardown without issuing hardware cleanup commands to the unavailable backend.
 - Reject normal quit while an externally owned charge/discharge or unknown control state is active, without tearing down the controller, so the user can correct the state and retry.
 - Re-read external drift immediately before choosing the quit policy; never trust a periodic snapshot for shutdown safety.

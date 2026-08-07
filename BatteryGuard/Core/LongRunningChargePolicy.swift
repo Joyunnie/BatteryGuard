@@ -18,24 +18,16 @@ enum LongRunningChargeSession: Equatable, Sendable {
         }
     }
 
-    var activeExpectation: ReconciledChargeExpectation {
-        switch self {
-        case .topUp(let returnLimit):
-            return .toppingUp(returnLimit: returnLimit)
-        case .discharge(let target, let returnLimit):
-            return .discharging(target: target, returnLimit: returnLimit)
-        }
-    }
 }
 
 enum LongRunningProgressDecision: Equatable, Sendable {
     case none
     case checkLiveness(LongRunningChargeSession)
-    case complete(LongRunningChargeSession)
+    case finishAndRestoreMaintain(LongRunningChargeSession)
 }
 
 enum LongRunningExitDecision: Equatable, Sendable {
-    case recoverMaintain(limit: Int)
+    case recoverMaintain(LongRunningChargeSession)
     case externalDrift(expected: ReconciledChargeExpectation, observed: ObservedChargeMode)
 }
 
@@ -48,9 +40,13 @@ enum LongRunningChargePolicy {
 
         switch session {
         case .topUp:
-            return currentCharge >= 100 ? .complete(session) : .checkLiveness(session)
+            return currentCharge >= 100
+                ? .finishAndRestoreMaintain(session)
+                : .checkLiveness(session)
         case .discharge(let target, _):
-            return currentCharge <= target ? .complete(session) : .checkLiveness(session)
+            return currentCharge <= target
+                ? .finishAndRestoreMaintain(session)
+                : .checkLiveness(session)
         }
     }
 
@@ -59,7 +55,7 @@ enum LongRunningChargePolicy {
         observed: ObservedChargeMode
     ) -> LongRunningExitDecision {
         if observed == .chargingDisabled {
-            return .recoverMaintain(limit: session.returnLimit)
+            return .recoverMaintain(session)
         }
         return .externalDrift(
             expected: .maintaining(limit: session.returnLimit),

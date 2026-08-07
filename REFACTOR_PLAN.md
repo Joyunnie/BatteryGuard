@@ -255,6 +255,16 @@ PR #2부터 #10까지의 현재 tree를 다시 검토해 failure 의미와 장�
 
 이 보완은 기존 순서를 바꾸지 않는다. PR #11은 Top Up/Discharge 장기 작업의 순수 decision 계약을 별도 타입으로 추출한다. process liveness와 fresh status를 입력으로 받아 `none`, verified completion, safe Maintain recovery 또는 external drift를 구분하고, controller에는 task 소유권, backend I/O와 published state 적용만 남긴다. 시작/중지 명령 자체와 `BatteryCommandRunner`의 process ownership은 옮기지 않는다.
 
+### 0.19 PR #11 long-running lifecycle decision 분리 (2026-08-07)
+
+- `LongRunningChargeSession`과 `LongRunningChargePolicy`를 추가해 Top Up/Discharge의 target 진행, 측정 불가 시 liveness 확인, verified cleanup 요청, unexpected exit 후 safe Maintain recovery 또는 external drift 결정을 I/O 없는 계약으로 분리했다.
+- controller는 owned-process probe, fresh status read, operation/probe generation, backend 명령과 published mode 적용을 계속 소유한다. target 도달은 성공이 아니라 `finishAndRestoreMaintain` 요청이며, cancel과 verified Maintain이 끝난 뒤에만 mode를 완료 상태로 바꾼다.
+- unexpected Discharge exit에서는 verified Maintain 복구가 성공하기 전까지 sleep assertion을 유지한다. external drift 동안에도 유지하고, read-only reconciliation이 full Maintain tuple을 확인한 뒤에만 해제한다.
+- PR #11 혹독 리뷰에서 죽은 expectation API와 완료를 과장한 action 이름을 제거하고, charging-disabled 외의 모든 관측을 자동 덮어쓰지 않는 drift로 고정했다.
+- strict-concurrency complete와 warnings-as-errors에서 전체 170개 테스트, Release build와 Debug analyze가 통과했다. 실제 CLI와 하드웨어는 실행하지 않았다.
+
+이 단계로 계획된 controller pure-decision 분리는 완료됐다. 추가 파일 분리는 구체적인 안전 결함이나 독립 테스트 경계가 확인될 때만 진행하며, 줄 수 감소만을 위한 service/extension 분할은 하지 않는다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -758,7 +768,7 @@ enum ChargeMode: Equatable {
 12. `[PR #9 구현]` shutdown planning과 temperature freshness 계약 분리, 동일 경계에 맞춘 controller/policy 테스트 파일 분할
 13. `[PR #10 구현]` Heat Protection decision을 pure policy로 분리하고 ownership·hysteresis·cooldown·fail-closed 경계 테스트 추가
 14. `[PR #10 누적 리뷰 보완]` failure Boolean을 typed disposition으로 교체하고 stale long-running probe가 shutdown/new operation 뒤 상태를 바꾸지 못하게 generation 검증
-15. `[PR #11 예정]` Top Up/Discharge long-running exit decision을 pure policy로 분리하고 completion/recovery/drift 경계 테스트 추가
+15. `[PR #11 구현·혹독 리뷰 보완]` Top Up/Discharge long-running decision을 pure policy로 분리하고 target/liveness/recovery/drift 및 sleep assertion 수명 테스트 추가
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
