@@ -89,4 +89,24 @@ final class BatteryValueTests: XCTestCase {
         XCTAssertEqual(publishedValues.compactMap { $0?.currentCharge }, [70, 71])
         withExtendedLifetime(observation) {}
     }
+
+    @MainActor
+    func testPowerNotificationsCoalesceBeforeReadingBatteryState() async {
+        var readCount = 0
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: {
+                readCount += 1
+                return makeBatteryInfo(charge: 70)
+            },
+            runsMonitoringInfrastructure: false
+        )
+
+        monitor.scheduleNotificationRefresh()
+        monitor.scheduleNotificationRefresh()
+        monitor.scheduleNotificationRefresh()
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(readCount, 1)
+        XCTAssertEqual(monitor.batteryInfo?.currentCharge, 70)
+    }
 }

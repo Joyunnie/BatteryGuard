@@ -46,6 +46,7 @@ final class BatteryMonitor: ObservableObject {
     private(set) var isSleepPreventionActive = false
     private var timer: Timer?
     private var runLoopSource: CFRunLoopSource?
+    private var notificationRefreshWork: DispatchWorkItem?
 
     init(
         batteryInfoProvider: (() -> BatteryInfo?)? = nil,
@@ -231,6 +232,8 @@ final class BatteryMonitor: ObservableObject {
     func stopMonitoring() {
         timer?.invalidate()
         timer = nil
+        notificationRefreshWork?.cancel()
+        notificationRefreshWork = nil
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
             runLoopSource = nil
@@ -244,7 +247,7 @@ final class BatteryMonitor: ObservableObject {
             guard let context = context else { return }
             let monitor = Unmanaged<BatteryMonitor>.fromOpaque(context).takeUnretainedValue()
             DispatchQueue.main.async {
-                monitor.refreshBatteryInfo()
+                monitor.scheduleNotificationRefresh()
             }
         }
 
@@ -253,6 +256,16 @@ final class BatteryMonitor: ObservableObject {
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
             runLoopSource = source
         }
+    }
+
+    func scheduleNotificationRefresh() {
+        notificationRefreshWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.notificationRefreshWork = nil
+            self?.refreshBatteryInfo()
+        }
+        notificationRefreshWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
     }
 
     // MARK: - Sleep 제어

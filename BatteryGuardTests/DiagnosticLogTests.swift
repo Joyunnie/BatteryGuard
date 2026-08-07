@@ -108,6 +108,31 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertEqual(reloaded.count, 10)
     }
 
+    func testRoutineEventsArePersistedByTheScheduledFlush() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-diagnostic-auto-flush-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 10, routineFlushInterval: 0.02)
+
+        await log.record(
+            DiagnosticEvent(
+                category: .command,
+                operation: "scheduled-routine",
+                exitCode: 0,
+                outcome: .exited
+            )
+        )
+
+        let deadline = Date().addingTimeInterval(1)
+        while !FileManager.default.fileExists(atPath: fileURL.path), Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let reloaded = await DiagnosticLog(fileURL: fileURL, capacity: 10).recentEvents()
+        XCTAssertEqual(reloaded.map(\.operation), ["scheduled-routine"])
+    }
+
     func testSafetyEventImmediatelyFlushesPendingRoutineEvents() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-diagnostic-safety-flush-\(UUID().uuidString)", isDirectory: true)

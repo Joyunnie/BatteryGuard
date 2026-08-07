@@ -14,6 +14,25 @@ final class SafetyTemperatureCacheTests: XCTestCase {
         XCTAssertNil(cache.recentValue(at: recordedAt, maxAge: .infinity))
     }
 
+    func testSamplingBecomesDueAtTheExactIntervalBoundary() {
+        let recordedAt = Date(timeIntervalSince1970: 1_000)
+        var cache = SafetyTemperatureCache()
+        cache.record(31.5, at: recordedAt)
+
+        XCTAssertFalse(cache.isSamplingDue(
+            at: recordedAt.addingTimeInterval(4.999),
+            interval: 5
+        ))
+        XCTAssertTrue(cache.isSamplingDue(
+            at: recordedAt.addingTimeInterval(5),
+            interval: 5
+        ))
+        XCTAssertTrue(cache.isSamplingDue(
+            at: recordedAt.addingTimeInterval(5.001),
+            interval: 5
+        ))
+    }
+
     func testInvalidRecordClearsAnEarlierValidSample() {
         let recordedAt = Date(timeIntervalSince1970: 1_000)
         var cache = SafetyTemperatureCache()

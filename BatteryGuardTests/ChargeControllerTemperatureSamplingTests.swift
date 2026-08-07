@@ -4,23 +4,8 @@ import Foundation
 
 @MainActor
 extension ChargeControllerSafetyTests {
-    func testSMCTemperatureSamplingUsesSlowCadenceOnlyWithSafeIOKitFallback() {
-        XCTAssertEqual(
-            ChargeController.smcTemperatureSamplingInterval(ioKitTemperature: 30, threshold: 40),
-            15
-        )
-        XCTAssertEqual(
-            ChargeController.smcTemperatureSamplingInterval(ioKitTemperature: 35, threshold: 40),
-            5
-        )
-        XCTAssertEqual(
-            ChargeController.smcTemperatureSamplingInterval(ioKitTemperature: nil, threshold: 40),
-            5
-        )
-        XCTAssertEqual(
-            ChargeController.smcTemperatureSamplingInterval(ioKitTemperature: .nan, threshold: 40),
-            5
-        )
+    func testSMCTemperatureSamplingKeepsTheSafetyCadenceIndependentOfIOKit() {
+        XCTAssertEqual(ChargeController.smcTemperatureSamplingInterval, 5)
     }
 
     func testSafetyTemperatureUsesIOKitWhileHeatProtectionIsDisabled() {

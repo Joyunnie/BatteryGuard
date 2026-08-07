@@ -244,7 +244,7 @@ actor SMCKit: ChargeBackend {
         let identity: ProcessIdentity?
     }
 
-    private struct ProcessIdentity: Equatable, Sendable {
+    struct ProcessIdentity: Equatable, Sendable {
         let startSeconds: UInt64
         let startMicroseconds: UInt64
     }
@@ -656,6 +656,26 @@ actor SMCKit: ChargeBackend {
         return classifyMaintainWorkers(pidFilePID: pidFilePID, workers: workers)
     }
 
+    static func classifyMaintainWorkers(
+        pidFilePID: Int32?,
+        pgrepOutput: String,
+        processTable: String,
+        batteryPath: String,
+        identitiesBefore: [Int32: ProcessIdentity],
+        identitiesAfter: [Int32: ProcessIdentity]
+    ) -> MaintainWorkerStatus {
+        classifyMaintainWorkers(
+            pidFilePID: pidFilePID,
+            workers: stableMaintainWorkers(
+                pgrepOutput: pgrepOutput,
+                processTable: processTable,
+                batteryPath: batteryPath,
+                identitiesBefore: identitiesBefore,
+                identitiesAfter: identitiesAfter
+            )
+        )
+    }
+
     private static func classifyMaintainWorkers(
         pidFilePID: Int32?,
         workers: [MaintainWorkerProcess]
@@ -688,6 +708,69 @@ actor SMCKit: ChargeBackend {
                 command: String(fields[1]),
                 target: parsed.target,
                 identity: nil
+            )
+        }
+    }
+
+    private static func parsePSMaintainWorkerProcesses(
+        processTable: String,
+        batteryPath: String
+    ) -> [MaintainWorkerProcess] {
+        processTable.split(whereSeparator: \Character.isNewline).compactMap { line in
+            let fields = line.split(maxSplits: 2, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 3,
+                  let pid = Int32(fields[0]),
+                  pid > 1,
+                  let parsed = Self.parseExactMaintainCommand(
+                    String(fields[2]),
+                    batteryPath: batteryPath
+                  ) else {
+                return nil
+            }
+            return MaintainWorkerProcess(
+                pid: pid,
+                command: String(fields[2]),
+                target: parsed.target,
+                identity: nil
+            )
+        }
+    }
+
+    private static func stableMaintainWorkers(
+        pgrepOutput: String,
+        processTable: String,
+        batteryPath: String,
+        identitiesBefore: [Int32: ProcessIdentity],
+        identitiesAfter: [Int32: ProcessIdentity]
+    ) -> [MaintainWorkerProcess] {
+        let parsedCandidates = parsePgrepMaintainWorkerProcesses(
+            pgrepOutput: pgrepOutput,
+            batteryPath: batteryPath
+        )
+        var candidates: [Int32: MaintainWorkerProcess] = [:]
+        var duplicatePIDs = Set<Int32>()
+        for candidate in parsedCandidates {
+            if candidates.updateValue(candidate, forKey: candidate.pid) != nil {
+                duplicatePIDs.insert(candidate.pid)
+            }
+        }
+        return parsePSMaintainWorkerProcesses(
+            processTable: processTable,
+            batteryPath: batteryPath
+        ).compactMap { inspected in
+            guard !duplicatePIDs.contains(inspected.pid),
+                  let candidate = candidates[inspected.pid],
+                  candidate.command == inspected.command,
+                  candidate.target == inspected.target,
+                  let identityBefore = identitiesBefore[inspected.pid],
+                  identitiesAfter[inspected.pid] == identityBefore else {
+                return nil
+            }
+            return MaintainWorkerProcess(
+                pid: inspected.pid,
+                command: inspected.command,
+                target: inspected.target,
+                identity: identityBefore
             )
         }
     }
@@ -823,18 +906,50 @@ actor SMCKit: ChargeBackend {
                 "refusing unbounded process inspection: \(candidateLines.count) candidates"
             )
         }
-        return try Self.parsePgrepMaintainWorkerProcesses(
+        let parsedCandidates = Self.parsePgrepMaintainWorkerProcesses(
             pgrepOutput: candidates.stdout,
             batteryPath: batteryPath
-        ).filter { $0.pid != getpid() }.compactMap { worker in
-            guard let identity = try currentIdentity(for: worker.pid) else { return nil }
-            return MaintainWorkerProcess(
-                pid: worker.pid,
-                command: worker.command,
-                target: worker.target,
-                identity: identity
-            )
+        ).filter { $0.pid != getpid() }
+        guard !parsedCandidates.isEmpty else { return [] }
+
+        var identitiesBefore: [Int32: ProcessIdentity] = [:]
+        for candidate in parsedCandidates {
+            if let identity = try currentIdentity(for: candidate.pid) {
+                identitiesBefore[candidate.pid] = identity
+            }
         }
+        guard !identitiesBefore.isEmpty else { return [] }
+
+        let inspection = try await runProcess(
+            executable: "/bin/ps",
+            arguments: [
+                "-p",
+                identitiesBefore.keys.sorted().map(String.init).joined(separator: ","),
+                "-o",
+                "pid=,pgid=,command="
+            ],
+            label: "verify battery CLI process identities",
+            timeout: try boundedSleepPreparationTimeout(
+                maximum: statusCommandTimeout,
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            ),
+            allowedExitCodes: [0, 1]
+        )
+        guard inspection.exitCode == 0 else { return [] }
+
+        var identitiesAfter: [Int32: ProcessIdentity] = [:]
+        for pid in identitiesBefore.keys {
+            if let identity = try currentIdentity(for: pid) {
+                identitiesAfter[pid] = identity
+            }
+        }
+        return Self.stableMaintainWorkers(
+            pgrepOutput: candidates.stdout,
+            processTable: inspection.stdout,
+            batteryPath: batteryPath,
+            identitiesBefore: identitiesBefore,
+            identitiesAfter: identitiesAfter
+        )
     }
 
     private func currentIdentity(for pid: Int32) throws -> ProcessIdentity? {

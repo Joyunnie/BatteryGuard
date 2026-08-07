@@ -44,7 +44,7 @@ IOKit readings ---+                    result + verified CLI status
 - Verify control-changing commands with a subsequent status read before updating UI state.
 - Verify the complete expected control tuple: charging, discharging, maintain level, and exact worker state; a matching subset is not success.
 - For battery CLI v1.3.4 force discharge, the verified tuple is charging enabled, discharging true, and the Maintain worker stopped. Do not require charging disabled: `CHTE=00` permits the forced `CHIE=08` discharge path.
-- Treat maintain as valid only when exactly one worker with the expected target exists and the PID file points to it; stale, mismatched, or duplicate workers are failures.
+- Treat maintain as valid only when exactly one worker with the expected target exists and the PID file points to it; bind argv to a stable process identity by checking the start identity before and after inspection. Stale, mismatched, reused, or duplicate workers are failures.
 - Bind every worker selected for termination to its process start identity and revalidate that identity immediately before each signal; a reused PID must never be signaled.
 - Never trust the CLI's “killing old maintain process” log by itself. Re-read the PID file and exact command line; the script can leave an orphaned stale worker after external commands.
 - Read PID files without following links or blocking on special files; accept only bounded, current-user-owned regular files.
@@ -59,8 +59,9 @@ IOKit readings ---+                    result + verified CLI status
 - Do not dump raw IOKit dictionaries or battery identifiers to stdout or diagnostics.
 - Reject nonfinite or physically implausible sensor values before any safety decision.
 - Keep battery measurement delivery notification-driven, suppress identical snapshots, and use only a low-frequency watchdog for missed notifications.
-- Sample SMC temperatures adaptively: a clearly safe IOKit reading may use the slower cadence, but near-threshold, unavailable, and explicit safety-transition reads must retain the fast/forced path.
+- While Heat Protection owns battery control, sample the independent SMC source at most every five seconds regardless of the IOKit reading. Reduce SMC subprocess cost only by a verified batched/native read, never by allowing one sensor to slow another.
 - Batch only routine diagnostics. Safety, failure, control, and lifecycle events must flush immediately, including any pending routine context.
+- Flush pending routine diagnostics after verified shutdown cleanup and before approving app termination.
 
 ## State and Lifecycle Invariants
 
@@ -75,6 +76,7 @@ IOKit readings ---+                    result + verified CLI status
 - For Top Up and Discharge, require both the expected CLI tuple and a live BatteryGuard-owned process; a matching external command is drift, not success.
 - Revalidate the operation generation and expected mode after an async status read so stale reconciliation cannot overwrite wake or newer safety intent.
 - Own long-running liveness probes as cancellable tasks and validate both probe and operation generations after every await; a stale probe must not mutate shutdown or a later Top Up/Discharge session.
+- Drive Top Up/Discharge liveness from an active-mode heartbeat or process-exit event, never solely from changing battery measurements. Drive history heartbeat independently from UI snapshot equality.
 - Show drift as expected versus observed state with an explicit read-only retry path; never hide the recovery target behind a disabled control.
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.

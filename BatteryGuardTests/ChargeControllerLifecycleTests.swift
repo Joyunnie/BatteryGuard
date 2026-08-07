@@ -412,4 +412,25 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(backend.operations.contains("read-status"))
     }
 
+    func testLongRunningHeartbeatDetectsExitWithoutABatteryValueChange() async {
+        let (controller, backend, monitor, _) = makeSUT(
+            charge: 70,
+            longRunningHeartbeatInterval: 0.05
+        )
+        let originalSnapshot = monitor.batteryInfo
+        controller.startTopUp()
+        let started = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(started)
+
+        backend.setOwnedLongRunningOperation(false)
+        let exitDetected = await eventually {
+            controller.hasExternalControlDrift
+                && backend.operations.contains("check-long-running")
+        }
+
+        XCTAssertTrue(exitDetected)
+        XCTAssertEqual(monitor.batteryInfo, originalSnapshot)
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
 }

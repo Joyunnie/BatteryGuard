@@ -99,4 +99,34 @@ final class StatusParsingTests: XCTestCase {
             .running(pid: 101, target: 80)
         )
     }
+
+    func testMaintainWorkerObservationRejectsIdentityChangesAcrossArgvInspection() {
+        let path = "/usr/local/co.palokaj.battery/battery"
+        let command = "/bin/bash \(path) maintain_synchronous 80"
+        let original = SMCKit.ProcessIdentity(startSeconds: 10, startMicroseconds: 20)
+        let reused = SMCKit.ProcessIdentity(startSeconds: 11, startMicroseconds: 0)
+
+        XCTAssertEqual(
+            SMCKit.classifyMaintainWorkers(
+                pidFilePID: 101,
+                pgrepOutput: "101 \(command)",
+                processTable: "101 101 \(command)",
+                batteryPath: path,
+                identitiesBefore: [101: original],
+                identitiesAfter: [101: reused]
+            ),
+            .stale(pid: 101)
+        )
+        XCTAssertEqual(
+            SMCKit.classifyMaintainWorkers(
+                pidFilePID: 101,
+                pgrepOutput: "101 \(command)",
+                processTable: "101 101 \(command)",
+                batteryPath: path,
+                identitiesBefore: [101: original],
+                identitiesAfter: [101: original]
+            ),
+            .running(pid: 101, target: 80)
+        )
+    }
 }
