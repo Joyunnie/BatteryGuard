@@ -341,9 +341,10 @@ silent failure이면서 테스트와 오류 처리가 모두 없는 새 경로�
 - background SMC read를 controller-owned `Task`와 generation으로 교체했다. completion은 generation, cancellation, readiness, shutdown, Heat intent와 durable battery-control ownership을 모두 다시 확인한 뒤에만 temperature cache나 mode를 변경한다.
 - failed initialization, shutdown, sleep/wake, Heat disable/re-enable와 control release가 sample task를 취소하고 generation을 무효화한다. 취소를 무시하는 fake read로 shutdown, wake, Heat re-enable와 ownership release 뒤 stale completion을 검증한다.
 - 혹독 리뷰에서 batteryInfo가 없는 Heat re-enable이 fresh sample을 기다리는 동안 실제 charging-off를 늦추는 fail-open 회귀를 발견했다. 먼저 verified Heat block을 완료하고 해당 enable generation에 한해서만 fresh sample을 시작하도록 수정했다. 일반 Heat transition에는 추가 read를 만들지 않는다.
-- strict-concurrency complete와 warnings-as-errors에서 전체 174개 테스트, Release build와 Debug analyze가 통과했다. 실제 battery/SMC 명령은 실행하지 않았다.
+- PR #2~#13 누적 혹독 리뷰에서 foreground temperature preflight와 long-running 취소가 cancellation을 무시하고 늦게 반환할 때 최신 Heat/shutdown 전이 뒤 stale hardware mutation을 실행할 수 있는 P1 결함을 발견했다. 모든 관련 await 경계에서 cancellation과 operation generation을 다시 검증하고, Heat 전환 중 기능 해제는 진행 중 전이를 선점하며, 선점된 Top Up/Discharge 정리는 Maintain을 적용하지 못하게 했다.
+- strict-concurrency complete와 warnings-as-errors에서 전체 178개 테스트, Release build와 Debug analyze가 통과했다. 실제 battery/SMC 명령은 실행하지 않았다.
 
-PR #12의 남은 절차는 commit/push와 PR #13 이후 순차 merge다. 다음 구현은 production diff 없이 두 대형 테스트 파일을 subsystem 경계로 나누는 PR #13이다.
+PR #12의 남은 절차는 누적 리뷰 수정 commit/push와 PR #13 재적층 뒤 순차 merge다. PR #13은 production diff 없이 두 대형 테스트 파일을 subsystem 경계로 나눈다.
 
 ## 1. 프로젝트 전제
 

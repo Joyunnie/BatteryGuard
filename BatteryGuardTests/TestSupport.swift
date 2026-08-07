@@ -106,6 +106,8 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var controlStatusOverride: BatteryControlStatus?
     private var controlStatusDelayValue: TimeInterval = 0
     private var longRunningProbeDelayValue: TimeInterval = 0
+    private var cancelLongRunningDelayValue: TimeInterval = 0
+    private var ignoresCancelLongRunningCancellation = false
 
     var operations: [String] {
         lock.lock()
@@ -211,6 +213,16 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func setLongRunningProbeDelay(_ delay: TimeInterval) {
         lock.withLock { longRunningProbeDelayValue = delay }
+    }
+
+    func setCancelLongRunningDelay(
+        _ delay: TimeInterval,
+        ignoringCancellation: Bool = false
+    ) {
+        lock.withLock {
+            cancelLongRunningDelayValue = delay
+            ignoresCancelLongRunningCancellation = ignoringCancellation
+        }
     }
 
     func open() async throws {
@@ -324,6 +336,18 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func cancelLongRunningOperation() async throws {
         try record("cancel-long")
+        let delay = lock.withLock {
+            (cancelLongRunningDelayValue, ignoresCancelLongRunningCancellation)
+        }
+        if delay.0 > 0 {
+            if delay.1 {
+                await Task.detached {
+                    try? await Task.sleep(nanoseconds: UInt64(delay.0 * 1_000_000_000))
+                }.value
+            } else {
+                try await Task.sleep(nanoseconds: UInt64(delay.0 * 1_000_000_000))
+            }
+        }
         setLongRunning(false)
     }
 
