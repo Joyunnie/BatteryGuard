@@ -1,46 +1,120 @@
 // TopUpAndLED.swift
-// Top Up: battery charge 100 CLI로 대체 — ChargeController에서 직접 호출
-// MagSafe LED: raw SMC ACLC 키 — ChargeController가 smcQueue를 통해 제어
+// Generation-ordered MagSafe LED ownership with one worker task.
 
 import Foundation
 
-// MARK: - MagSafe LED Controller
-// ACLC SMC 키를 통해 MagSafe LED 상태를 제어.
-// blink의 SMC 쓰기를 caller가 지정한 백그라운드 큐에서 실행 — 메인 스레드 블로킹 방지
+enum MagSafeLEDIntent: Equatable, Sendable {
+    case solid(MagSafeLEDState)
+    case blink
+    case restore
+}
 
-final class MagSafeLEDController {
-    private let smc: SMCKit
-    private let settings: UserSettings
+actor MagSafeLEDController {
+    typealias ErrorHandler = @Sendable (Error) async -> Void
 
-    private var blinkTimer: Timer?
-    private var blinkState = false
-
-    init(smc: SMCKit, settings: UserSettings) {
-        self.smc = smc
-        self.settings = settings
+    private struct Request: Sendable {
+        let intent: MagSafeLEDIntent
+        let generation: UInt64
+        let onError: ErrorHandler
     }
 
-    /// blink을 시작하되, SMC 쓰기는 지정된 큐에서 실행
-    func startBlink(on queue: DispatchQueue) {
-        guard blinkTimer == nil else { return }
-        blinkState = false
+    private let backend: ChargeBackend
+    private var latestGeneration: UInt64 = 0
+    private var pendingRequest: Request?
+    private var workerTask: Task<Void, Never>?
+    private var blinkingGeneration: UInt64?
+    private var blinkingErrorHandler: ErrorHandler?
+    private var blinkState = MagSafeLEDState.orange
+    private var hasControl = false
 
-        blinkTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.blinkState.toggle()
-            let state: MagSafeLEDState = self.blinkState ? .green : .orange
-            queue.async {
-                try? self.smc.setMagSafeLED(state)
-            }
+    init(backend: ChargeBackend) {
+        self.backend = backend
+    }
+
+    @discardableResult
+    func apply(
+        _ intent: MagSafeLEDIntent,
+        generation: UInt64,
+        onError: @escaping ErrorHandler
+    ) -> Bool {
+        guard generation >= latestGeneration else { return false }
+        latestGeneration = generation
+        pendingRequest = Request(intent: intent, generation: generation, onError: onError)
+        if workerTask == nil {
+            workerTask = Task { [weak self] in await self?.runWorker() }
         }
+        return true
     }
 
-    func stopBlink() {
-        blinkTimer?.invalidate()
-        blinkTimer = nil
+    func shutdown(generation: UInt64) async throws {
+        guard generation >= latestGeneration else { return }
+        latestGeneration = generation
+        pendingRequest = nil
+        blinkingGeneration = nil
+        blinkingErrorHandler = nil
+        let existingWorker = workerTask
+        workerTask = nil
+        existingWorker?.cancel()
+        await existingWorker?.value
+        guard hasControl else { return }
+        try await backend.restoreMagSafeLED()
+        hasControl = false
     }
 
-    deinit {
-        stopBlink()
+    private func runWorker() async {
+        while !Task.isCancelled {
+            if let request = pendingRequest {
+                pendingRequest = nil
+                await perform(request)
+                continue
+            }
+
+            if let generation = blinkingGeneration, generation == latestGeneration {
+                let state = blinkState
+                blinkState = state == .orange ? .green : .orange
+                do {
+                    try await backend.setMagSafeLED(state)
+                } catch {
+                    guard generation == latestGeneration, !Task.isCancelled else { continue }
+                    if let blinkingErrorHandler { await blinkingErrorHandler(error) }
+                }
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    break
+                }
+                continue
+            }
+
+            workerTask = nil
+            return
+        }
+        workerTask = nil
+    }
+
+    private func perform(_ request: Request) async {
+        guard request.generation == latestGeneration else { return }
+        blinkingGeneration = nil
+        blinkingErrorHandler = nil
+
+        do {
+            switch request.intent {
+            case .solid(let state):
+                hasControl = true
+                try await backend.setMagSafeLED(state)
+            case .blink:
+                hasControl = true
+                blinkingGeneration = request.generation
+                blinkingErrorHandler = request.onError
+                blinkState = .orange
+            case .restore:
+                guard hasControl else { return }
+                try await backend.restoreMagSafeLED()
+                if request.generation == latestGeneration { hasControl = false }
+            }
+        } catch {
+            guard request.generation == latestGeneration, !Task.isCancelled else { return }
+            await request.onError(error)
+        }
     }
 }

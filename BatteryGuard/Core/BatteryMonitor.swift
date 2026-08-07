@@ -17,12 +17,12 @@ struct BatteryInfo {
     let maxCapacity: Int             // 최대 용량 (mAh)
     let designCapacity: Int          // 설계 용량 (mAh)
     let cycleCount: Int              // 충방전 사이클 수
-    let temperature: Double          // 온도 (°C)
-    let amperage: Int                // 전류 (mA, 양수=충전, 음수=방전)
+    let temperature: Double?         // 온도 (°C), 센서 값이 없으면 nil
+    let amperage: Int?               // 전류 (mA, 양수=충전, 음수=방전), 값이 없으면 nil
     let voltage: Int                 // 전압 (mV)
     let timeToFull: Int              // 완충까지 남은 시간 (분), -1이면 N/A
     let timeToEmpty: Int             // 방전까지 남은 시간 (분), -1이면 N/A
-    let healthPercent: Double        // 배터리 건강도 (%)
+    let healthPercent: Double?       // 배터리 건강도 (%), 계산할 수 없으면 nil
     let isPresent: Bool              // 배터리 존재 여부
     let serialNumber: String         // 배터리 시리얼 번호
 }
@@ -32,15 +32,26 @@ struct BatteryInfo {
 /// - IOPMPowerSource: macOS 전원 관리 프레임워크. 배터리 상태를 userspace에 노출
 /// - IOServiceGetMatchingService: IOKit 레지스트리에서 AppleSmartBattery 서비스 검색
 /// - 2초 간격 폴링 + IOPowerSource notification 조합
+@MainActor
 final class BatteryMonitor: ObservableObject {
     static let shared = BatteryMonitor()
 
     @Published var batteryInfo: BatteryInfo?
 
+    private let batteryInfoProvider: (() -> BatteryInfo?)?
+    private let runsMonitoringInfrastructure: Bool
     private var timer: Timer?
     private var historyTimer: Timer?
     private var runLoopSource: CFRunLoopSource?
     private var hasLoggedDictOnce = false
+
+    init(
+        batteryInfoProvider: (() -> BatteryInfo?)? = nil,
+        runsMonitoringInfrastructure: Bool = true
+    ) {
+        self.batteryInfoProvider = batteryInfoProvider
+        self.runsMonitoringInfrastructure = runsMonitoringInfrastructure
+    }
 
     // MARK: - Helper
 
@@ -56,6 +67,8 @@ final class BatteryMonitor: ObservableObject {
 
     /// AppleSmartBattery 서비스에서 배터리 딕셔너리 읽기
     func readBatteryInfo() -> BatteryInfo? {
+        if let batteryInfoProvider { return batteryInfoProvider() }
+
         let service = IOServiceGetMatchingService(
             kIOMainPortDefault,
             IOServiceMatching("AppleSmartBattery")
@@ -118,22 +131,15 @@ final class BatteryMonitor: ObservableObject {
         let cycleCount = dict["CycleCount"] as? Int ?? 0
 
         // Temperature: 데시켈빈 (K × 10). 예: 2969 → 296.9K → 23.75°C
-        let rawTemp = dict["Temperature"] as? Int ?? 0
-        let tempCelsius: Double
-        if rawTemp > 0 {
-            tempCelsius = Double(rawTemp) / 10.0 - 273.15
-        } else {
-            tempCelsius = 0
+        let rawTemp = dict["Temperature"] as? Int
+        let tempCelsius = rawTemp.flatMap { rawValue -> Double? in
+            guard rawValue > 0 else { return nil }
+            return Double(rawValue) / 10.0 - 273.15
         }
 
         // Amperage: IOKit이 signed/unsigned 혼용으로 반환할 수 있음.
         // NSNumber.intValue가 부호 변환을 올바르게 처리.
-        let amperage: Int
-        if let number = dict["Amperage"] as? NSNumber {
-            amperage = number.intValue
-        } else {
-            amperage = 0
-        }
+        let amperage = (dict["Amperage"] as? NSNumber)?.intValue
 
         let voltage = dict["Voltage"] as? Int ?? 0
         let timeToFull = dict["AvgTimeToFull"] as? Int ?? -1
@@ -142,11 +148,11 @@ final class BatteryMonitor: ObservableObject {
         let serialNumber = dict["Serial"] as? String ?? "N/A"
 
         // 건강도: AppleRawMaxCapacity / DesignCapacity (둘 다 mAh)
-        let health: Double
+        let health: Double?
         if designCapacity > 0 && rawMaxCapacity > 0 {
             health = (Double(rawMaxCapacity) / Double(designCapacity)) * 100.0
         } else {
-            health = 100.0
+            health = nil
         }
 
         // ExternalConnected 외에 ExternalChargeCapable / AppleRawExternalConnected로 보완
@@ -176,16 +182,19 @@ final class BatteryMonitor: ObservableObject {
         stopMonitoring()
 
         batteryInfo = readBatteryInfo()
+        guard runsMonitoringInfrastructure else { return }
 
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.batteryInfo = self.readBatteryInfo()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.batteryInfo = self.readBatteryInfo()
+            }
         }
 
         // 60초마다 배터리 이력 기록 (Core Data)
         recordHistory()
         historyTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
-            self?.recordHistory()
+            Task { @MainActor [weak self] in self?.recordHistory() }
         }
 
         registerPowerSourceNotification()
