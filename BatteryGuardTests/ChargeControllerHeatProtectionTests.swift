@@ -105,6 +105,145 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(controller.effectiveChargeLimit, 80)
     }
 
+    func testHeatProtectionDoesNotRestoreDischargeWithoutSleepAssertion() async {
+        var assertionAttempts = 0
+        let (controller, backend, monitor, settings) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 90,
+            preventSleepHandler: { _ in
+                assertionAttempts += 1
+                return assertionAttempts == 1
+            }
+        )
+        settings.chargeLimit = 80
+        controller.processBatteryInfo(makeBatteryInfo(charge: 90, temperature: 30))
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+
+        backend.temperature = 45
+        let hotInfo = makeBatteryInfo(charge: 90, temperature: 45)
+        monitor.batteryInfo = hotInfo
+        controller.processBatteryInfo(hotInfo)
+        let protectionTriggered = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(protectionTriggered)
+
+        backend.temperature = 37
+        let coolInfo = makeBatteryInfo(charge: 90, temperature: 37)
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertTrue(controller.heatProtectionTriggered)
+        XCTAssertFalse(controller.isDischarging)
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+        XCTAssertEqual(backend.operations.filter { $0 == "discharge:80" }.count, 1)
+    }
+
+    func testHeatProtectionRestoresDischargeWithSleepAssertion() async {
+        let (controller, backend, monitor, settings) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 90
+        )
+        settings.chargeLimit = 80
+        controller.processBatteryInfo(makeBatteryInfo(charge: 90, temperature: 30))
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+
+        backend.temperature = 45
+        let hotInfo = makeBatteryInfo(charge: 90, temperature: 45)
+        monitor.batteryInfo = hotInfo
+        controller.processBatteryInfo(hotInfo)
+        let protectionTriggered = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(protectionTriggered)
+
+        backend.temperature = 37
+        let coolInfo = makeBatteryInfo(charge: 90, temperature: 37)
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+
+        let restored = await eventually { controller.isDischarging && !controller.isCommandPending }
+        XCTAssertTrue(restored)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
+        XCTAssertEqual(backend.operations.filter { $0 == "discharge:80" }.count, 2)
+    }
+
+    func testFailedDischargeRestoreReblocksAndReleasesSleepAssertion() async {
+        let (controller, backend, monitor, settings) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 90
+        )
+        settings.chargeLimit = 80
+        controller.processBatteryInfo(makeBatteryInfo(charge: 90, temperature: 30))
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+
+        backend.temperature = 45
+        let hotInfo = makeBatteryInfo(charge: 90, temperature: 45)
+        monitor.batteryInfo = hotInfo
+        controller.processBatteryInfo(hotInfo)
+        let protectionTriggered = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(protectionTriggered)
+
+        backend.failNext("discharge")
+        backend.temperature = 37
+        let coolInfo = makeBatteryInfo(charge: 90, temperature: 37)
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+
+        let reblocked = await eventually {
+            controller.heatProtectionTriggered && !controller.isCommandPending
+        }
+        XCTAssertTrue(reblocked)
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+        XCTAssertGreaterThanOrEqual(
+            backend.operations.filter { $0 == "disable-charging" }.count,
+            2
+        )
+    }
+
+    func testFailedDischargeRestoreRetainsSleepAssertionWhenReblockFails() async {
+        let (controller, backend, monitor, settings) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 90
+        )
+        settings.chargeLimit = 80
+        controller.processBatteryInfo(makeBatteryInfo(charge: 90, temperature: 30))
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+
+        backend.temperature = 45
+        let hotInfo = makeBatteryInfo(charge: 90, temperature: 45)
+        monitor.batteryInfo = hotInfo
+        controller.processBatteryInfo(hotInfo)
+        let protectionTriggered = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(protectionTriggered)
+
+        backend.failNext("discharge")
+        backend.failNext("disable-charging")
+        backend.temperature = 37
+        let coolInfo = makeBatteryInfo(charge: 90, temperature: 37)
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+
+        let failed = await eventually {
+            if case .failed(_, _, .heatProtection) = controller.mode {
+                return !controller.isCommandPending
+            }
+            return false
+        }
+        XCTAssertTrue(failed)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
+        XCTAssertTrue(controller.isHeatProtectionBlockingControls)
+    }
+
     func testPreemptedTemperaturePreflightCannotRestoreMaintainAfterReblock() async {
         let (controller, backend, monitor, _) = makeSUT(
             heatProtectionEnabled: true,

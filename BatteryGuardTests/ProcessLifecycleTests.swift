@@ -371,25 +371,64 @@ final class ProcessLifecycleTests: XCTestCase {
         _ = try await runner.cancelLongRunning()
     }
 
-    func testLongRunningCommandUsesItsMonotonicTimeout() async throws {
+    func testLongRunningTimeoutBoundsTermIgnoringDescendantCleanup() async throws {
         let runner = BatteryCommandRunner()
+        let parentPIDFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-long-timeout-parent-\(UUID().uuidString).pid")
+        let childPIDFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-long-timeout-child-\(UUID().uuidString).pid")
+        var processGroup: Int32?
+        defer {
+            if let processGroup { _ = Darwin.kill(-processGroup, SIGKILL) }
+            try? FileManager.default.removeItem(at: parentPIDFile)
+            try? FileManager.default.removeItem(at: childPIDFile)
+        }
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+
         _ = try await runner.launchLongRunning(
             .init(
                 executable: "/bin/sh",
-                arguments: termIgnoringShell,
+                arguments: [
+                    "-c",
+                    "echo $$ > \(shellQuote(parentPIDFile.path)); trap '' TERM; sh -c 'trap \"\" TERM; while true; do :; done' & echo $! > \(shellQuote(childPIDFile.path)); while true; do :; done"
+                ],
                 label: "timed long fixture",
-                timeout: 0.05
+                timeout: 0.2
             )
         )
-        let deadline = Date().addingTimeInterval(3)
+        let fixtureStarted = await eventually(timeout: 0.15) {
+            FileManager.default.fileExists(atPath: parentPIDFile.path)
+                && FileManager.default.fileExists(atPath: childPIDFile.path)
+        }
+        XCTAssertTrue(fixtureStarted)
+
+        let parentPID = try XCTUnwrap(Int32(
+            String(contentsOf: parentPIDFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+        processGroup = parentPID
+        let childPID = try XCTUnwrap(Int32(
+            String(contentsOf: childPIDFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+
+        let deadline = DispatchTime.now().uptimeNanoseconds + 600_000_000
         var result: BatteryCommandResult?
-        while result == nil, Date() < deadline {
+        while result == nil, DispatchTime.now().uptimeNanoseconds < deadline {
             result = await runner.longRunningResult()
             if result == nil { try await Task.sleep(nanoseconds: 10_000_000) }
         }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
         let isActive = await runner.isLongRunningActive()
+
         XCTAssertFalse(isActive)
         XCTAssertEqual(result?.termination, .timedOut)
+        XCTAssertLessThan(elapsed, 0.6)
+        let parentExited = await eventually { Darwin.kill(parentPID, 0) == -1 && errno == ESRCH }
+        let childExited = await eventually { Darwin.kill(childPID, 0) == -1 && errno == ESRCH }
+        XCTAssertTrue(parentExited)
+        XCTAssertTrue(childExited)
+        if parentExited && childExited { processGroup = nil }
     }
 
     func testNonFiniteTimeoutsDoNotTrapTheRunner() async throws {
