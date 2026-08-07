@@ -75,15 +75,7 @@ struct MenuBarView: View {
                 in: 20...100,
                 step: 5
             )
-            .disabled(
-                !controller.isReady ||
-                controller.isCommandPending ||
-                controller.isDischarging ||
-                controller.isTopUpActive ||
-                controller.isBatteryControlDisabled ||
-                controller.hasExternalControlDrift ||
-                controller.isHeatProtectionBlockingControls
-            )
+            .disabled(!controller.chargeLimitAvailability.isAllowed)
         }
     }
 
@@ -94,13 +86,7 @@ struct MenuBarView: View {
                 title: "추가 충전",
                 icon: "arrow.up.to.line",
                 isActive: controller.isTopUpActive,
-                isDisabled: !controller.isReady ||
-                    controller.isCommandPending ||
-                    controller.isChargeLimitPending ||
-                    controller.isHeatProtectionBlockingControls ||
-                    controller.isBatteryControlDisabled ||
-                    controller.hasExternalControlDrift ||
-                    controller.isDischarging,
+                isDisabled: !controller.topUpAvailability.isAllowed,
                 action: {
                     if controller.isTopUpActive {
                         controller.cancelTopUp()
@@ -114,13 +100,7 @@ struct MenuBarView: View {
                 title: "방전",
                 icon: "arrow.down.to.line",
                 isActive: controller.isDischarging,
-                isDisabled: !controller.isReady ||
-                    controller.isCommandPending ||
-                    controller.isChargeLimitPending ||
-                    controller.isHeatProtectionBlockingControls ||
-                    controller.isBatteryControlDisabled ||
-                    controller.hasExternalControlDrift ||
-                    controller.isTopUpActive,
+                isDisabled: !controller.dischargeAvailability.isAllowed,
                 action: {
                     if controller.isDischarging {
                         controller.stopDischarge()
@@ -136,12 +116,12 @@ struct MenuBarView: View {
     private var statusInfo: some View {
         VStack(spacing: 4) {
             if let info = monitor.batteryInfo {
-                StatusRow(label: "온도", value: info.temperature.map { String(format: "%.1f°C", $0) } ?? "알 수 없음")
+                StatusRow(label: "안전 온도", value: controller.safetyTemperatureSnapshot.displayValue)
                 StatusRow(label: "건강도", value: info.healthPercent.map { String(format: "%.1f%%", $0) } ?? "알 수 없음")
                 StatusRow(label: "사이클", value: BatteryDisplay.measurement(info.cycleCount))
                 StatusRow(label: "전류", value: BatteryDisplay.amperage(info.amperage))
 
-                if controller.heatProtectionTriggered {
+                if controller.heatProtectionPhase == .blocked {
                     HStack {
                         Image(systemName: "thermometer.sun.fill")
                             .foregroundColor(.red)

@@ -72,10 +72,12 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
             try requestedPolicy(for: heatFailure),
             .keepChargingDisabled
         )
-        XCTAssertEqual(
-            try requestedPolicy(for: uncertainFailure),
-            .restoreMaintain(75)
-        )
+        XCTAssertThrowsError(try requestedPolicy(for: uncertainFailure)) { error in
+            XCTAssertEqual(
+                error as? ChargeShutdownPlanningError,
+                .manualInterventionRequired("compensation failed")
+            )
+        }
         XCTAssertEqual(
             try requestedPolicy(for: recoverableFailure),
             .preserveMaintain

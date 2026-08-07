@@ -252,7 +252,10 @@ extension ChargeControllerSafetyTests {
         controller.processBatteryInfo(makeBatteryInfo(charge: 70, temperature: nil))
         controller.startTopUp()
 
-        XCTAssertTrue(controller.lastError?.contains("degraded") == true)
+        XCTAssertTrue(controller.issues.contains {
+            $0.source == .sensor && $0.message.contains("degraded")
+        })
+        XCTAssertEqual(controller.issues.first?.source, .command)
         XCTAssertFalse(controller.isTopUpActive)
         XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("top-up") }))
         let failedClosed = await eventually { controller.heatProtectionTriggered }

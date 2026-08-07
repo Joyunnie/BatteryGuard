@@ -7,7 +7,7 @@ import Combine
 
 @MainActor
 final class UserSettingsTests: XCTestCase {
-    func testBatteryControlOwnershipDefaultsEnabledAndPersistsExplicitRelease() throws {
+    func testNewJournalDefaultsToSystemOwnershipAndPersistsExplicitEnable() throws {
         let defaults = makeTestDefaults()
         let journalURL = makeOwnershipJournalURL()
         defer { try? FileManager.default.removeItem(at: journalURL.deletingLastPathComponent()) }
@@ -17,16 +17,41 @@ final class UserSettingsTests: XCTestCase {
             batteryControlOwnershipJournalURL: journalURL
         )
 
-        XCTAssertTrue(settings.batteryControlEnabled)
-        try settings.completeBatteryControlRelease(lastLimit: 75)
+        XCTAssertFalse(settings.batteryControlEnabled)
+        XCTAssertEqual(settings.batteryControlOwnership, .system(lastLimit: 80))
+        try settings.completeBatteryGuardEnable(lastLimit: 75)
 
         let reloaded = UserSettings(
             defaults: defaults,
             launchAtLoginService: FakeLaunchAtLoginService(),
             batteryControlOwnershipJournalURL: journalURL
         )
-        XCTAssertFalse(reloaded.batteryControlEnabled)
-        XCTAssertEqual(reloaded.batteryControlOwnership, .system(lastLimit: 75))
+        XCTAssertTrue(reloaded.batteryControlEnabled)
+        XCTAssertEqual(reloaded.batteryControlOwnership, .batteryGuard(lastLimit: 75))
+    }
+
+    func testLegacyOwnershipMigratesOnlyOnceWhenJournalIsFirstCreated() throws {
+        let defaults = makeTestDefaults()
+        defaults.set(true, forKey: "batteryControlEnabled")
+        defaults.set(70, forKey: "chargeLimit")
+        let journalURL = makeOwnershipJournalURL()
+        defer { try? FileManager.default.removeItem(at: journalURL.deletingLastPathComponent()) }
+
+        let migrated = UserSettings(
+            defaults: defaults,
+            launchAtLoginService: FakeLaunchAtLoginService(),
+            batteryControlOwnershipJournalURL: journalURL
+        )
+        XCTAssertEqual(migrated.batteryControlOwnership, .batteryGuard(lastLimit: 70))
+        XCTAssertTrue(defaults.bool(forKey: "batteryControlOwnershipJournalMigrationCompleted"))
+
+        try FileManager.default.removeItem(at: journalURL)
+        let afterJournalLoss = UserSettings(
+            defaults: defaults,
+            launchAtLoginService: FakeLaunchAtLoginService(),
+            batteryControlOwnershipJournalURL: journalURL
+        )
+        XCTAssertEqual(afterJournalLoss.batteryControlOwnership, .system(lastLimit: 70))
     }
 
     func testPendingControlReleaseSurvivesRestartWithoutClaimingReleasedState() throws {

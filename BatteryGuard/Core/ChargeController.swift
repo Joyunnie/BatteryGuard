@@ -44,6 +44,8 @@ final class ChargeController: ObservableObject {
     @Published private(set) var readiness: ChargeControllerReadiness
     @Published private(set) var isReconcilingExternalState = false
     @Published private(set) var sleepProtectionState: SleepChargingProtectionState
+    @Published private(set) var issues: [BatteryIssue] = []
+    @Published private(set) var safetyTemperatureSnapshot: SafetyTemperatureSnapshot = .unavailable
 
     var isReady: Bool { readiness == .ready }
     var isCommandPending: Bool {
@@ -67,6 +69,17 @@ final class ChargeController: ObservableObject {
         if case .heatBlocked = mode { return true }
         return false
     }
+    var heatProtectionPhase: HeatProtectionPhase {
+        guard settings.heatProtectionEnabled else { return .disabled }
+        switch mode {
+        case .transitioning(.enteringHeat): return .entering
+        case .transitioning(.restoringHeat): return .restoring
+        case .heatBlocked: return .blocked
+        case .failed(_, _, .heatProtection): return .failed
+        default:
+            return safetyTemperatureSnapshot.value == nil ? .degraded : .monitoring
+        }
+    }
     var isBatteryControlDisabled: Bool {
         guard settings.batteryControlEnabled else { return true }
         if case .controlDisabled = mode { return true }
@@ -85,6 +98,24 @@ final class ChargeController: ObservableObject {
         return mode.restorableMode?.maintainLimit ?? UserSettings.validatedChargeLimit(settings.chargeLimit)
     }
     var displayedChargeLimit: Int { pendingChargeLimit ?? effectiveChargeLimit }
+    var chargeLimitAvailability: ChargeActionAvailability {
+        actionAvailability(
+            alsoRequiresNoPendingLimit: false,
+            conflicts: isDischarging || isTopUpActive
+        )
+    }
+    var topUpAvailability: ChargeActionAvailability {
+        actionAvailability(
+            alsoRequiresNoPendingLimit: true,
+            conflicts: isDischarging
+        )
+    }
+    var dischargeAvailability: ChargeActionAvailability {
+        actionAvailability(
+            alsoRequiresNoPendingLimit: true,
+            conflicts: isTopUpActive
+        )
+    }
     var currentState: ChargeState {
         guard let info = monitor.batteryInfo else { return .unknown }
         let logicallyConnected = info.isPluggedIn || isDischarging || isTopUpActive
@@ -148,10 +179,14 @@ final class ChargeController: ObservableObject {
         return lastTemperature > settings.heatProtectionThreshold
     }
 
-    private var commandError: String?
-    private var sensorError: String?
-    private var ledError: String?
-    private var driftError: String?
+    private var commandError: String? { didSet { updateIssueDate(&commandIssueDate, oldValue, commandError) } }
+    private var sensorError: String? { didSet { updateIssueDate(&sensorIssueDate, oldValue, sensorError) } }
+    private var ledError: String? { didSet { updateIssueDate(&ledIssueDate, oldValue, ledError) } }
+    private var driftError: String? { didSet { updateIssueDate(&driftIssueDate, oldValue, driftError) } }
+    private var commandIssueDate: Date?
+    private var sensorIssueDate: Date?
+    private var ledIssueDate: Date?
+    private var driftIssueDate: Date?
     private var controlTimer: Timer?
     private var smcTemperatureTimer: Timer?
     private var reconciliationTimer: Timer?
@@ -764,11 +799,20 @@ final class ChargeController: ObservableObject {
             switch result {
             case .success(let temperature):
                 self.safetyTemperatureCache.record(temperature, at: self.now())
+                self.publishSafetyTemperature(
+                    smc: temperature,
+                    ioKit: self.monitor.batteryInfo?.temperature
+                )
                 if self.monitor.batteryInfo == nil {
                     self.evaluateHeatProtectionWithoutBatteryInfo(temperature: temperature)
                 }
-            case .failure:
+            case .failure(let error):
                 self.safetyTemperatureCache.clear()
+                self.publishSafetyTemperature(
+                    smc: nil,
+                    ioKit: self.monitor.batteryInfo?.temperature,
+                    failures: ["SMC: \(error.localizedDescription)"]
+                )
                 if self.monitor.batteryInfo == nil {
                     self.evaluateHeatProtectionWithoutBatteryInfo(temperature: nil)
                 }
@@ -849,33 +893,58 @@ final class ChargeController: ObservableObject {
 
     private func measuredTemperature(using info: BatteryInfo) -> Double? {
         let recentSMC = recentSMCTemperature()
-        return [recentSMC, info.temperature]
-            .compactMap { $0.flatMap(BatteryMonitor.validatedTemperature) }
-            .max()
+        let ioKit = info.temperature.flatMap(BatteryMonitor.validatedTemperature)
+        publishSafetyTemperature(smc: recentSMC, ioKit: ioKit)
+        return safetyTemperatureSnapshot.value
     }
 
     private func readFreshSafetyTemperature(fallbackInfo: BatteryInfo? = nil) async -> Double? {
-        var values: [Double] = []
+        var smc: Double?
+        var failures: [String] = []
         do {
             let rawValue = Double(try await backend.readBatteryTemperature())
             guard let value = BatteryMonitor.validatedTemperature(rawValue) else {
                 throw BatteryError.unsupported("SMC가 유효하지 않은 배터리 온도 \(rawValue)°C를 반환했습니다.")
             }
             safetyTemperatureCache.record(value, at: now())
-            values.append(value)
+            smc = value
         } catch {
             safetyTemperatureCache.clear()
+            failures.append("SMC: \(error.localizedDescription)")
         }
         let freshInfo = monitor.readBatteryInfo() ?? fallbackInfo
+        var ioKit: Double?
         if let freshInfo {
             monitor.batteryInfo = freshInfo
-            if let temperature = freshInfo.temperature.flatMap(BatteryMonitor.validatedTemperature) {
-                values.append(temperature)
-            }
+            ioKit = freshInfo.temperature.flatMap(BatteryMonitor.validatedTemperature)
+            if ioKit == nil { failures.append("IOKit: 유효한 배터리 온도 없음") }
+        } else {
+            failures.append("IOKit: 배터리 정보 없음")
         }
-        let value = values.max()
+        publishSafetyTemperature(smc: smc, ioKit: ioKit, failures: failures)
+        let value = safetyTemperatureSnapshot.value
         lastTemperature = value
         return value
+    }
+
+    private func publishSafetyTemperature(
+        smc: Double?,
+        ioKit: Double?,
+        failures: [String] = []
+    ) {
+        var readings: [(SafetyTemperatureSource, Double)] = []
+        if let smc = smc.flatMap(BatteryMonitor.validatedTemperature) {
+            readings.append((.smc, smc))
+        }
+        if let ioKit = ioKit.flatMap(BatteryMonitor.validatedTemperature) {
+            readings.append((.ioKit, ioKit))
+        }
+        safetyTemperatureSnapshot = SafetyTemperatureSnapshot(
+            value: readings.map(\.1).max(),
+            sources: readings.map(\.0),
+            freshness: readings.isEmpty ? .unavailable : .fresh,
+            failures: failures
+        )
     }
 
     // MARK: - Heat Protection
@@ -973,8 +1042,19 @@ final class ChargeController: ObservableObject {
         preemptCurrentOperation: Bool = false
     ) {
         guard activeOperationID == nil || preemptCurrentOperation else { return }
+        let restoringDischarge: Bool
+        if case .discharging = previous {
+            restoringDischarge = true
+            guard monitor.preventSleep(reason: "BatteryGuard: restored Discharge") else {
+                commandError = "절전 방지 설정을 확보할 수 없어 Discharge를 복원하지 않았습니다."
+                refreshDisplayedError()
+                return
+            }
+        } else {
+            restoringDischarge = false
+        }
         let backend = self.backend
-        _ = runBattery(
+        let didStart = runBattery(
             operation: "restore after Heat Protection",
             transition: .restoringHeat(previous: previous),
             preemptCurrentOperation: preemptCurrentOperation,
@@ -1029,13 +1109,12 @@ final class ChargeController: ObservableObject {
                 guard let self else { return }
                 self.heatProtectionRetryAfter = nil
                 self.mode = Self.mode(from: previous)
-                if case .discharging = previous,
-                   !self.monitor.preventSleep(reason: "BatteryGuard: restored Discharge") {
-                    self.commandError = "Discharge는 복원됐지만 절전 방지 설정에 실패했습니다."
-                }
             },
             onFailure: { [weak self] error in
                 guard let self else { return }
+                if restoringDischarge, error is HeatRestoreReblockedError {
+                    self.monitor.allowSleep()
+                }
                 if error is HeatRestoreReblockedError {
                     self.mode = .heatBlocked(previous: previous)
                 } else {
@@ -1047,6 +1126,9 @@ final class ChargeController: ObservableObject {
                 }
             }
         )
+        if !didStart, restoringDischarge {
+            monitor.allowSleep()
+        }
     }
 
     private static func mode(from restorable: RestorableChargeMode) -> ChargeMode {
@@ -1237,8 +1319,13 @@ final class ChargeController: ObservableObject {
         }
         let limit = effectiveChargeLimit
         guard info.currentCharge > limit else { return }
+        guard monitor.preventSleep(reason: "BatteryGuard: Discharge in progress") else {
+            commandError = "절전 방지 설정을 확보할 수 없어 Discharge를 시작하지 않았습니다."
+            refreshDisplayedError()
+            return
+        }
         let backend = self.backend
-        _ = runBattery(
+        let didStart = runBattery(
             operation: "start Discharge",
             transition: .startingDischarge(target: limit, returnLimit: limit),
             work: {
@@ -1261,20 +1348,25 @@ final class ChargeController: ObservableObject {
             onSuccess: { [weak self] in
                 guard let self else { return }
                 self.mode = .discharging(target: limit, returnLimit: limit)
-                if !self.monitor.preventSleep(reason: "BatteryGuard: Discharge in progress") {
-                    self.commandError = "Discharge는 시작했지만 절전 방지 설정에 실패했습니다."
-                }
             },
             onFailure: { [weak self] error in
-                self?.mode = .failed(
+                guard let self else { return }
+                let compensationFailed = error is ControlCompensationError
+                if !compensationFailed {
+                    self.monitor.allowSleep()
+                }
+                self.mode = .failed(
                     previous: .maintaining(limit: limit),
                     message: error.localizedDescription,
-                    disposition: error is ControlCompensationError
+                    disposition: compensationFailed
                         ? .manualIntervention
                         : .recoverPrevious
                 )
             }
         )
+        if !didStart {
+            monitor.allowSleep()
+        }
     }
 
     func stopDischarge() { stopDischarge(operation: "stop Discharge and resume maintain") }
@@ -2155,7 +2247,48 @@ final class ChargeController: ObservableObject {
     }
 
     private func refreshDisplayedError() {
-        lastError = sensorError ?? driftError ?? commandError ?? ledError
+        var current: [BatteryIssue] = []
+        if let commandError, let date = commandIssueDate {
+            current.append(BatteryIssue(source: .command, severity: .critical, message: commandError, occurredAt: date))
+        }
+        if let driftError, let date = driftIssueDate {
+            current.append(BatteryIssue(source: .externalDrift, severity: .blocking, message: driftError, occurredAt: date))
+        }
+        if let sensorError, let date = sensorIssueDate {
+            current.append(BatteryIssue(source: .sensor, severity: .warning, message: sensorError, occurredAt: date))
+        }
+        if let ledError, let date = ledIssueDate {
+            current.append(BatteryIssue(source: .led, severity: .warning, message: ledError, occurredAt: date))
+        }
+        issues = current.sorted {
+            if $0.severity != $1.severity { return $0.severity > $1.severity }
+            return $0.occurredAt > $1.occurredAt
+        }
+        lastError = issues.first?.message
+    }
+
+    private func actionAvailability(
+        alsoRequiresNoPendingLimit: Bool,
+        conflicts: Bool
+    ) -> ChargeActionAvailability {
+        if !isReady { return .denied("초기화가 완료되지 않았습니다.") }
+        if isCommandPending { return .denied("다른 배터리 작업이 진행 중입니다.") }
+        if alsoRequiresNoPendingLimit && isChargeLimitPending {
+            return .denied("Charge Limit 변경이 대기 중입니다.")
+        }
+        if isHeatProtectionBlockingControls { return .denied("Heat Protection이 충전 제어를 잠갔습니다.") }
+        if isBatteryControlDisabled { return .denied("BatteryGuard 충전 제어가 꺼져 있습니다.") }
+        if hasExternalControlDrift { return .denied("외부 충전 상태를 먼저 해결해야 합니다.") }
+        if conflicts { return .denied("충돌하는 충전 작업이 실행 중입니다.") }
+        return .allowed
+    }
+
+    private func updateIssueDate(_ date: inout Date?, _ oldValue: String?, _ newValue: String?) {
+        if let newValue {
+            if newValue != oldValue { date = now() }
+        } else {
+            date = nil
+        }
     }
 }
 

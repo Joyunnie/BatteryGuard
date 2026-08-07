@@ -122,6 +122,28 @@ final class HeatProtectionPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(evaluate(temperature: 30, mode: failed).action, .none)
+        XCTAssertEqual(evaluate(temperature: 45, mode: failed).action, .none)
+        XCTAssertEqual(evaluate(temperature: nil, mode: failed).action, .none)
+    }
+
+    func testExternalDriftNeverBecomesAnOwnedHeatTransition() {
+        let drift = ChargeMode.externalDrift(
+            expected: .maintaining(limit: 80),
+            observed: .maintaining(limit: 60)
+        )
+
+        XCTAssertEqual(evaluate(temperature: 45, mode: drift).action, .none)
+        XCTAssertEqual(evaluate(temperature: nil, mode: drift).action, .none)
+    }
+
+    func testRecoverableFailureDoesNotBecomeAnOwnedHeatTransition() {
+        let failed = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "command failed after an uncertain mutation",
+            disposition: .recoverPrevious
+        )
+
+        XCTAssertEqual(evaluate(temperature: 45, mode: failed).action, .none)
     }
 
     func testEntryCooldownAndExistingSafetyTransitionsPreventDuplicateEntry() {

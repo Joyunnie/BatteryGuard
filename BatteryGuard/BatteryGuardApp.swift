@@ -154,16 +154,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard !Task.isCancelled else { return }
                 let alert = NSAlert()
                 alert.messageText = "초기화 실패"
-                alert.informativeText = """
-                \(error.localizedDescription)
-
-                battery CLI를 신뢰할 수 있는 소스에서 수동으로 설치하고
-                /usr/local/co.palokaj.battery/battery 경로와 권한을 확인하세요.
-                """
+                alert.informativeText = initializationFailureText(for: error)
                 alert.alertStyle = .critical
                 alert.runModal()
             }
         }
+    }
+
+    private func initializationFailureText(for error: Error) -> String {
+        let recovery: String
+        switch error {
+        case BatteryError.binaryNotFound, BatteryError.preflightFailed:
+            recovery = "battery CLI/SMC 설치 경로, 소유자, 권한 및 지원 버전(v1.3.4)을 확인하세요."
+        case let BatteryError.unsupported(message) where message.contains("소유권"):
+            recovery = "BatteryControlOwnership 기록을 복구하거나 BatteryGuard 제어를 명시적으로 다시 설정하세요."
+        case BatteryError.commandTimedOut, BatteryError.commandCancelled, BatteryError.commandFailed:
+            recovery = "다른 battery 프로세스가 실행 중인지 확인하고 실제 CLI 상태를 점검한 뒤 다시 실행하세요."
+        default:
+            recovery = "진단 로그와 현재 battery CLI 상태를 확인한 뒤 다시 실행하세요."
+        }
+        return "\(error.localizedDescription)\n\n\(recovery)"
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

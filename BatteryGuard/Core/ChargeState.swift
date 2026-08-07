@@ -265,6 +265,81 @@ enum ChargeFailureDisposition: String, Equatable, Sendable {
     case manualIntervention
 }
 
+enum BatteryIssueSource: String, Equatable, Sendable {
+    case command
+    case lifecycle
+    case externalDrift
+    case sensor
+    case led
+}
+
+enum BatteryIssueSeverity: Int, Equatable, Comparable, Sendable {
+    case warning = 1
+    case blocking = 2
+    case critical = 3
+
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+}
+
+struct BatteryIssue: Identifiable, Equatable, Sendable {
+    let source: BatteryIssueSource
+    let severity: BatteryIssueSeverity
+    let message: String
+    let occurredAt: Date
+    var id: String { "\(source.rawValue):\(message)" }
+}
+
+enum SafetyTemperatureSource: String, Equatable, Sendable {
+    case smc = "SMC"
+    case ioKit = "IOKit"
+}
+
+enum SafetyTemperatureFreshness: Equatable, Sendable {
+    case fresh
+    case stale
+    case unavailable
+}
+
+struct SafetyTemperatureSnapshot: Equatable, Sendable {
+    let value: Double?
+    let sources: [SafetyTemperatureSource]
+    let freshness: SafetyTemperatureFreshness
+    let failures: [String]
+
+    static let unavailable = SafetyTemperatureSnapshot(
+        value: nil,
+        sources: [],
+        freshness: .unavailable,
+        failures: []
+    )
+
+    var displayValue: String {
+        guard let value else { return "알 수 없음" }
+        let provenance = sources.map(\.rawValue).joined(separator: "+")
+        return String(format: "%.1f°C (%@)", value, provenance)
+    }
+}
+
+enum HeatProtectionPhase: Equatable, Sendable {
+    case disabled
+    case monitoring
+    case degraded
+    case entering
+    case blocked
+    case restoring
+    case failed
+}
+
+enum ChargeActionAvailability: Equatable, Sendable {
+    case allowed
+    case denied(String)
+
+    var isAllowed: Bool {
+        if case .allowed = self { return true }
+        return false
+    }
+}
+
 enum BatteryDisplay {
     static func amperage(_ value: Int?) -> String {
         guard let value else { return "알 수 없음" }

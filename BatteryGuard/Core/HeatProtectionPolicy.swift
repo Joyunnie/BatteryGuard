@@ -90,12 +90,21 @@ enum HeatProtectionPolicy {
     private static func canEnter(mode: ChargeMode, retryAllowed: Bool) -> Bool {
         guard retryAllowed else { return false }
         switch mode {
-        case .heatBlocked, .controlDisabled, .transitioning(.enteringHeat):
-            return false
-        case .externalDrift(.controlReleasing, _), .externalDrift(.controlReleased, _):
-            return false
-        default:
+        case .maintaining, .toppingUp, .discharging:
             return true
+        case .transitioning(let transition):
+            switch transition {
+            case .applyingMaintain, .startingTopUp, .stoppingTopUp,
+                 .startingDischarge, .stoppingDischarge, .recoveringMaintain:
+                return true
+            case .enteringHeat, .restoringHeat, .preparingForSleep, .releasingControl:
+                return false
+            }
+        case .failed(_, _, .heatProtection):
+            return true
+        case .idle, .heatBlocked, .sleepProtected, .controlDisabled,
+             .externalDrift, .failed:
+            return false
         }
     }
 }
