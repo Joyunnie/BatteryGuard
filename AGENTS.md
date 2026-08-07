@@ -29,7 +29,7 @@ IOKit readings ---+                    result + verified CLI status
 - Give shared observable UI state explicit main-actor isolation; keep Core Data work on its configured context/queue.
 - Model asynchronous store readiness explicitly and await it; never use fixed sleeps as an initialization contract.
 - Keep abstractions minimal: use `ChargeBackend` plus an in-memory Core Data configuration; add a `BatteryHistoryStore` protocol only if a second implementation becomes necessary.
-- Keep the POSIX ownership journal implementation in `BatteryControlOwnershipJournal`; `UserSettings` retains ownership loading, transitions, and persistence errors. Keep tuple matching and observed-state interpretation in `ChargeReconciliationPolicy`, shutdown mapping in `ChargeShutdownPlanner`, temperature freshness in `SafetyTemperatureCache`, and state presentation in `ChargeState`. Hardware reads, task ownership, and published state remain in `ChargeController`.
+- Keep the POSIX ownership journal implementation in `BatteryControlOwnershipJournal`; `UserSettings` retains ownership loading, transitions, and persistence errors. Keep tuple matching and observed-state interpretation in `ChargeReconciliationPolicy`, shutdown mapping in `ChargeShutdownPlanner`, Heat Protection decisions in `HeatProtectionPolicy`, temperature freshness in `SafetyTemperatureCache`, and state presentation in `ChargeState`. Hardware reads, task ownership, and published state remain in `ChargeController`.
 - Reuse existing views, IOKit monitoring, and history code. Replace unsafe process/state internals incrementally; do not rewrite the app wholesale.
 
 ## Hardware and Command Safety

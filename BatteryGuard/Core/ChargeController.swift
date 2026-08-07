@@ -795,69 +795,53 @@ final class ChargeController: ObservableObject {
     // MARK: - Heat Protection
 
     private func evaluateHeatProtection(using info: BatteryInfo) {
-        let temperature = measuredTemperature(using: info)
-        lastTemperature = temperature
-        guard let temperature else {
-            setSensorError("온도를 읽을 수 없어 Heat Protection이 degraded 상태입니다.")
-            refreshDisplayedError()
-            if shouldAttemptHeatProtection {
-                enterHeatProtection(previous: mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit))
-            }
-            return
-        }
-
-        clearSensorError()
-        refreshDisplayedError()
-        let threshold = settings.heatProtectionThreshold
-        if temperature > threshold {
-            if case .transitioning(.restoringHeat(let previous)) = mode {
-                enterHeatProtection(previous: previous, preemptingCurrentOperation: true)
-            } else if shouldAttemptHeatProtection {
-                enterHeatProtection(previous: mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit))
-            }
-        } else if temperature <= threshold - 2 {
-            if case .heatBlocked(let previous) = mode {
-                restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: true)
-            } else if case .failed(let previous?, _, true) = mode,
-                      heatProtectionRetryAfter.map({ Date() >= $0 }) ?? true {
-                restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: true)
-            }
-        }
+        applyHeatProtectionEvaluation(
+            temperature: measuredTemperature(using: info),
+            measurementContext: .batteryInfoAvailable
+        )
     }
 
     private func evaluateHeatProtectionWithoutBatteryInfo(temperature: Double?) {
-        lastTemperature = temperature
-        guard let temperature else {
-            setSensorError("배터리 측정값과 SMC 온도를 읽을 수 없어 Heat Protection이 충전을 차단합니다.")
-            if shouldAttemptHeatProtection {
-                enterHeatProtection(
-                    previous: mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit)
-                )
-            }
-            return
-        }
-
-        clearSensorError()
-        if temperature > settings.heatProtectionThreshold {
-            if shouldAttemptHeatProtection {
-                enterHeatProtection(
-                    previous: mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit)
-                )
-            }
-        } else if temperature <= settings.heatProtectionThreshold - 2,
-                  case .heatBlocked(let previous) = mode {
-            restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: true)
-        }
+        applyHeatProtectionEvaluation(
+            temperature: temperature,
+            measurementContext: .batteryInfoUnavailable
+        )
     }
 
-    private var shouldAttemptHeatProtection: Bool {
-        guard settings.batteryControlEnabled else { return false }
-        guard heatProtectionRetryAfter.map({ Date() >= $0 }) ?? true else { return false }
-        switch mode {
-        case .heatBlocked, .controlDisabled, .transitioning(.enteringHeat): return false
-        case .externalDrift(.controlReleasing, _), .externalDrift(.controlReleased, _):
-            return false
-        default: return true
+    private func applyHeatProtectionEvaluation(
+        temperature: Double?,
+        measurementContext: HeatMeasurementContext
+    ) {
+        let evaluation = HeatProtectionPolicy.evaluate(
+            HeatProtectionInput(
+                temperature: temperature,
+                threshold: settings.heatProtectionThreshold,
+                measurementContext: measurementContext,
+                mode: mode,
+                effectiveLimit: effectiveChargeLimit,
+                ownership: settings.batteryControlOwnership,
+                retryAfter: heatProtectionRetryAfter,
+                now: now()
+            )
+        )
+        lastTemperature = evaluation.temperature
+        if evaluation.temperature == nil {
+            let message = measurementContext == .batteryInfoAvailable
+                ? "온도를 읽을 수 없어 Heat Protection이 degraded 상태입니다."
+                : "배터리 측정값과 SMC 온도를 읽을 수 없어 Heat Protection이 충전을 차단합니다."
+            setSensorError(message)
+        } else {
+            clearSensorError()
+        }
+        refreshDisplayedError()
+
+        switch evaluation.action {
+        case .none:
+            break
+        case .enter(let previous):
+            enterHeatProtection(previous: previous)
+        case .restore(let previous):
+            restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: true)
         }
     }
 
@@ -881,7 +865,7 @@ final class ChargeController: ObservableObject {
             },
             onFailure: { [weak self] error in
                 guard let self else { return }
-                self.heatProtectionRetryAfter = Date().addingTimeInterval(10)
+                self.heatProtectionRetryAfter = self.now().addingTimeInterval(10)
                 self.mode = .failed(previous: previous, message: error.localizedDescription, controlsBlocked: true)
             }
         )

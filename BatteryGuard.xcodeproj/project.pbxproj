@@ -25,12 +25,14 @@
 		AA000025 /* ChargeControlConstraints.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100025 /* ChargeControlConstraints.swift */; };
 		AA000026 /* ChargeLifecyclePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100026 /* ChargeLifecyclePolicy.swift */; };
 		AA000027 /* SafetyTemperatureCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100027 /* SafetyTemperatureCache.swift */; };
+		AA000028 /* HeatProtectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100028 /* HeatProtectionPolicy.swift */; };
 		BB000001 /* BatteryGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* BatteryGuardTests.swift */; };
 		BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100003 /* ChargeReconciliationPolicyTests.swift */; };
 		BB000004 /* ChargeControllerSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100004 /* ChargeControllerSafetyTests.swift */; };
 		BB000005 /* ChargeLifecyclePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100005 /* ChargeLifecyclePolicyTests.swift */; };
 		BB000006 /* TestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100006 /* TestSupport.swift */; };
 		BB000007 /* SafetyTemperatureCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100007 /* SafetyTemperatureCacheTests.swift */; };
+		BB000008 /* HeatProtectionPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100008 /* HeatProtectionPolicyTests.swift */; };
 		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -66,6 +68,7 @@
 		AA100025 /* ChargeControlConstraints.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControlConstraints.swift; sourceTree = "<group>"; };
 		AA100026 /* ChargeLifecyclePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeLifecyclePolicy.swift; sourceTree = "<group>"; };
 		AA100027 /* SafetyTemperatureCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyTemperatureCache.swift; sourceTree = "<group>"; };
+		AA100028 /* HeatProtectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeatProtectionPolicy.swift; sourceTree = "<group>"; };
 		BB100001 /* BatteryGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardTests.swift; sourceTree = "<group>"; };
 		BB100002 /* BatteryGuardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BatteryGuardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB100003 /* ChargeReconciliationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeReconciliationPolicyTests.swift; sourceTree = "<group>"; };
@@ -73,6 +76,7 @@
 		BB100005 /* ChargeLifecyclePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeLifecyclePolicyTests.swift; sourceTree = "<group>"; };
 		BB100006 /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
 		BB100007 /* SafetyTemperatureCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyTemperatureCacheTests.swift; sourceTree = "<group>"; };
+		BB100008 /* HeatProtectionPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeatProtectionPolicyTests.swift; sourceTree = "<group>"; };
 		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -138,6 +142,7 @@
 				AA100024 /* ChargeReconciliationPolicy.swift */,
 				AA100014 /* ChargeState.swift */,
 				AA100022 /* DiagnosticLog.swift */,
+				AA100028 /* HeatProtectionPolicy.swift */,
 				AA100027 /* SafetyTemperatureCache.swift */,
 				AA100016 /* UserSettings.swift */,
 				AA100017 /* TopUpAndLED.swift */,
@@ -170,6 +175,7 @@
 				BB100001 /* BatteryGuardTests.swift */,
 				BB100004 /* ChargeControllerSafetyTests.swift */,
 				BB100005 /* ChargeLifecyclePolicyTests.swift */,
+				BB100008 /* HeatProtectionPolicyTests.swift */,
 				BB100003 /* ChargeReconciliationPolicyTests.swift */,
 				BB100006 /* TestSupport.swift */,
 				BB100007 /* SafetyTemperatureCacheTests.swift */,
@@ -266,6 +272,7 @@
 				AA000024 /* ChargeReconciliationPolicy.swift in Sources */,
 				AA000025 /* ChargeControlConstraints.swift in Sources */,
 				AA000026 /* ChargeLifecyclePolicy.swift in Sources */,
+				AA000028 /* HeatProtectionPolicy.swift in Sources */,
 				AA000002 /* SMCKit.swift in Sources */,
 				AA000009 /* BatteryHistory.swift in Sources */,
 				AA000010 /* BatteryMonitor.swift in Sources */,
@@ -287,6 +294,7 @@
 				BB000001 /* BatteryGuardTests.swift in Sources */,
 				BB000004 /* ChargeControllerSafetyTests.swift in Sources */,
 				BB000005 /* ChargeLifecyclePolicyTests.swift in Sources */,
+				BB000008 /* HeatProtectionPolicyTests.swift in Sources */,
 				BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */,
 				BB000006 /* TestSupport.swift in Sources */,
 				BB000007 /* SafetyTemperatureCacheTests.swift in Sources */,

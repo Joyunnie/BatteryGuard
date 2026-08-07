@@ -235,6 +235,15 @@ PR #9 혹독 리뷰에서 Boolean ownership 입력이 durable enum과 경쟁하�
 
 최종 자동 검증은 strict-concurrency complete와 warnings-as-errors에서 151개 테스트, Release build와 Debug analyze가 모두 통과했다. 이 PR은 실제 CLI나 하드웨어를 실행하지 않는다.
 
+### 0.17 PR #10 Heat Protection decision 분리 (2026-08-07)
+
+PR #9의 순수 subsystem 계약 위에서 Heat Protection의 temperature/ownership/mode/cooldown 판단을 I/O 없는 `HeatProtectionPolicy`로 분리한다.
+
+- 입력은 validated temperature 또는 unavailable, threshold, battery-info availability, 단일 `ChargeMode`, effective limit, durable `BatteryControlOwnership`, retry timestamp와 현재 시각이다.
+- 출력은 normalized temperature와 `none`, `enter(previous:)`, `restore(previous:)` 중 하나인 단일 action이다. controller는 sensor error 표시와 backend transition 실행만 담당한다.
+- BatteryGuard ownership이 아니면 hardware action을 만들지 않고, invalid/unavailable temperature는 BatteryGuard ownership에서 fail closed 한다. 2°C restore hysteresis, restore 중 재과열 re-block, failed-state retry cooldown과 battery-info requirement를 기존 계약 그대로 유지한다.
+- pure policy 테스트에서 invalid/unavailable sample, ownership, restorable mode, hysteresis, cooldown, in-flight restore와 release drift 경계를 검증한다. 실제 CLI와 하드웨어는 실행하지 않는다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -736,6 +745,7 @@ enum ChargeMode: Equatable {
 10. `[PR #8 완료]` 실제 CLI 계약에 맞춘 Discharge 검증 수정, 전체 자동 검증과 승인된 하드웨어 checklist
 11. `[PR #8 병합 전 보완]` 초기 preflight 실패 종료, sleep assertion 수명, LED best-effort cleanup, temperature cache freshness와 PID start identity 재검증
 12. `[PR #9 구현]` shutdown planning과 temperature freshness 계약 분리, 동일 경계에 맞춘 controller/policy 테스트 파일 분할
+13. `[PR #10 구현]` Heat Protection decision을 pure policy로 분리하고 ownership·hysteresis·cooldown·fail-closed 경계 테스트 추가
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
