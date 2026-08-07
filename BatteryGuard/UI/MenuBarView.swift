@@ -80,6 +80,7 @@ struct MenuBarView: View {
                 controller.isCommandPending ||
                 controller.isDischarging ||
                 controller.isTopUpActive ||
+                controller.hasExternalControlDrift ||
                 controller.isHeatProtectionBlockingControls
             )
         }
@@ -96,6 +97,7 @@ struct MenuBarView: View {
                     controller.isCommandPending ||
                     controller.isChargeLimitPending ||
                     controller.isHeatProtectionBlockingControls ||
+                    controller.hasExternalControlDrift ||
                     controller.isDischarging,
                 action: {
                     if controller.isTopUpActive {
@@ -114,6 +116,7 @@ struct MenuBarView: View {
                     controller.isCommandPending ||
                     controller.isChargeLimitPending ||
                     controller.isHeatProtectionBlockingControls ||
+                    controller.hasExternalControlDrift ||
                     controller.isTopUpActive,
                 action: {
                     if controller.isDischarging {
@@ -145,9 +148,12 @@ struct MenuBarView: View {
                     }
                     .padding(.top, 4)
                 }
+
             }
 
-            if let error = controller.lastError {
+            ExternalDriftStatusView(controller: controller, compact: true)
+
+            if let error = controller.lastError, !controller.hasExternalControlDrift {
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.orange)
@@ -196,6 +202,29 @@ struct MenuBarView: View {
         case .discharging: return .blue
         case .notConnected: return .gray
         case .unknown: return .secondary
+        }
+    }
+}
+
+struct ExternalDriftStatusView: View {
+    @ObservedObject var controller: ChargeController
+    var compact = false
+
+    var body: some View {
+        if let drift = controller.externalDriftDescription {
+            VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+                Label(drift, systemImage: "arrow.triangle.2.circlepath")
+                if let recovery = controller.externalDriftRecoveryDescription {
+                    Text(recovery)
+                }
+                Button("다시 확인") {
+                    Task { await controller.reconcileExternalState() }
+                }
+                .disabled(controller.isReconcilingExternalState)
+            }
+            .font(.system(size: compact ? 10 : 11))
+            .foregroundColor(.orange)
+            .padding(.top, compact ? 4 : 0)
         }
     }
 }

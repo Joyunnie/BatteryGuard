@@ -71,7 +71,7 @@ enum BatteryChargingStatus: Equatable, Sendable {
 }
 
 enum MaintainWorkerStatus: Equatable, Sendable {
-    case running(pid: Int32)
+    case running(pid: Int32, target: Int?)
     case stopped
     case stale(pid: Int32?)
     case duplicate(pids: [Int32])
@@ -83,6 +83,11 @@ enum MaintainWorkerStatus: Equatable, Sendable {
     }
 
     var isStopped: Bool { self == .stopped }
+
+    func matches(level: Int) -> Bool {
+        guard case .running(_, let target) = self else { return false }
+        return target == level
+    }
 }
 
 struct BatteryControlStatus: Equatable, Sendable {
@@ -106,6 +111,19 @@ struct BatteryControlStatus: Equatable, Sendable {
     var diagnosticDescription: String {
         "charging=\(charging.diagnosticLabel),discharging=\(isDischarging.map(String.init) ?? "unknown"),maintain=\(maintainLevel.map(String.init) ?? "unknown"),worker=\(maintainWorker.diagnosticLabel)"
     }
+
+    func isVerifiedMaintain(level: Int) -> Bool {
+        charging != .unknown &&
+            isDischarging == false &&
+            maintainLevel == level &&
+            maintainWorker.matches(level: level)
+    }
+
+    var isVerifiedChargingDisabled: Bool {
+        charging == .disabled &&
+            isDischarging == false &&
+            maintainWorker.isStopped
+    }
 }
 
 private extension BatteryChargingStatus {
@@ -121,7 +139,8 @@ private extension BatteryChargingStatus {
 private extension MaintainWorkerStatus {
     var diagnosticLabel: String {
         switch self {
-        case .running(let pid): return "running(\(pid))"
+        case .running(let pid, let target):
+            return "running(\(pid),target:\(target.map(String.init) ?? "unknown"))"
         case .stopped: return "stopped"
         case .stale(let pid): return "stale(\(pid.map(String.init) ?? "unknown"))"
         case .duplicate(let pids): return "duplicate(\(pids.map(String.init).joined(separator: ",")))"
@@ -175,13 +194,18 @@ actor SMCKit: ChargeBackend {
     private let statusCommandTimeout: TimeInterval = 2
     private let longRunningVerificationTimeoutNanoseconds: UInt64 = 3_000_000_000
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
+    private let longRunningOperationTimeout: TimeInterval = 12 * 60 * 60
     private var rawSMCAvailable = false
     private var savedMagSafeLEDValue: UInt8?
 
     private struct MaintainWorkerProcess: Equatable, Sendable {
         let pid: Int32
-        let processGroupID: Int32
         let command: String
+        let target: Int?
+    }
+
+    private struct ParsedMaintainCommand: Equatable, Sendable {
+        let target: Int?
     }
 
     init(
@@ -226,20 +250,16 @@ actor SMCKit: ChargeBackend {
             expectedProductionPath: defaultBatteryPath,
             displayName: "battery CLI"
         )
+        try validateExecutableBeforeUse(
+            path: smcBinaryPath,
+            expectedProductionPath: defaultSMCBinaryPath,
+            displayName: "SMC binary"
+        )
+        rawSMCAvailable = true
+
         try await validateBatteryCLIVersionUnlocked()
-
         _ = try await readControlStatusUnlocked()
-
-        let available = FileManager.default.fileExists(atPath: smcBinaryPath)
-        if available {
-            try validateExecutableBeforeUse(
-                path: smcBinaryPath,
-                expectedProductionPath: defaultSMCBinaryPath,
-                displayName: "SMC binary"
-            )
-        }
-        rawSMCAvailable = available
-        print("[SMCKit] battery CLI ready; raw SMC \(available ? "available" : "unavailable")")
+        print("[SMCKit] battery CLI and SMC binary ready")
     }
 
     private func validateExecutableBeforeUse(
@@ -346,9 +366,7 @@ actor SMCKit: ChargeBackend {
         let before = await readPreOperationStatus()
         if executableTrustPolicy == .production,
            let current = before,
-           current.maintainLevel == level,
-           current.maintainWorker.isRunning,
-           current.isDischarging != true {
+           current.isVerifiedMaintain(level: level) {
             await recordVerifiedOperation("maintain \(level)", before: current, after: current)
             return
         }
@@ -360,10 +378,16 @@ actor SMCKit: ChargeBackend {
         )
 
         let status = try await readControlStatusUnlocked()
-        guard status.maintainLevel == level,
-              status.maintainWorker.isRunning,
-              status.isDischarging == false else {
-            try? await terminateMaintainWorkersUnlocked()
+        guard status.isVerifiedMaintain(level: level) else {
+            do {
+                try await terminateMaintainWorkersUnlocked()
+            } catch {
+                throw BatteryError.commandFailed(
+                    "battery maintain \(level)",
+                    -1,
+                    "verification failed: \(status.diagnosticDescription); cleanup failed: \(error.localizedDescription)"
+                )
+            }
             throw BatteryError.commandFailed(
                 "battery maintain \(level)",
                 -1,
@@ -387,9 +411,7 @@ actor SMCKit: ChargeBackend {
         try await terminateMaintainWorkersUnlocked()
         _ = try await batteryCommand(["charging", "off"])
         let status = try await readControlStatusUnlocked()
-        guard status.charging == .disabled,
-              status.isDischarging == false,
-              status.maintainWorker.isStopped else {
+        guard status.isVerifiedChargingDisabled else {
             throw BatteryError.commandFailed(
                 "battery charging off",
                 -1,
@@ -485,16 +507,9 @@ actor SMCKit: ChargeBackend {
         }
 
         do {
-            let result = try await runProcess(
-                executable: "/bin/ps",
-                arguments: ["-axo", "pid=,pgid=,command="],
-                label: "inspect maintain workers",
-                timeout: statusCommandTimeout
-            )
             return Self.classifyMaintainWorkers(
-                pidFilePID: readMaintainPIDFile(),
-                processTable: result.stdout,
-                batteryPath: batteryPath
+                pidFilePID: try readMaintainPIDFile(),
+                workers: try await currentMaintainWorkersUnlocked()
             )
         } catch {
             return .unknown
@@ -507,12 +522,19 @@ actor SMCKit: ChargeBackend {
         batteryPath: String
     ) -> MaintainWorkerStatus {
         let workers = parseMaintainWorkerProcesses(processTable: processTable, batteryPath: batteryPath)
+        return classifyMaintainWorkers(pidFilePID: pidFilePID, workers: workers)
+    }
+
+    private static func classifyMaintainWorkers(
+        pidFilePID: Int32?,
+        workers: [MaintainWorkerProcess]
+    ) -> MaintainWorkerStatus {
         guard workers.count <= 1 else { return .duplicate(pids: workers.map(\.pid).sorted()) }
         guard let worker = workers.first else {
             return pidFilePID == nil ? .stopped : .stale(pid: pidFilePID)
         }
         guard worker.pid == pidFilePID else { return .stale(pid: pidFilePID ?? worker.pid) }
-        return .running(pid: worker.pid)
+        return .running(pid: worker.pid, target: worker.target)
     }
 
     private static func parseMaintainWorkerProcesses(
@@ -523,36 +545,58 @@ actor SMCKit: ChargeBackend {
             let fields = line.split(maxSplits: 2, whereSeparator: { $0.isWhitespace })
             guard fields.count == 3,
                   let pid = Int32(fields[0]),
-                  let pgid = Int32(fields[1]),
                   pid > 1,
-                  Self.isExactMaintainCommand(String(fields[2]), batteryPath: batteryPath) else {
+                  let parsed = Self.parseExactMaintainCommand(
+                    String(fields[2]),
+                    batteryPath: batteryPath
+                  ) else {
                 return nil
             }
-            return MaintainWorkerProcess(pid: pid, processGroupID: pgid, command: String(fields[2]))
+            return MaintainWorkerProcess(
+                pid: pid,
+                command: String(fields[2]),
+                target: parsed.target
+            )
         }
     }
 
-    private static func isExactMaintainCommand(_ command: String, batteryPath: String) -> Bool {
+    private static func parseExactMaintainCommand(
+        _ command: String,
+        batteryPath: String
+    ) -> ParsedMaintainCommand? {
         let arguments = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        guard arguments.contains(batteryPath) else { return false }
-        return arguments.contains("maintain_synchronous") ||
-            arguments.contains("maintain_voltage_synchronous")
+        let batteryIndex: Int
+        if arguments.first == batteryPath {
+            batteryIndex = 0
+        } else if arguments.count >= 2,
+                  ["/bin/bash", "/bin/zsh"].contains(arguments[0]),
+                  arguments[1] == batteryPath {
+            batteryIndex = 1
+        } else {
+            return nil
+        }
+        guard arguments.count == batteryIndex + 3 else { return nil }
+        let action = arguments[batteryIndex + 1]
+        let targetText = arguments[batteryIndex + 2]
+        switch action {
+        case "maintain_synchronous":
+            guard let target = Int(targetText), UserSettings.chargeLimitRange.contains(target) else {
+                return nil
+            }
+            return ParsedMaintainCommand(target: target)
+        case "maintain_voltage_synchronous":
+            guard Double(targetText) != nil else { return nil }
+            return ParsedMaintainCommand(target: nil)
+        default:
+            return nil
+        }
     }
 
     private func terminateMaintainWorkersUnlocked() async throws {
-        let result = try await runProcess(
-            executable: "/bin/ps",
-            arguments: ["-axo", "pid=,pgid=,command="],
-            label: "locate maintain workers",
-            timeout: statusCommandTimeout
-        )
-        let workers = Self.parseMaintainWorkerProcesses(
-            processTable: result.stdout,
-            batteryPath: batteryPath
-        )
+        let workers = try await currentMaintainWorkersUnlocked()
         guard !workers.isEmpty else {
-            if readMaintainPIDFile() != nil {
-                try? FileManager.default.removeItem(atPath: maintainPIDFilePath)
+            if try readMaintainPIDFile() != nil {
+                try FileManager.default.removeItem(atPath: maintainPIDFilePath)
             }
             return
         }
@@ -581,28 +625,87 @@ actor SMCKit: ChargeBackend {
                 "workers survived termination: \(survivors.map(\.pid))"
             )
         }
-        if readMaintainPIDFile() != nil {
-            try? FileManager.default.removeItem(atPath: maintainPIDFilePath)
+        if try readMaintainPIDFile() != nil {
+            try FileManager.default.removeItem(atPath: maintainPIDFilePath)
         }
     }
 
     private func currentMaintainWorkersUnlocked() async throws -> [MaintainWorkerProcess] {
-        let result = try await runProcess(
-            executable: "/bin/ps",
-            arguments: ["-axo", "pid=,pgid=,command="],
-            label: "revalidate maintain workers",
-            timeout: statusCommandTimeout
+        let escapedPath = NSRegularExpression.escapedPattern(for: batteryPath)
+        let candidates = try await runProcess(
+            executable: "/usr/bin/pgrep",
+            arguments: ["-f", escapedPath],
+            label: "locate battery CLI processes",
+            timeout: statusCommandTimeout,
+            allowedExitCodes: [0, 1]
         )
-        return Self.parseMaintainWorkerProcesses(
-            processTable: result.stdout,
-            batteryPath: batteryPath
-        )
+        guard candidates.exitCode == 0 else { return [] }
+
+        var workers: [MaintainWorkerProcess] = []
+        for line in candidates.stdout.split(whereSeparator: \Character.isNewline) {
+            guard let pid = Int32(line.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  pid > 1,
+                  pid != getpid() else { continue }
+            let inspection = try await runProcess(
+                executable: "/bin/ps",
+                arguments: ["-p", String(pid), "-o", "pid=,pgid=,command="],
+                label: "inspect battery CLI process \(pid)",
+                timeout: statusCommandTimeout,
+                allowedExitCodes: [0, 1]
+            )
+            guard inspection.exitCode == 0 else { continue }
+            workers.append(contentsOf: Self.parseMaintainWorkerProcesses(
+                processTable: inspection.stdout,
+                batteryPath: batteryPath
+            ))
+        }
+        return workers
     }
 
-    private func readMaintainPIDFile() -> Int32? {
-        guard let text = try? String(contentsOfFile: maintainPIDFilePath, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              let pid = Int32(text), pid > 1 else { return nil }
+    private func readMaintainPIDFile() throws -> Int32? {
+        var fileStatus = stat()
+        guard Darwin.lstat(maintainPIDFilePath, &fileStatus) == 0 else {
+            if errno == ENOENT { return nil }
+            throw BatteryError.commandFailed(
+                "inspect maintain PID file",
+                -1,
+                String(cString: strerror(errno))
+            )
+        }
+        guard (fileStatus.st_mode & S_IFMT) == S_IFREG,
+              fileStatus.st_uid == geteuid(),
+              fileStatus.st_size > 0,
+              fileStatus.st_size <= 32 else {
+            throw BatteryError.preflightFailed(
+                "maintain PID file is not a small current-user-owned regular file"
+            )
+        }
+
+        let descriptor = Darwin.open(
+            maintainPIDFilePath,
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+        )
+        guard descriptor >= 0 else {
+            throw BatteryError.commandFailed(
+                "open maintain PID file",
+                -1,
+                String(cString: strerror(errno))
+            )
+        }
+        defer { Darwin.close(descriptor) }
+        var bytes = [UInt8](repeating: 0, count: 33)
+        let count = bytes.withUnsafeMutableBytes { buffer in
+            Darwin.read(descriptor, buffer.baseAddress, 32)
+        }
+        guard count > 0 else {
+            let message = count == 0 ? "empty file" : String(cString: strerror(errno))
+            throw BatteryError.commandFailed("read maintain PID file", -1, message)
+        }
+        let text = String(decoding: bytes.prefix(Int(count)), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pid = Int32(text), pid > 1 else {
+            throw BatteryError.preflightFailed("maintain PID file contains an invalid PID")
+        }
         return pid
     }
 
@@ -790,7 +893,10 @@ actor SMCKit: ChargeBackend {
                 executable: "/bin/bash",
                 arguments: [batteryPath] + arguments,
                 environment: batteryEnvironment,
-                label: label
+                label: label,
+                timeout: longRunningOperationTimeout,
+                outputPolicy: .discardStdoutCaptureStderr,
+                descendantPolicy: .allowPersistentProcessGroup
             )
         )
     }
@@ -852,7 +958,8 @@ actor SMCKit: ChargeBackend {
         label: String,
         timeout: TimeInterval = 30,
         outputPolicy: BatteryCommandRunner.OutputPolicy = .capture,
-        descendantPolicy: BatteryCommandRunner.DescendantPolicy = .requireProcessGroupExit
+        descendantPolicy: BatteryCommandRunner.DescendantPolicy = .requireProcessGroupExit,
+        allowedExitCodes: Set<Int32> = [0]
     ) async throws -> BatteryCommandResult {
         let result: BatteryCommandResult
         do {
@@ -881,8 +988,15 @@ actor SMCKit: ChargeBackend {
         case .uncaughtSignal(let signal):
             throw BatteryError.commandFailed(label, result.exitCode, "terminated by signal \(signal): \(result.combinedOutput)")
         case .exited:
-            guard result.exitCode == 0 else {
+            guard allowedExitCodes.contains(result.exitCode) else {
                 throw BatteryError.commandFailed(label, result.exitCode, result.combinedOutput)
+            }
+            guard !result.stdoutWasTruncated, !result.stderrWasTruncated else {
+                throw BatteryError.commandFailed(
+                    label,
+                    result.exitCode,
+                    "command output exceeded the capture limit"
+                )
             }
             return result
         }

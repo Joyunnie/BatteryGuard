@@ -43,12 +43,15 @@ struct SettingsView: View {
                         controller.isCommandPending ||
                         controller.isDischarging ||
                         controller.isTopUpActive ||
+                        controller.hasExternalControlDrift ||
                         controller.isHeatProtectionBlockingControls
                     )
                     Text("\(controller.displayedChargeLimit)%")
                         .font(.system(.body, design: .monospaced))
                         .frame(width: 45)
                 }
+
+                ExternalDriftStatusView(controller: controller)
             }
 
             Section("정보") {
@@ -62,7 +65,13 @@ struct SettingsView: View {
     private var protectionSettings: some View {
         Form {
             Section("열 보호") {
-                Toggle("열 보호 활성화", isOn: $settings.heatProtectionEnabled)
+                Toggle(
+                    "열 보호 활성화",
+                    isOn: Binding(
+                        get: { settings.heatProtectionEnabled },
+                        set: { controller.setHeatProtectionEnabled($0) }
+                    )
+                )
 
                 if settings.heatProtectionEnabled {
                     VStack(alignment: .leading, spacing: 6) {
@@ -118,7 +127,13 @@ struct SettingsView: View {
             }
 
             Section("MagSafe LED") {
-                Toggle("MagSafe LED 제어", isOn: $settings.controlMagSafeLED)
+                Toggle(
+                    "MagSafe LED 제어",
+                    isOn: Binding(
+                        get: { settings.controlMagSafeLED },
+                        set: { controller.setLEDControlEnabled($0) }
+                    )
+                )
                 Text("""
                 초록: Limit 도달 / 주황: 충전 중 / 점멸: 방전 중
                 MagSafe 3 모델에서만 작동합니다.

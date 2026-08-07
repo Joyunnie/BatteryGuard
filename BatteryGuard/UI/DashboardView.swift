@@ -96,6 +96,7 @@ struct DashboardView: View {
                         controller.isCommandPending ||
                         controller.isDischarging ||
                         controller.isTopUpActive ||
+                        controller.hasExternalControlDrift ||
                         controller.isHeatProtectionBlockingControls
                     )
                 }
@@ -122,6 +123,7 @@ struct DashboardView: View {
                         controller.isCommandPending ||
                         controller.isChargeLimitPending ||
                         controller.isHeatProtectionBlockingControls ||
+                        controller.hasExternalControlDrift ||
                         controller.isDischarging
                     )
 
@@ -144,9 +146,12 @@ struct DashboardView: View {
                         controller.isCommandPending ||
                         controller.isChargeLimitPending ||
                         controller.isHeatProtectionBlockingControls ||
+                        controller.hasExternalControlDrift ||
                         controller.isTopUpActive
                     )
                 }
+
+                ExternalDriftStatusView(controller: controller)
             }
             .padding()
         }

@@ -28,6 +28,12 @@ struct MainAppLaunchAtLoginService: LaunchAtLoginManaging {
     func unregister() throws { try SMAppService.mainApp.unregister() }
 }
 
+private struct InertLaunchAtLoginService: LaunchAtLoginManaging {
+    var status: SMAppService.Status { .notRegistered }
+    func register() throws {}
+    func unregister() throws {}
+}
+
 enum LaunchAtLoginState: Equatable {
     case disabled
     case enabled
@@ -52,7 +58,16 @@ enum LaunchAtLoginState: Equatable {
 
 @MainActor
 final class UserSettings: ObservableObject {
-    static let shared = UserSettings()
+    static let shared: UserSettings = {
+        guard AppRuntime.isRunningTests else { return UserSettings() }
+        let suiteName = "com.jiwon.batteryguard.tests.host"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return UserSettings(
+            defaults: defaults,
+            launchAtLoginService: InertLaunchAtLoginService()
+        )
+    }()
 
     nonisolated static let chargeLimitRange = 20...100
     nonisolated static let heatProtectionThresholdRange = 20.0...50.0
@@ -67,6 +82,7 @@ final class UserSettings: ObservableObject {
     }
 
     private let defaults: UserDefaults
+    var usesStandardDefaults: Bool { defaults === UserDefaults.standard }
     private let launchAtLoginService: LaunchAtLoginManaging
     private var chargeLimitStorage: Int
     private var heatProtectionThresholdStorage: Double

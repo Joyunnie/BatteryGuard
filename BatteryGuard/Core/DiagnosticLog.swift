@@ -18,6 +18,7 @@ enum DiagnosticOutcome: Codable, Equatable, Sendable {
     case timedOut
     case cancelled
     case superseded
+    case drifted
 }
 
 enum DiagnosticContext {
@@ -132,6 +133,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         case "timedOut": return .timedOut
         case "cancelled": return .cancelled
         case "superseded": return .superseded
+        case "drifted": return .drifted
         case let value? where value.hasPrefix("signal(") && value.hasSuffix(")"):
             let raw = value.dropFirst("signal(".count).dropLast()
             return Int32(raw).map(DiagnosticOutcome.signaled) ?? .failed
@@ -167,7 +169,9 @@ extension DiagnosticEvent {
 
 actor DiagnosticLog {
     static let disabled = DiagnosticLog(fileURL: nil, capacity: 0)
-    static let shared = DiagnosticLog(fileURL: productionFileURL(), capacity: 100)
+    static let shared = AppRuntime.isRunningTests
+        ? disabled
+        : DiagnosticLog(fileURL: productionFileURL(), capacity: 100)
 
     nonisolated let fileURL: URL?
 

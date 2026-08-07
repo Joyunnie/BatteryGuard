@@ -75,6 +75,8 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var openDelayValue: TimeInterval = 0
     private var temperatureSequence: [Float?] = []
     private var ledDelayByRawValue: [UInt8: TimeInterval] = [:]
+    private var controlStatusOverride: BatteryControlStatus?
+    private var controlStatusDelayValue: TimeInterval = 0
 
     var operations: [String] {
         lock.lock()
@@ -146,6 +148,18 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         lock.withLock { ledDelayByRawValue[state.rawValue] = delay }
     }
 
+    func setControlStatus(_ status: BatteryControlStatus?) {
+        lock.withLock { controlStatusOverride = status }
+    }
+
+    func setControlStatusDelay(_ delay: TimeInterval) {
+        lock.withLock { controlStatusDelayValue = delay }
+    }
+
+    func setOwnedLongRunningOperation(_ isActive: Bool) {
+        setLongRunning(isActive)
+    }
+
     func open() async throws {
         try record("open")
         let delay = lock.withLock { openDelayValue }
@@ -156,12 +170,19 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func readControlStatus() async throws -> BatteryControlStatus {
         try record("read-status")
+        let delay = lock.withLock { controlStatusDelayValue }
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
         return lock.withLock {
-            BatteryControlStatus(
+            if let controlStatusOverride { return controlStatusOverride }
+            return BatteryControlStatus(
                 charging: chargingStatus,
                 isDischarging: longRunning,
                 maintainLevel: maintainLevel,
-                maintainWorker: maintainWorkerRunning ? .running(pid: 4_242) : .stopped
+                maintainWorker: maintainWorkerRunning
+                    ? .running(pid: 4_242, target: maintainLevel)
+                    : .stopped
             )
         }
     }
@@ -506,6 +527,28 @@ final class StatusParsingTests: XCTestCase {
             ),
             .stale(pid: 123)
         )
+
+        let standaloneTokens = "123 123 /bin/echo \(batteryPath) maintain_synchronous 80"
+        XCTAssertEqual(
+            SMCKit.classifyMaintainWorkers(
+                pidFilePID: 123,
+                processTable: standaloneTokens,
+                batteryPath: batteryPath
+            ),
+            .stale(pid: 123)
+        )
+    }
+
+    func testMaintainWorkerClassificationBindsTheWorkerTarget() {
+        let batteryPath = "/usr/local/co.palokaj.battery/battery"
+        XCTAssertEqual(
+            SMCKit.classifyMaintainWorkers(
+                pidFilePID: 101,
+                processTable: "101 100 /bin/bash \(batteryPath) maintain_synchronous 60",
+                batteryPath: batteryPath
+            ),
+            .running(pid: 101, target: 60)
+        )
     }
 }
 
@@ -714,6 +757,8 @@ final class ProcessLifecycleTests: XCTestCase {
         )
 
         XCTAssertEqual(result.stdout.utf8.count, 64 * 1024)
+        XCTAssertTrue(result.stdoutWasTruncated)
+        XCTAssertFalse(result.stderrWasTruncated)
         XCTAssertEqual(result.termination, .exited)
     }
 
@@ -731,6 +776,7 @@ final class ProcessLifecycleTests: XCTestCase {
 
         XCTAssertEqual(result.stdout, "")
         XCTAssertEqual(result.stderr.utf8.count, 64 * 1024)
+        XCTAssertTrue(result.stderrWasTruncated)
     }
 
     func testStderrCaptureDoesNotWaitForADetachedDescendantToCloseThePipe() async throws {
@@ -827,6 +873,57 @@ final class ProcessLifecycleTests: XCTestCase {
         let firstIsStillActive = await runner.isLongRunningActive()
         XCTAssertTrue(firstIsStillActive)
         _ = try await runner.cancelLongRunning()
+    }
+
+    func testLongRunningCommandUsesItsMonotonicTimeout() async throws {
+        let runner = BatteryCommandRunner()
+        _ = try await runner.launchLongRunning(
+            .init(
+                executable: "/bin/sh",
+                arguments: termIgnoringShell,
+                label: "timed long fixture",
+                timeout: 0.05
+            )
+        )
+        let deadline = Date().addingTimeInterval(3)
+        var result: BatteryCommandResult?
+        while result == nil, Date() < deadline {
+            result = await runner.longRunningResult()
+            if result == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        let isActive = await runner.isLongRunningActive()
+        XCTAssertFalse(isActive)
+        XCTAssertEqual(result?.termination, .timedOut)
+    }
+
+    func testCancelAllRejectsCommandsQueuedDuringCancellation() async throws {
+        let runner = BatteryCommandRunner()
+        let arguments = termIgnoringShell
+        let active = Task {
+            try await runner.run(
+                .init(
+                    executable: "/bin/sh",
+                    arguments: arguments,
+                    label: "active cancellation fixture",
+                    timeout: 5
+                )
+            )
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let cancellation = Task { try await runner.cancelAll() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        do {
+            _ = try await runner.run(
+                .init(executable: "/bin/true", arguments: [], label: "late command")
+            )
+            XCTFail("Expected enqueue to be rejected during cancellation")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("cancellation"))
+        }
+
+        try await cancellation.value
+        _ = try await active.value
     }
 
     func testTimeoutLeavesNoFixtureProcessBehind() async throws {
@@ -1003,7 +1100,15 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         }
         let backend = SMCKit(
             batteryPath: fixture.path,
-            maintainWorkerProbe: { _, _ in .running(pid: 4_242) },
+            maintainWorkerProbe: { _, _ in
+                guard
+                    let rawTarget = try? String(contentsOf: stateFile, encoding: .utf8),
+                    let target = Int(rawTarget.trimmingCharacters(in: .whitespacesAndNewlines))
+                else {
+                    return .stopped
+                }
+                return .running(pid: 4_242, target: target)
+            },
             executableTrustPolicy: .testFixture
         )
 
@@ -1042,7 +1147,7 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         let backend = SMCKit(
             runner: runner,
             batteryPath: fixture.path,
-            maintainWorkerProbe: { _, _ in .running(pid: 4_242) },
+            maintainWorkerProbe: { _, _ in .running(pid: 4_242, target: 80) },
             executableTrustPolicy: .testFixture,
             diagnostics: log
         )
@@ -1102,7 +1207,7 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture) }
         let backend = SMCKit(
             batteryPath: fixture.path,
-            maintainWorkerProbe: { _, _ in .running(pid: 4_242) },
+            maintainWorkerProbe: { _, _ in .running(pid: 4_242, target: 80) },
             executableTrustPolicy: .testFixture
         )
 
@@ -1148,6 +1253,66 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             XCTFail("Expected production preflight failure")
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("Battery CLI preflight failed"))
+        }
+    }
+
+    func testPreflightRejectsAnUntrustedSMCBinaryBeforeExecutingBatteryCLI() async throws {
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-preflight-marker-\(UUID().uuidString)")
+        let batteryFixture = try makeExecutableFixture(
+            "#!/bin/bash\necho invoked > \(shellQuote(marker.path))\n"
+        )
+        let smcTarget = try makeExecutableFixture("#!/bin/bash\nexit 0\n")
+        let smcLink = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-smc-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: smcLink, withDestinationURL: smcTarget)
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcTarget)
+            try? FileManager.default.removeItem(at: smcLink)
+            try? FileManager.default.removeItem(at: marker)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcLink.path,
+            executableTrustPolicy: .testFixture
+        )
+
+        do {
+            try await backend.open()
+            XCTFail("Expected SMC preflight failure")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("preflight failed"))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        }
+    }
+
+    func testMaintainVerificationRejectsUnknownChargingAndMismatchedWorkerTarget() async throws {
+        let cases: [(String, MaintainWorkerStatus)] = [
+            ("unknown", .running(pid: 4_242, target: 80)),
+            ("disabled", .running(pid: 4_242, target: 60))
+        ]
+        for (chargingText, worker) in cases {
+            let fixture = try makeExecutableFixture(
+                """
+                #!/bin/bash
+                if [[ "$1" == "status_csv" ]]; then
+                  echo "80,00:10,\(chargingText),not discharging,80"
+                fi
+                """
+            )
+            defer { try? FileManager.default.removeItem(at: fixture) }
+            let backend = SMCKit(
+                batteryPath: fixture.path,
+                maintainWorkerProbe: { _, _ in worker },
+                executableTrustPolicy: .testFixture
+            )
+            do {
+                try await backend.applyMaintain(level: 80)
+                XCTFail("Expected incomplete Maintain tuple to fail")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("status_csv reported"))
+            }
         }
     }
 
@@ -1228,6 +1393,15 @@ final class SMCKitOperationSafetyTests: XCTestCase {
 }
 
 final class BatteryValueTests: XCTestCase {
+    @MainActor
+    func testAppHostedTestCompositionNeverUsesProductionState() {
+        XCTAssertTrue(AppRuntime.isRunningTests)
+        XCTAssertTrue(BatteryHistory.shared.usesInMemoryStore)
+        XCTAssertFalse(BatteryMonitor.shared.usesMonitoringInfrastructure)
+        XCTAssertFalse(UserSettings.shared.usesStandardDefaults)
+        XCTAssertNil(DiagnosticLog.shared.fileURL)
+    }
+
     func testUnavailableMeasurementsRemainUnavailable() {
         let info = makeBatteryInfo(temperature: nil, amperage: nil, health: nil)
         XCTAssertNil(info.temperature)
@@ -1566,6 +1740,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         temperature: Double? = 30,
         charge: Int = 80,
         isCharging: Bool = false,
+        initialMode: ChargeMode? = nil,
         history: BatteryHistory? = nil,
         diagnostics: DiagnosticLog = .disabled
     ) -> (ChargeController, FakeChargeBackend, BatteryMonitor, UserSettings) {
@@ -1591,6 +1766,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 monitor: monitor,
                 settings: settings,
                 initialReadiness: .ready,
+                initialMode: initialMode,
                 history: history,
                 diagnostics: diagnostics
             ),
@@ -2041,6 +2217,519 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertEqual(record.chargeLimit, 80)
     }
 
+    func testExternalMaintainDriftIsDisplayedLoggedAndClearsWhenCorrected() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-drift-log-\(UUID().uuidString)", isDirectory: true)
+        let log = DiagnosticLog(fileURL: directory.appendingPathComponent("Diagnostics.json"), capacity: 20)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (controller, backend, _, _) = makeSUT(diagnostics: log)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 7_777, target: 60)
+            )
+        )
+
+        await controller.reconcileExternalState()
+
+        XCTAssertTrue(controller.hasExternalControlDrift)
+        XCTAssertEqual(controller.effectiveChargeLimit, 80)
+        XCTAssertTrue(controller.externalDriftDescription?.contains("기대: Maintain 80%") == true)
+        XCTAssertTrue(controller.externalDriftDescription?.contains("실제: Maintain 60%") == true)
+        XCTAssertTrue(controller.externalDriftDescription?.contains("60%") == true)
+        XCTAssertTrue(controller.externalDriftRecoveryDescription?.contains("Maintain 80%") == true)
+        XCTAssertTrue(controller.lastError?.contains("외부 CLI 변경 감지") == true)
+
+        let driftWasLogged = await log.recentEvents().contains { $0.outcome == .drifted }
+        XCTAssertTrue(driftWasLogged)
+
+        await controller.reconcileExternalState()
+        let repeatedEvents = await log.recentEvents()
+        XCTAssertEqual(repeatedEvents.filter { $0.outcome == .drifted }.count, 1)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_888, target: 80)
+            )
+        )
+        await controller.reconcileExternalState()
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(controller.hasExternalControlDrift)
+        XCTAssertNil(controller.externalDriftDescription)
+    }
+
+    func testUnknownChargingNeverQualifiesAsMaintain() async {
+        let (controller, backend, _, _) = makeSUT()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .unknown,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+
+        await controller.reconcileExternalState()
+
+        XCTAssertTrue(controller.hasExternalControlDrift)
+        XCTAssertEqual(controller.currentState, .unknown)
+        XCTAssertTrue(controller.externalDriftDescription?.contains("모순된") == true)
+    }
+
+    func testUnknownAndDuplicateWorkersNeverQualifyAsMaintain() async {
+        let (controller, backend, _, _) = makeSUT()
+        let invalidWorkers: [MaintainWorkerStatus] = [
+            .unknown,
+            .duplicate(pids: [101, 202])
+        ]
+
+        for worker in invalidWorkers {
+            backend.setControlStatus(
+                BatteryControlStatus(
+                    charging: .disabled,
+                    isDischarging: false,
+                    maintainLevel: 80,
+                    maintainWorker: worker
+                )
+            )
+            await controller.reconcileExternalState()
+            XCTAssertTrue(controller.hasExternalControlDrift)
+        }
+    }
+
+    func testExternalDischargeAndStatusFailureNeverLookLikeConfirmedMaintain() async {
+        let history = BatteryHistory(inMemory: true)
+        let historyReadiness = await history.waitUntilReady()
+        XCTAssertEqual(historyReadiness, .ready)
+        let (controller, backend, _, _) = makeSUT(history: history)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: true,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+
+        await controller.reconcileExternalState()
+        XCTAssertEqual(controller.currentState, .discharging)
+        XCTAssertTrue(controller.hasExternalControlDrift)
+        controller.processBatteryInfo(makeBatteryInfo(charge: 80))
+        XCTAssertTrue(history.fetchLast24Hours().isEmpty)
+
+        backend.setControlStatus(nil)
+        backend.failNext("read-status")
+        await controller.reconcileExternalState()
+
+        XCTAssertEqual(controller.currentState, .unknown)
+        XCTAssertTrue(controller.externalDriftDescription?.contains("확인할 수 없음") == true)
+    }
+
+    func testAppActivationTriggersDriftReconciliation() async throws {
+        let backend = FakeChargeBackend()
+        let info = makeBatteryInfo(charge: 80)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { info },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+        try await controller.initialize()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 65,
+                maintainWorker: .running(pid: 6_565, target: 65)
+            )
+        )
+
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        let driftDetected = await eventually { controller.hasExternalControlDrift }
+        XCTAssertTrue(driftDetected)
+        try await controller.shutdown()
+    }
+
+    func testPeriodicReconciliationDetectsTerminalDrift() async throws {
+        let backend = FakeChargeBackend()
+        let info = makeBatteryInfo(charge: 80)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { info },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings,
+            reconciliationInterval: 1
+        )
+        try await controller.initialize()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 70,
+                maintainWorker: .running(pid: 7_070, target: 70)
+            )
+        )
+
+        let driftDetected = await eventually { controller.hasExternalControlDrift }
+        XCTAssertTrue(driftDetected)
+        try await controller.shutdown()
+    }
+
+    func testLostTopUpOwnershipSurfacesExternalDriftWithoutOverwritingIt() async {
+        let (controller, backend, monitor, _) = makeSUT(charge: 70)
+        controller.startTopUp()
+        let topUpStarted = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(topUpStarted)
+        backend.setOwnedLongRunningOperation(false)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .enabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        let maintainCount = backend.operations.filter { $0.hasPrefix("maintain:") }.count
+
+        let info = makeBatteryInfo(charge: 70)
+        monitor.batteryInfo = info
+        controller.processBatteryInfo(info)
+
+        let driftDetected = await eventually { controller.hasExternalControlDrift }
+        XCTAssertTrue(driftDetected)
+        XCTAssertEqual(
+            backend.operations.filter { $0.hasPrefix("maintain:") }.count,
+            maintainCount
+        )
+        XCTAssertTrue(controller.externalDriftDescription?.contains("실제: 충전 명령 활성") == true)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+        await controller.reconcileExternalState()
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+    }
+
+    func testLostDischargeOwnershipSurfacesExternalDriftWithoutOverwritingIt() async {
+        let (controller, backend, monitor, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+        backend.setOwnedLongRunningOperation(false)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: true,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        let maintainCount = backend.operations.filter { $0.hasPrefix("maintain:") }.count
+
+        let info = makeBatteryInfo(charge: 90)
+        monitor.batteryInfo = info
+        controller.processBatteryInfo(info)
+
+        let driftDetected = await eventually { controller.hasExternalControlDrift }
+        XCTAssertTrue(driftDetected)
+        XCTAssertEqual(
+            backend.operations.filter { $0.hasPrefix("maintain:") }.count,
+            maintainCount
+        )
+        XCTAssertTrue(controller.externalDriftDescription?.contains("실제: 방전 명령 활성") == true)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+        await controller.reconcileExternalState()
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+    }
+
+    func testDischargeStartFailureRecordsMaintainAsPreviousAndBlocksIfRecoveryFails() async {
+        let (controller, backend, _, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        backend.failNext("discharge")
+
+        controller.startDischarge()
+        let recoveredFailure = await eventually {
+            if case .failed(let previous, _, let blocked) = controller.mode {
+                return previous == .maintaining(limit: 80) && !blocked
+            }
+            return false
+        }
+        XCTAssertTrue(recoveredFailure)
+
+        let (blockedController, blockedBackend, _, blockedSettings) = makeSUT(charge: 90)
+        blockedSettings.chargeLimit = 80
+        blockedBackend.failNext("discharge")
+        blockedBackend.failNext("maintain")
+        blockedController.startDischarge()
+        let blockedFailure = await eventually {
+            if case .failed(let previous, _, let blocked) = blockedController.mode {
+                return previous == .maintaining(limit: 80) && blocked
+            }
+            return false
+        }
+        XCTAssertTrue(blockedFailure)
+    }
+
+    func testWakePreservesExternalDriftWithoutApplyingMaintain() async {
+        let expectation = ReconciledChargeExpectation.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .externalDrift(
+                expected: expectation,
+                observed: .maintaining(limit: 60)
+            )
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 6_060, target: 60)
+            )
+        )
+        let maintainCount = backend.operations.filter { $0.hasPrefix("maintain:") }.count
+
+        await controller.reconcileAfterWake()
+
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(expected: expectation, observed: .maintaining(limit: 60))
+        )
+        XCTAssertEqual(
+            backend.operations.filter { $0.hasPrefix("maintain:") }.count,
+            maintainCount
+        )
+    }
+
+    func testHeatBlockedDriftRecoversOnlyAfterChargingIsVerifiedDisabled() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(initialMode: .heatBlocked(previous: previous))
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 4_242, target: 80)
+            )
+        )
+
+        await controller.reconcileExternalState()
+        XCTAssertTrue(controller.hasExternalControlDrift)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        await controller.reconcileExternalState()
+
+        XCTAssertEqual(controller.mode, .heatBlocked(previous: previous))
+        XCTAssertFalse(controller.hasExternalControlDrift)
+    }
+
+    func testRecoverableFailureCanReturnToVerifiedPreviousMode() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, _, _, _) = makeSUT(
+            initialMode: .failed(previous: previous, message: "temporary", controlsBlocked: false)
+        )
+
+        await controller.reconcileExternalState()
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+    }
+
+    func testBlockedFailureOnlyRecoversToHeatBlockedAfterDisabledTupleIsVerified() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .failed(previous: previous, message: "temporary", controlsBlocked: true)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+
+        await controller.reconcileExternalState()
+
+        XCTAssertEqual(controller.mode, .heatBlocked(previous: previous))
+    }
+
+    func testStaleReconciliationCannotOverwriteWakeRecovery() async {
+        let backend = FakeChargeBackend()
+        let info = makeBatteryInfo(charge: 80)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { info },
+            runsMonitoringInfrastructure: false
+        )
+        monitor.batteryInfo = info
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings,
+            initialReadiness: .ready
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 6_060, target: 60)
+            )
+        )
+        backend.setControlStatusDelay(0.15)
+
+        let reconciliation = Task { await controller.reconcileExternalState() }
+        let statusReadStarted = await eventually {
+            backend.operations.contains("read-status")
+        }
+        XCTAssertTrue(statusReadStarted)
+
+        await controller.reconcileAfterWake()
+        await reconciliation.value
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(controller.hasExternalControlDrift)
+    }
+
+    func testExternalActiveOperationRejectsShutdownWithoutDisablingController() async throws {
+        let (controller, backend, _, _) = makeSUT()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: true,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        await controller.reconcileExternalState()
+
+        do {
+            try await controller.shutdown()
+            XCTFail("Expected externally owned discharge to reject shutdown")
+        } catch {
+            XCTAssertTrue(controller.isReady)
+            XCTAssertTrue(controller.hasExternalControlDrift)
+            XCTAssertFalse(backend.operations.contains("request-cancellation"))
+        }
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+        await controller.reconcileExternalState()
+        try await controller.shutdown()
+    }
+
+    func testShutdownRefreshesStaleDriftAndRejectsNewExternalDischarge() async {
+        let (controller, backend, _, _) = makeSUT()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 6_060, target: 60)
+            )
+        )
+        await controller.reconcileExternalState()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: true,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+
+        do {
+            try await controller.shutdown()
+            XCTFail("Expected fresh external discharge to reject shutdown")
+        } catch {
+            XCTAssertTrue(controller.isReady)
+            XCTAssertTrue(controller.hasExternalControlDrift)
+            XCTAssertTrue(controller.externalDriftDescription?.contains("방전 명령 활성") == true)
+            XCTAssertFalse(backend.operations.contains("request-cancellation"))
+        }
+    }
+
+    func testShutdownRejectsWhenFreshDriftStatusCannotBeReadAndRemainsRetryable() async throws {
+        let (controller, backend, _, _) = makeSUT()
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 6_060, target: 60)
+            )
+        )
+        await controller.reconcileExternalState()
+        backend.failNext("read-status")
+
+        do {
+            try await controller.shutdown()
+            XCTFail("Expected unavailable shutdown status to reject shutdown")
+        } catch {
+            XCTAssertTrue(controller.isReady)
+            XCTAssertTrue(controller.hasExternalControlDrift)
+            XCTAssertTrue(controller.externalDriftDescription?.contains("확인할 수 없음") == true)
+            XCTAssertFalse(backend.operations.contains("request-cancellation"))
+        }
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+        await controller.reconcileExternalState()
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        try await controller.shutdown()
+    }
+
     func testDisablingLEDControlRestoresCapturedStateThroughBackend() async {
         let (controller, backend, _, settings) = makeSUT(charge: 50, isCharging: true)
         settings.controlMagSafeLED = true
@@ -2112,7 +2801,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertEqual(backend.operations.last(where: { $0.hasPrefix("maintain:") }), "maintain:80")
     }
 
-    func testShutdownFailureDoesNotPretendCleanupSucceeded() async {
+    func testShutdownFailureDoesNotPretendCleanupSucceeded() async throws {
         let (controller, backend, _, _) = makeSUT(charge: 70)
         controller.startTopUp()
         let topUpStarted = await eventually { controller.isTopUpActive }
@@ -2124,8 +2813,17 @@ final class ChargeControllerSafetyTests: XCTestCase {
             XCTFail("Expected shutdown cleanup failure")
         } catch {
             XCTAssertTrue(controller.lastError?.contains("종료 안전 정리 실패") == true)
-            XCTAssertEqual(controller.readiness, .shuttingDown)
+            XCTAssertEqual(controller.readiness, .ready)
+            if case .failed(_, _, let controlsBlocked) = controller.mode {
+                XCTAssertTrue(controlsBlocked)
+            } else {
+                XCTFail("Expected retryable failed state")
+            }
         }
+
+
+        try await controller.shutdown()
+        XCTAssertEqual(controller.readiness, .shuttingDown)
     }
 
     func testShutdownDuringTopUpCancelsAndRestoresVerifiedMaintain() async throws {

@@ -11,6 +11,80 @@ enum ChargeState: String {
     case topUp = "Top Up 중"
 }
 
+enum ReconciliationTrigger: String, Equatable, Sendable {
+    case periodic
+    case appActivation
+    case manual
+}
+
+enum ObservedChargeMode: Equatable, Sendable {
+    case maintaining(limit: Int)
+    case charging
+    case discharging
+    case chargingDisabled
+    case unavailable(String)
+    case inconsistent(String)
+
+    var diagnosticLabel: String {
+        switch self {
+        case .maintaining(let limit): return "maintaining(limit:\(limit))"
+        case .charging: return "charging"
+        case .discharging: return "discharging"
+        case .chargingDisabled: return "chargingDisabled"
+        case .unavailable(let message): return "unavailable(\(message))"
+        case .inconsistent(let status): return "inconsistent(\(status))"
+        }
+    }
+
+    var userDescription: String {
+        switch self {
+        case .maintaining(let limit): return "Maintain \(limit)%"
+        case .charging: return "충전 명령 활성"
+        case .discharging: return "방전 명령 활성"
+        case .chargingDisabled: return "충전 비활성"
+        case .unavailable(let message): return "실제 충전 상태를 확인할 수 없음: \(message)"
+        case .inconsistent: return "CLI가 모순된 충전 상태를 보고함"
+        }
+    }
+}
+
+enum ReconciledChargeExpectation: Equatable, Sendable {
+    case maintaining(limit: Int)
+    case toppingUp(returnLimit: Int)
+    case discharging(target: Int, returnLimit: Int)
+    case chargingDisabled(previous: RestorableChargeMode)
+
+    var restorableMode: RestorableChargeMode {
+        switch self {
+        case .maintaining(let limit): return .maintaining(limit: limit)
+        case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
+        case .discharging(let target, let returnLimit):
+            return .discharging(target: target, returnLimit: returnLimit)
+        case .chargingDisabled(let previous): return previous
+        }
+    }
+
+    var diagnosticLabel: String {
+        switch self {
+        case .maintaining(let limit): return "maintaining(limit:\(limit))"
+        case .toppingUp(let returnLimit): return "toppingUp(returnLimit:\(returnLimit))"
+        case .discharging(let target, let returnLimit):
+            return "discharging(target:\(target),returnLimit:\(returnLimit))"
+        case .chargingDisabled(let previous):
+            return "chargingDisabled(previous:\(previous.diagnosticLabel))"
+        }
+    }
+
+    var userDescription: String {
+        switch self {
+        case .maintaining(let limit): return "Maintain \(limit)%"
+        case .toppingUp: return "Top Up"
+        case .discharging(let target, _): return "Discharge \(target)%"
+        case .chargingDisabled: return "충전 비활성"
+        }
+    }
+}
+
 enum ChargeControllerReadiness: Equatable {
     case initializing
     case reconciling
@@ -31,7 +105,7 @@ enum ChargeControllerReadiness: Equatable {
     }
 }
 
-enum RestorableChargeMode: Equatable {
+enum RestorableChargeMode: Equatable, Sendable {
     case maintaining(limit: Int)
     case toppingUp(returnLimit: Int)
     case discharging(target: Int, returnLimit: Int)
@@ -69,8 +143,8 @@ enum ChargeTransition: Equatable {
         case .applyingMaintain(_, let previous): return previous
         case .startingTopUp(let limit), .stoppingTopUp(let limit), .recoveringMaintain(let limit):
             return .maintaining(limit: limit)
-        case .startingDischarge(let target, let limit):
-            return .discharging(target: target, returnLimit: limit)
+        case .startingDischarge(_, let limit):
+            return .maintaining(limit: limit)
         case .stoppingDischarge(let limit):
             return .maintaining(limit: limit)
         case .enteringHeat(let previous), .restoringHeat(let previous):
@@ -101,6 +175,7 @@ enum ChargeMode: Equatable {
     case discharging(target: Int, returnLimit: Int)
     case heatBlocked(previous: RestorableChargeMode)
     case transitioning(ChargeTransition)
+    case externalDrift(expected: ReconciledChargeExpectation, observed: ObservedChargeMode)
     case failed(previous: RestorableChargeMode?, message: String, controlsBlocked: Bool)
 
     var restorableMode: RestorableChargeMode? {
@@ -111,6 +186,7 @@ enum ChargeMode: Equatable {
             return .discharging(target: target, returnLimit: returnLimit)
         case .heatBlocked(let previous): return previous
         case .transitioning(let transition): return transition.previousMode
+        case .externalDrift(let expected, _): return expected.restorableMode
         case .failed(let previous, _, _): return previous
         case .idle: return nil
         }
@@ -125,6 +201,8 @@ enum ChargeMode: Equatable {
             return "discharging(target:\(target),returnLimit:\(returnLimit))"
         case .heatBlocked(let previous): return "heatBlocked(previous:\(previous.diagnosticLabel))"
         case .transitioning(let transition): return "transitioning(\(transition.diagnosticLabel))"
+        case .externalDrift(let expected, let observed):
+            return "externalDrift(expected:\(expected.diagnosticLabel),observed:\(observed.diagnosticLabel))"
         case .failed(let previous, let message, let controlsBlocked):
             return "failed(previous:\(previous?.diagnosticLabel ?? "none"),blocked:\(controlsBlocked),message:\(message))"
         }

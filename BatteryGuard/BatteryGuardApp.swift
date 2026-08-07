@@ -4,6 +4,12 @@
 import SwiftUI
 import AppKit
 
+enum AppRuntime {
+    static let isRunningTests =
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
+        NSClassFromString("XCTestCase") != nil
+}
+
 enum AppMetadata {
     static var version: String {
         guard let value = Bundle.main.object(
@@ -120,8 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let activationController = AppActivationController.shared
 
     private var isRunningTests: Bool {
-        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
-        NSClassFromString("XCTestCase") != nil
+        AppRuntime.isRunningTests
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
