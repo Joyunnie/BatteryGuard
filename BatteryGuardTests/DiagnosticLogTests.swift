@@ -1,8 +1,5 @@
 import XCTest
-import ServiceManagement
-import Combine
-import Darwin
-import AppKit
+import Foundation
 @testable import BatteryGuard
 
 
@@ -147,4 +144,3 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertEqual(events.first?.message, "legacy failure")
     }
 }
-

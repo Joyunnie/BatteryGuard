@@ -1,8 +1,6 @@
 import XCTest
-import ServiceManagement
-import Combine
+import Foundation
 import Darwin
-import AppKit
 @testable import BatteryGuard
 
 
@@ -488,4 +486,3 @@ final class ProcessLifecycleTests: XCTestCase {
         XCTAssertEqual(result.termination, .exited)
     }
 }
-

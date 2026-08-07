@@ -1,8 +1,6 @@
 import XCTest
-import ServiceManagement
-import Combine
+import Foundation
 import Darwin
-import AppKit
 @testable import BatteryGuard
 
 
@@ -536,4 +534,3 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         XCTAssertEqual(writes, ["04", "05"])
     }
 }
-

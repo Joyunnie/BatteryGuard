@@ -1,8 +1,4 @@
 import XCTest
-import ServiceManagement
-import Combine
-import Darwin
-import AppKit
 @testable import BatteryGuard
 
 
@@ -86,4 +82,3 @@ final class StatusParsingTests: XCTestCase {
         )
     }
 }
-

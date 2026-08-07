@@ -1,8 +1,4 @@
 import XCTest
-import ServiceManagement
-import Combine
-import Darwin
-import AppKit
 @testable import BatteryGuard
 
 
@@ -72,4 +68,3 @@ final class BatteryValueTests: XCTestCase {
         XCTAssertNil(rawOne?.temperature)
     }
 }
-
