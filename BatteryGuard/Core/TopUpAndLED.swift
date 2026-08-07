@@ -18,7 +18,7 @@ actor MagSafeLEDController {
         let onError: ErrorHandler
     }
 
-    private let backend: ChargeBackend
+    private let backend: MagSafeLEDBackend
     private var latestGeneration: UInt64 = 0
     private var pendingRequest: Request?
     private var workerTask: Task<Void, Never>?
@@ -27,7 +27,7 @@ actor MagSafeLEDController {
     private var blinkState = MagSafeLEDState.orange
     private var hasControl = false
 
-    init(backend: ChargeBackend) {
+    init(backend: MagSafeLEDBackend) {
         self.backend = backend
     }
 

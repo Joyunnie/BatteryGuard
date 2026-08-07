@@ -167,9 +167,7 @@ private extension MaintainWorkerStatus {
     }
 }
 
-/// Hardware-facing seam. Production delegates all child processes to
-/// BatteryCommandRunner; tests provide an async fake.
-protocol ChargeBackend: AnyObject, Sendable {
+protocol ChargeControlBackend: AnyObject, Sendable {
     func open() async throws
     func readControlStatus() async throws -> BatteryControlStatus
     func applyMaintain(level: Int) async throws
@@ -184,11 +182,20 @@ protocol ChargeBackend: AnyObject, Sendable {
     func longRunningOperationResult() async -> BatteryCommandResult?
     func cancelLongRunningOperation() async throws
     func requestCancellation() async throws
+}
 
+protocol BatteryTemperatureBackend: AnyObject, Sendable {
     func readBatteryTemperature() async throws -> Float
+}
+
+protocol MagSafeLEDBackend: AnyObject, Sendable {
     func setMagSafeLED(_ state: MagSafeLEDState) async throws
     func restoreMagSafeLED() async throws
 }
+
+/// Composite application seam. Narrow consumers should depend on one of the
+/// capability protocols above instead of receiving every hardware mutation.
+protocol ChargeBackend: ChargeControlBackend, BatteryTemperatureBackend, MagSafeLEDBackend {}
 
 actor SMCKit: ChargeBackend {
     typealias MaintainWorkerProbe = @Sendable (_ pidFilePath: String, _ batteryPath: String) async throws -> MaintainWorkerStatus
@@ -219,6 +226,16 @@ actor SMCKit: ChargeBackend {
     private let longRunningOperationTimeout: TimeInterval = 12 * 60 * 60
     private var rawSMCAvailable = false
     private var savedMagSafeLEDValue: UInt8?
+    private var batteryExecutableIdentity: ExecutableIdentity?
+    private var smcExecutableIdentity: ExecutableIdentity?
+
+    private struct ExecutableIdentity: Equatable, Sendable {
+        let device: dev_t
+        let inode: ino_t
+        let size: off_t
+        let modifiedSeconds: Int
+        let modifiedNanoseconds: Int
+    }
 
     private struct MaintainWorkerProcess: Equatable, Sendable {
         let pid: Int32
@@ -273,12 +290,12 @@ actor SMCKit: ChargeBackend {
     }
 
     private func openUnlocked() async throws {
-        try validateExecutableBeforeUse(
+        batteryExecutableIdentity = try validateExecutableBeforeUse(
             path: batteryPath,
             expectedProductionPath: defaultBatteryPath,
             displayName: "battery CLI"
         )
-        try validateExecutableBeforeUse(
+        smcExecutableIdentity = try validateExecutableBeforeUse(
             path: smcBinaryPath,
             expectedProductionPath: defaultSMCBinaryPath,
             displayName: "SMC binary"
@@ -294,7 +311,7 @@ actor SMCKit: ChargeBackend {
         path: String,
         expectedProductionPath: String,
         displayName: String
-    ) throws {
+    ) throws -> ExecutableIdentity {
         guard path.hasPrefix("/") else {
             throw BatteryError.preflightFailed("\(displayName) path is not absolute: \(path)")
         }
@@ -322,6 +339,17 @@ actor SMCKit: ChargeBackend {
                 throw BatteryError.preflightFailed("test fixture is not an executable regular file: \(path)")
             }
         }
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0 else {
+            throw BatteryError.preflightFailed("could not capture \(displayName) identity")
+        }
+        return ExecutableIdentity(
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+            size: metadata.st_size,
+            modifiedSeconds: metadata.st_mtimespec.tv_sec,
+            modifiedNanoseconds: metadata.st_mtimespec.tv_nsec
+        )
     }
 
     private func validateRootOwnedPath(
@@ -357,9 +385,9 @@ actor SMCKit: ChargeBackend {
             timeout: statusCommandTimeout
         )
         guard let version = Self.parseSemanticVersion(result.stdout),
-              Self.semanticVersion(version, isAtLeast: [1, 3, 4]) else {
+              version == [1, 3, 4] else {
             throw BatteryError.preflightFailed(
-                "battery CLI v1.3.4 or newer is required; received \(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))"
+                "Only the verified battery CLI v1.3.4 contract is supported; received \(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))"
             )
         }
     }
@@ -367,15 +395,10 @@ actor SMCKit: ChargeBackend {
     private static func parseSemanticVersion(_ output: String) -> [Int]? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         let versionText = trimmed.hasPrefix("v") ? String(trimmed.dropFirst()) : trimmed
-        let components = versionText.split(separator: ".").compactMap { Int($0) }
-        return components.count >= 3 ? Array(components.prefix(3)) : nil
-    }
-
-    private static func semanticVersion(_ version: [Int], isAtLeast minimum: [Int]) -> Bool {
-        for (actual, required) in zip(version, minimum) where actual != required {
-            return actual > required
-        }
-        return version.count >= minimum.count
+        let fields = versionText.split(separator: ".", omittingEmptySubsequences: false)
+        guard fields.count == 3 else { return nil }
+        let components = fields.compactMap { Int($0) }
+        return components.count == fields.count ? components : nil
     }
 
     // MARK: - Verified charge operations
@@ -613,16 +636,12 @@ actor SMCKit: ChargeBackend {
             return try await maintainWorkerProbe(maintainPIDFilePath, batteryPath)
         }
 
-        do {
-            return Self.classifyMaintainWorkers(
-                pidFilePID: try readMaintainPIDFile(),
-                workers: try await currentMaintainWorkersUnlocked(
-                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-                )
+        return Self.classifyMaintainWorkers(
+            pidFilePID: try readMaintainPIDFile(),
+            workers: try await currentMaintainWorkersUnlocked(
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
             )
-        } catch {
-            return .unknown
-        }
+        )
     }
 
     static func classifyMaintainWorkers(
@@ -716,7 +735,10 @@ actor SMCKit: ChargeBackend {
         }
 
         for worker in workers {
-            guard try currentIdentity(for: worker.pid) == worker.identity else { continue }
+            guard try await isExactCurrentMaintainWorker(
+                worker,
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            ) else { continue }
             guard Darwin.kill(worker.pid, SIGTERM) == 0 || errno == ESRCH else {
                 throw BatteryError.commandFailed(
                     "stop maintain worker \(worker.pid)",
@@ -731,7 +753,10 @@ actor SMCKit: ChargeBackend {
             deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
         )
         for worker in remainingAfterTerm where workers.contains(worker) {
-            guard try currentIdentity(for: worker.pid) == worker.identity else { continue }
+            guard try await isExactCurrentMaintainWorker(
+                worker,
+                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+            ) else { continue }
             guard Darwin.kill(worker.pid, SIGKILL) == 0 || errno == ESRCH else {
                 throw BatteryError.commandFailed(
                     "stop maintain worker \(worker.pid)",
@@ -758,6 +783,17 @@ actor SMCKit: ChargeBackend {
         if try readMaintainPIDFile() != nil {
             try FileManager.default.removeItem(atPath: maintainPIDFilePath)
         }
+    }
+
+    private func isExactCurrentMaintainWorker(
+        _ expected: MaintainWorkerProcess,
+        deadlineUptimeNanoseconds: UInt64?
+    ) async throws -> Bool {
+        let current = try await currentMaintainWorkersUnlocked(
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+        )
+        guard current.contains(expected) else { return false }
+        return try currentIdentity(for: expected.pid) == expected.identity
     }
 
     private func currentMaintainWorkersUnlocked(
@@ -938,6 +974,11 @@ actor SMCKit: ChargeBackend {
         guard rawSMCAvailable else {
             throw BatteryError.unsupported("Raw SMC binary is unavailable; battery temperature cannot be read")
         }
+        try revalidateExecutableIdentity(
+            path: smcBinaryPath,
+            expected: smcExecutableIdentity,
+            displayName: "SMC binary"
+        )
 
         var maximum = -Float.greatestFiniteMagnitude
         var foundValue = false
@@ -1015,6 +1056,11 @@ actor SMCKit: ChargeBackend {
     }
 
     private func readSMCByte(key: String) async throws -> UInt8 {
+        try revalidateExecutableIdentity(
+            path: smcBinaryPath,
+            expected: smcExecutableIdentity,
+            displayName: "SMC binary"
+        )
         let result = try await runProcess(
             executable: smcBinaryPath,
             arguments: ["-k", key, "-r"],
@@ -1034,6 +1080,11 @@ actor SMCKit: ChargeBackend {
     }
 
     private func smcWrite(key: String, value: UInt8) async throws {
+        try revalidateExecutableIdentity(
+            path: smcBinaryPath,
+            expected: smcExecutableIdentity,
+            displayName: "SMC binary"
+        )
         let hex = String(format: "%02x", value)
         let result = try await runProcess(
             executable: usesSudoForSMCWrites ? "/usr/bin/sudo" : smcBinaryPath,
@@ -1089,7 +1140,12 @@ actor SMCKit: ChargeBackend {
         outputPolicy: BatteryCommandRunner.OutputPolicy = .capture,
         descendantPolicy: BatteryCommandRunner.DescendantPolicy = .requireProcessGroupExit
     ) async throws -> BatteryCommandResult {
-        try await runProcess(
+        try revalidateExecutableIdentity(
+            path: batteryPath,
+            expected: batteryExecutableIdentity,
+            displayName: "battery CLI"
+        )
+        return try await runProcess(
             executable: "/bin/bash",
             arguments: [batteryPath] + arguments,
             environment: batteryEnvironment,
@@ -1101,6 +1157,11 @@ actor SMCKit: ChargeBackend {
     }
 
     private func launchLongRunning(_ arguments: [String], label: String) async throws {
+        try revalidateExecutableIdentity(
+            path: batteryPath,
+            expected: batteryExecutableIdentity,
+            displayName: "battery CLI"
+        )
         _ = try await runner.launchLongRunning(
             BatteryCommandRunner.Command(
                 executable: "/bin/bash",
@@ -1112,6 +1173,32 @@ actor SMCKit: ChargeBackend {
                 descendantPolicy: .allowPersistentProcessGroup
             )
         )
+    }
+
+    private func revalidateExecutableIdentity(
+        path: String,
+        expected: ExecutableIdentity?,
+        displayName: String
+    ) throws {
+        guard executableTrustPolicy == .production else { return }
+        guard let expected else {
+            throw BatteryError.preflightFailed("\(displayName) was not validated during initialization")
+        }
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG else {
+            throw BatteryError.preflightFailed("\(displayName) identity can no longer be verified")
+        }
+        let observed = ExecutableIdentity(
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+            size: metadata.st_size,
+            modifiedSeconds: metadata.st_mtimespec.tv_sec,
+            modifiedNanoseconds: metadata.st_mtimespec.tv_nsec
+        )
+        guard observed == expected else {
+            throw BatteryError.preflightFailed("\(displayName) changed after preflight; restart and verify the installation")
+        }
     }
 
     private func verifyLongRunningStart(

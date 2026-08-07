@@ -31,7 +31,46 @@ final class ProcessLifecycleTests: XCTestCase {
         )
 
         XCTAssertEqual(result.termination, .timedOut)
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+    }
+
+    func testOverallTimeoutIncludesTermIgnoringDescendantCleanup() async throws {
+        let runner = BatteryCommandRunner()
+        let parentPIDFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-timeout-parent-\(UUID().uuidString).pid")
+        let childPIDFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-timeout-child-\(UUID().uuidString).pid")
+        defer {
+            try? FileManager.default.removeItem(at: parentPIDFile)
+            try? FileManager.default.removeItem(at: childPIDFile)
+        }
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+
+        let result = try await runner.run(
+            .init(
+                executable: "/bin/sh",
+                arguments: [
+                    "-c",
+                    "echo $$ > \(shellQuote(parentPIDFile.path)); trap '' TERM; sh -c 'trap \"\" TERM; while true; do :; done' & echo $! > \(shellQuote(childPIDFile.path)); while true; do :; done"
+                ],
+                label: "term-ignoring descendant tree",
+                timeout: 0.2
+            )
+        )
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
+        let parentPID = try XCTUnwrap(Int32(
+            String(contentsOf: parentPIDFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+        let childPID = try XCTUnwrap(Int32(
+            String(contentsOf: childPIDFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+
+        XCTAssertEqual(result.termination, .timedOut)
+        XCTAssertLessThan(elapsed, 0.5)
+        XCTAssertEqual(Darwin.kill(parentPID, 0), -1)
+        XCTAssertEqual(Darwin.kill(childPID, 0), -1)
     }
 
     func testExternalCancellationReachesRunningProcess() async throws {
@@ -233,6 +272,10 @@ final class ProcessLifecycleTests: XCTestCase {
 
     func testStderrCaptureDoesNotWaitForADetachedDescendantToCloseThePipe() async throws {
         let runner = BatteryCommandRunner()
+        var spawnedProcessGroup: Int32?
+        defer {
+            if let spawnedProcessGroup { _ = Darwin.kill(-spawnedProcessGroup, SIGKILL) }
+        }
         let parentPIDFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-stderr-parent-\(UUID().uuidString).pid")
         defer { try? FileManager.default.removeItem(at: parentPIDFile) }
@@ -255,6 +298,7 @@ final class ProcessLifecycleTests: XCTestCase {
             String(contentsOf: parentPIDFile, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         ))
+        spawnedProcessGroup = parentPID
         _ = Darwin.kill(-parentPID, SIGTERM)
 
         XCTAssertEqual(result.exitCode, 7)
