@@ -255,6 +255,87 @@ PR #2부터 #10까지의 현재 tree를 다시 검토해 failure 의미와 장�
 
 이 보완은 기존 순서를 바꾸지 않는다. PR #11은 Top Up/Discharge 장기 작업의 순수 decision 계약을 별도 타입으로 추출한다. process liveness와 fresh status를 입력으로 받아 `none`, verified completion, safe Maintain recovery 또는 external drift를 구분하고, controller에는 task 소유권, backend I/O와 published state 적용만 남긴다. 시작/중지 명령 자체와 `BatteryCommandRunner`의 process ownership은 옮기지 않는다.
 
+### 0.19 PR #11 long-running lifecycle decision 분리 (2026-08-07)
+
+- `LongRunningChargeSession`과 `LongRunningChargePolicy`를 추가해 Top Up/Discharge의 target 진행, 측정 불가 시 liveness 확인, verified cleanup 요청, unexpected exit 후 safe Maintain recovery 또는 external drift 결정을 I/O 없는 계약으로 분리했다.
+- controller는 owned-process probe, fresh status read, operation/probe generation, backend 명령과 published mode 적용을 계속 소유한다. target 도달은 성공이 아니라 `finishAndRestoreMaintain` 요청이며, cancel과 verified Maintain이 끝난 뒤에만 mode를 완료 상태로 바꾼다.
+- unexpected Discharge exit에서는 verified Maintain 복구가 성공하기 전까지 sleep assertion을 유지한다. external drift 동안에도 유지하고, read-only reconciliation이 full Maintain tuple을 확인한 뒤에만 해제한다.
+- PR #11 혹독 리뷰에서 죽은 expectation API와 완료를 과장한 action 이름을 제거하고, charging-disabled 외의 모든 관측을 자동 덮어쓰지 않는 drift로 고정했다.
+- strict-concurrency complete와 warnings-as-errors에서 전체 170개 테스트, Release build와 Debug analyze가 통과했다. 실제 CLI와 하드웨어는 실행하지 않았다.
+
+이 단계로 계획된 controller pure-decision 분리는 완료됐다. 추가 파일 분리는 구체적인 안전 결함이나 독립 테스트 경계가 확인될 때만 진행하며, 줄 수 감소만을 위한 service/extension 분할은 하지 않는다.
+
+### 0.20 PR #11 커밋 상태와 잔여 작업 감사 (2026-08-07)
+
+PR #11의 production 변경은 `e3fec3f`까지 커밋되어 로컬과 원격이 일치하고, PR #9 → #10 → #11의 stacked diff는 모두 충돌 없이 열려 있다. 체크포인트 1~15의 기능, 안전 계약, 자동 테스트와 승인된 하드웨어 검증은 완료됐다. 따라서 아래 작업은 기존 핵심 계획의 미완료 기능이 아니라 병합 절차와 확인된 후속 유지보수다.
+
+#### What already exists
+
+- PR #9는 shutdown planning과 temperature freshness, PR #10은 Heat Protection, PR #11은 Top Up/Discharge 장기 작업 결정을 순수 policy와 독립 테스트 경계로 분리한다. 이 경계를 다시 service/extension 계층으로 복제하지 않는다.
+- controller는 hardware I/O, Swift task 소유권, operation/probe generation과 published state 적용을 계속 소유한다.
+- strict-concurrency complete와 warnings-as-errors에서 170개 테스트, Release build와 Debug analyze가 통과했다.
+- PR #8에서 Top Up, Discharge, Heat, quit/crash, sleep/wake, Terminal drift와 control ownership 실제 하드웨어 검증을 완료했다.
+
+#### 남은 작업 순서
+
+```text
+PR #9 merge
+    -> PR #10 base를 main으로 변경하고 diff/검증 후 merge
+        -> PR #11 base를 main으로 변경하고 diff/검증 후 merge
+            -> main에서 strict tests + Release + analyze
+                -> PR #12 SMC sample task lifetime
+                    -> PR #13 test topology cleanup
+                        -> [사용자 승인 시] 영향 범위만 수동 hardware 재검증
+```
+
+1. **Stacked PR 병합:** PR #9를 먼저 병합한다. 그 뒤 PR #10의 base를 `main`으로 바꾸고 PR #9 변경이 중복되지 않는지 확인한 후 병합한다. 같은 방식으로 PR #11의 base를 `main`으로 바꾸고 병합한다. merge commit을 임의로 재작성하거나 force-push하지 않는다.
+2. **병합 후 자동 gate:** 갱신된 `main`에서 전체 170개 strict-concurrency tests, Release build와 Debug analyze를 다시 실행한다. 이 단계에서 실패하면 새 리팩터링을 시작하지 않고 최초 실패 PR을 추적한다.
+3. **PR #12 — SMC temperature sampling task lifetime:** `isSamplingSMCTemperature` Boolean 대신 controller가 sample task와 generation을 소유한다. shutdown, failed initialization, sleep/wake와 Heat Protection disable/re-enable에서 오래된 sample을 취소하고, 모든 await 뒤 generation·readiness·ownership을 다시 확인한 경우에만 cache나 mode를 변경한다. 지연된 sample이 shutdown/wake/new intent 뒤 상태를 바꾸지 못하는 회귀 테스트를 같은 PR에 넣는다.
+4. **PR #13 — test topology cleanup:** production 동작을 바꾸지 않고 `BatteryGuardTests.swift`와 `ChargeControllerSafetyTests.swift`를 기존 subsystem 경계별 파일로 나눈다. test target membership, test count와 assertion을 보존하며 helper 중복만 제거한다. PR #12가 controller safety tests를 추가하므로 충돌을 피하기 위해 그 뒤에 진행한다.
+5. **승인 기반 수동 검증:** PR #12가 실제 온도 sampling lifecycle을 변경하므로 자동 gate 통과 뒤 Heat enable/disable, sleep/wake와 최종 Maintain 복원을 실제 Mac에서 다시 확인할 가치가 있다. 사용자의 명시적 승인 없이는 실행하지 않는다. 검증만 통과하면 별도 code PR을 만들지 않고 기록만 남기며, 결함이 발견된 경우에만 원인별 독립 bug-fix PR을 연다.
+6. **종료 조건:** PR #13 뒤에는 구체적인 안전 결함, 재현 가능한 버그 또는 새 독립 테스트 경계가 없으면 추가 controller 분리를 중단한다.
+
+#### 독립 PR 분할과 의존성
+
+| 작업 | 범위 | 의존성 | 병합 조건 |
+|---|---|---|---|
+| 기존 PR #9 | lifecycle/temperature pure policy | `main` | 현재 diff와 151+ tests 확인 |
+| 기존 PR #10 | typed failure + Heat policy + probe hardening | PR #9 | base 변경 후 PR #10 고유 diff만 남음 |
+| 기존 PR #11 | long-running policy/recovery | PR #10 | base 변경 후 PR #11 고유 diff만 남음 |
+| 새 PR #12 | SMC sample task ownership과 회귀 테스트 | PR #11 merge 후 `main` | stale sample이 최신 lifecycle을 변경하지 않음 |
+| 새 PR #13 | test file physical split only | PR #12 | production diff 0, test count/assertion 보존 |
+| 조건부 bug-fix PR | 승인된 hardware 검증에서 발견된 한 원인 | PR #12 | 재현·수정·복원 상태 기록 |
+
+모든 작업이 `ChargeController` 또는 같은 controller safety test target을 순서대로 건드리므로 **sequential implementation, no parallelization opportunity**다. 별도 worktree에서 PR #12와 #13을 동시에 진행하면 test 이동과 신규 회귀 테스트가 충돌하므로 이득이 없다.
+
+#### Failure modes와 검증
+
+| 경로 | 현실적인 실패 | 자동 검증 | 사용자 영향/처리 |
+|---|---|---|---|
+| stacked base 변경 | 앞 PR 변경이 중복되거나 PR 고유 commit이 빠짐 | base 변경 전후 `git log`와 `git diff` 비교 | 잘못된 merge를 중단하고 base만 수정 |
+| merge 후 main | stacked 조합에서만 compile/test 실패 | strict tests, Release, analyze | 후속 PR 중단, 최초 실패 commit 추적 |
+| SMC sample cancellation | 오래된 온도 완료가 wake/shutdown/new Heat intent를 덮음 | delayed fake backend와 generation test | cache/state mutation 거부, 다음 fresh sample 사용 |
+| test physical split | test target 누락으로 실행 test 수 감소 | 실행 test 수 170 이상 및 기존 test 이름 대조 | 누락된 target membership 복원 |
+| 수동 hardware 검증 | Heat 또는 wake 뒤 Maintain 복원 실패 | 전후 `status_csv`, worker identity와 `pmset` 기록 | 앱 종료보다 verified safe recovery 우선 |
+
+silent failure이면서 테스트와 오류 처리가 모두 없는 새 경로는 발견되지 않았다. SMC sample task는 현재 generation 소유권이 없지만 후속 PR #12와 그 회귀 테스트로 명시적으로 닫는다.
+
+#### NOT in scope
+
+- 배포, CI, notarization, auto-update와 installer: 개인용 단일 Mac 앱에 필요한 안전 개선이 아니다.
+- 줄 수 감소만을 위한 추가 `ChargeController` service/extension 분리: 새로운 계약이나 결함 없이 access control과 stale-task 위험만 늘린다.
+- PR #9~#11을 하나로 squash하거나 history를 force-push로 재작성: review 가능한 독립 경계를 잃는다.
+- 승인 없는 실제 battery/SMC 명령 실행: 기본 검증은 fixture와 fake backend만 사용한다.
+- View 100% coverage와 무관한 UI 재설계: 현재 잔여 위험과 관계없다.
+
+#### Implementation Tasks
+
+- [ ] **T1 (P1)** — PR #9 → #10 → #11을 순서대로 병합하고 각 base 변경 뒤 고유 diff를 확인한다.
+- [ ] **T2 (P1)** — 갱신된 `main`에서 strict tests, Release build와 Debug analyze를 실행한다.
+- [ ] **T3 (P2)** — PR #12에서 SMC sample task를 generation 기반으로 소유·취소하고 stale completion 테스트를 추가한다.
+- [ ] **T4 (P3)** — PR #13에서 두 대형 테스트 파일을 subsystem별로 물리 분리하고 test count를 보존한다.
+- [ ] **T5 (approval-gated)** — PR #12 영향 범위의 Heat/sleep-wake/Maintain 수동 검증을 수행하고 최종 복원 상태를 기록한다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -461,7 +542,7 @@ enum ChargeMode: Equatable {
 - 모든 허용 전이와 거부 전이에 단위 테스트가 있다.
 - 상태 계층의 actor 격리가 코드에 표현되고 strict-concurrency 경고를 다음 단계로 새로 전파하지 않는다.
 
-### 3.4 시작, 종료, 크래시와 절전 정책 구현 `[PR #6 구현 완료, 실기 검증 대기]`
+### 3.4 시작, 종료, 크래시와 절전 정책 구현 `[PR #6 구현, PR #8 실기 검증 완료]`
 
 앱의 메모리 상태가 아니라 실제 CLI와 배터리 상태를 기준으로 복구한다.
 
@@ -636,7 +717,7 @@ enum ChargeMode: Equatable {
 - UI 버전과 로그인 항목 상태가 시스템의 실제 상태를 반영한다.
 - 최근 명령과 실패 원인을 로컬에서 확인할 수 있다.
 
-### 3.8 자동 테스트와 실제 하드웨어 검증 `[부분 완료, 각 PR에서 누적]`
+### 3.8 자동 테스트와 실제 하드웨어 검증 `[PR #8 실기 검증, PR #11 자동 회귀 검증 완료]`
 
 자동 테스트와 실제 하드웨어 검증을 명확히 분리한다.
 
@@ -754,11 +835,11 @@ enum ChargeMode: Equatable {
 8. `[PR #6 구현 및 자동 검증, PR #8 실기 검증 완료]` macOS native Charge Limit 제어 소유권 안내, crash-safe release intent와 명시적 `Disable BatteryGuard Control` UX
 9. `[PR #7 구현 및 자동 검증 완료]` 동작 변경 없이 durable ownership journal과 순수 reconciliation policy를 각각 독립 파일/타입으로 분리하고 policy 경계 테스트 추가
 10. `[PR #8 완료]` 실제 CLI 계약에 맞춘 Discharge 검증 수정, 전체 자동 검증과 승인된 하드웨어 checklist
-11. `[PR #8 병합 전 보완]` 초기 preflight 실패 종료, sleep assertion 수명, LED best-effort cleanup, temperature cache freshness와 PID start identity 재검증
+11. `[PR #8 완료]` 초기 preflight 실패 종료, sleep assertion 수명, LED best-effort cleanup, temperature cache freshness와 PID start identity 재검증
 12. `[PR #9 구현]` shutdown planning과 temperature freshness 계약 분리, 동일 경계에 맞춘 controller/policy 테스트 파일 분할
 13. `[PR #10 구현]` Heat Protection decision을 pure policy로 분리하고 ownership·hysteresis·cooldown·fail-closed 경계 테스트 추가
 14. `[PR #10 누적 리뷰 보완]` failure Boolean을 typed disposition으로 교체하고 stale long-running probe가 shutdown/new operation 뒤 상태를 바꾸지 못하게 generation 검증
-15. `[PR #11 예정]` Top Up/Discharge long-running exit decision을 pure policy로 분리하고 completion/recovery/drift 경계 테스트 추가
+15. `[PR #11 구현·혹독 리뷰 보완]` Top Up/Discharge long-running decision을 pure policy로 분리하고 target/liveness/recovery/drift 및 sleep assertion 수명 테스트 추가
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -793,3 +874,17 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 - 실패 경로 테스트 없이 성공 경로만 검증한다.
 - 명령 또는 저장 실패가 조용히 무시되거나 성공으로 표시된다.
 - macOS 기본 Charge Limit와 BatteryGuard의 제어 소유권이 불명확하다.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | not run | 개인용 앱 전제와 제품 범위는 기존 계획에서 이미 확정 |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | not run | 이번 작업은 기존 hostile reviews의 결과를 계획에 반영 |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | clean | 2 issues: SMC sample task lifetime, test topology debt; both scheduled independently |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | not needed | 새 UI 범위 없음 |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | not needed | 개인용 로컬 프로젝트이며 test topology만 후속 범위 |
+
+**VERDICT:** ENG CLEARED — 핵심 계획은 완료됐고, stacked merge 뒤 PR #12와 PR #13만 순차 진행한다.
+
+NO UNRESOLVED DECISIONS
