@@ -221,6 +221,12 @@ actor SMCKit: ChargeBackend {
         let pid: Int32
         let command: String
         let target: Int?
+        let identity: ProcessIdentity?
+    }
+
+    private struct ProcessIdentity: Equatable, Sendable {
+        let startSeconds: UInt64
+        let startMicroseconds: UInt64
     }
 
     private struct ParsedMaintainCommand: Equatable, Sendable {
@@ -597,7 +603,8 @@ actor SMCKit: ChargeBackend {
             return MaintainWorkerProcess(
                 pid: pid,
                 command: String(fields[2]),
-                target: parsed.target
+                target: parsed.target,
+                identity: nil
             )
         }
     }
@@ -643,10 +650,20 @@ actor SMCKit: ChargeBackend {
             return
         }
 
-        for worker in workers { _ = Darwin.kill(worker.pid, SIGTERM) }
+        for worker in workers {
+            guard try currentIdentity(for: worker.pid) == worker.identity else { continue }
+            guard Darwin.kill(worker.pid, SIGTERM) == 0 || errno == ESRCH else {
+                throw BatteryError.commandFailed(
+                    "stop maintain worker \(worker.pid)",
+                    -1,
+                    String(cString: strerror(errno))
+                )
+            }
+        }
         try await Task.sleep(nanoseconds: 250_000_000)
         let remainingAfterTerm = try await currentMaintainWorkersUnlocked()
-        for worker in remainingAfterTerm where workers.contains(where: { $0.pid == worker.pid && $0.command == worker.command }) {
+        for worker in remainingAfterTerm where workers.contains(worker) {
+            guard try currentIdentity(for: worker.pid) == worker.identity else { continue }
             guard Darwin.kill(worker.pid, SIGKILL) == 0 || errno == ESRCH else {
                 throw BatteryError.commandFailed(
                     "stop maintain worker \(worker.pid)",
@@ -658,7 +675,7 @@ actor SMCKit: ChargeBackend {
         try await Task.sleep(nanoseconds: 100_000_000)
         let currentWorkers = try await currentMaintainWorkersUnlocked()
         let survivors = currentWorkers.filter { current in
-            workers.contains { $0.pid == current.pid && $0.command == current.command }
+            workers.contains(current)
         }
         guard survivors.isEmpty else {
             throw BatteryError.commandFailed(
@@ -696,12 +713,54 @@ actor SMCKit: ChargeBackend {
                 allowedExitCodes: [0, 1]
             )
             guard inspection.exitCode == 0 else { continue }
-            workers.append(contentsOf: Self.parseMaintainWorkerProcesses(
+            let parsedWorkers = Self.parseMaintainWorkerProcesses(
                 processTable: inspection.stdout,
                 batteryPath: batteryPath
-            ))
+            )
+            for worker in parsedWorkers {
+                guard let identity = try currentIdentity(for: worker.pid) else { continue }
+                workers.append(
+                    MaintainWorkerProcess(
+                        pid: worker.pid,
+                        command: worker.command,
+                        target: worker.target,
+                        identity: identity
+                    )
+                )
+            }
         }
         return workers
+    }
+
+    private func currentIdentity(for pid: Int32) throws -> ProcessIdentity? {
+        var info = proc_bsdinfo()
+        let expectedSize = MemoryLayout<proc_bsdinfo>.stride
+        errno = 0
+        let result = proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            &info,
+            Int32(expectedSize)
+        )
+        if result == expectedSize {
+            return ProcessIdentity(
+                startSeconds: info.pbi_start_tvsec,
+                startMicroseconds: info.pbi_start_tvusec
+            )
+        }
+        if result == 0 {
+            let inspectionErrno = errno
+            if inspectionErrno == ESRCH { return nil }
+            errno = 0
+            if Darwin.kill(pid, 0) == -1, errno == ESRCH { return nil }
+            errno = inspectionErrno
+        }
+        throw BatteryError.commandFailed(
+            "inspect maintain worker identity \(pid)",
+            -1,
+            result == 0 ? String(cString: strerror(errno)) : "incomplete process identity"
+        )
     }
 
     private func readMaintainPIDFile() throws -> Int32? {

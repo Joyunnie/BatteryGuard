@@ -2005,13 +2005,16 @@ final class ChargeControllerSafetyTests: XCTestCase {
         isCharging: Bool = false,
         initialMode: ChargeMode? = nil,
         history: BatteryHistory? = nil,
-        diagnostics: DiagnosticLog = .disabled
+        diagnostics: DiagnosticLog = .disabled,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) -> (ChargeController, FakeChargeBackend, BatteryMonitor, UserSettings) {
         let backend = FakeChargeBackend()
         backend.temperature = temperature.map(Float.init)
         let monitor = BatteryMonitor(
             batteryInfoProvider: { nil },
-            runsMonitoringInfrastructure: false
+            runsMonitoringInfrastructure: false,
+            preventSleepHandler: { _ in true },
+            allowSleepHandler: {}
         )
         monitor.batteryInfo = makeBatteryInfo(
             charge: charge,
@@ -2031,7 +2034,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 initialReadiness: .ready,
                 initialMode: initialMode,
                 history: history,
-                diagnostics: diagnostics
+                diagnostics: diagnostics,
+                now: now
             ),
             backend,
             monitor,
@@ -2124,6 +2128,55 @@ final class ChargeControllerSafetyTests: XCTestCase {
 
         controller.startTopUp()
         XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("top-up") }))
+    }
+
+    func testPreflightFailureCanShutdownWithoutCallingUnavailableBackendAgain() async throws {
+        let backend = FakeChargeBackend()
+        backend.failNext("open")
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 70) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        do {
+            try await controller.initialize()
+            XCTFail("Expected initialization failure")
+        } catch {}
+
+        try await controller.shutdown()
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertEqual(backend.operations, ["open"])
+    }
+
+    func testInitializationFailureBeforeFirstHardwareMutationUsesLocalShutdown() async throws {
+        let backend = FakeChargeBackend()
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { nil },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        do {
+            try await controller.initialize()
+            XCTFail("Expected missing battery state to fail initialization")
+        } catch {}
+        let operationsBeforeShutdown = backend.operations
+
+        try await controller.shutdown()
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertEqual(backend.operations, operationsBeforeShutdown)
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
     }
 
     func testChargeLimitCommitsOnlyAfterVerifiedBackendSuccess() async {
@@ -3089,6 +3142,27 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertEqual(controller.readiness, .shuttingDown)
     }
 
+    func testFailedDischargeShutdownKeepsSleepPreventionUntilVerifiedRecovery() async throws {
+        let (controller, backend, monitor, settings) = makeSUT(charge: 90)
+        settings.chargeLimit = 80
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
+        backend.failNext("maintain")
+
+        do {
+            try await controller.shutdown()
+            XCTFail("Expected shutdown cleanup failure")
+        } catch {
+            XCTAssertTrue(monitor.isSleepPreventionActive)
+            XCTAssertEqual(controller.readiness, .ready)
+        }
+
+        try await controller.shutdown()
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+    }
+
     func testShutdownDuringTopUpCancelsAndRestoresVerifiedMaintain() async throws {
         let (controller, backend, _, _) = makeSUT(charge: 70)
         controller.startTopUp()
@@ -3187,6 +3261,79 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertEqual(settings.batteryControlOwnership, .system(lastLimit: 80))
         XCTAssertEqual(controller.readiness, .shuttingDown)
         XCTAssertFalse(settings.batteryControlReleasePending)
+    }
+
+    func testLEDRestoreFailureDoesNotBlockVerifiedBatteryShutdown() async throws {
+        let (controller, backend, _, settings) = makeSUT(charge: 50, isCharging: true)
+        settings.controlMagSafeLED = true
+        controller.processBatteryInfo(makeBatteryInfo(charge: 50, isCharging: true))
+        let ledWasCaptured = await eventually { backend.operations.contains("set-led:04") }
+        XCTAssertTrue(ledWasCaptured)
+        backend.failNext("restore-led")
+
+        try await controller.shutdown()
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertTrue(controller.lastError?.contains("MagSafe LED 자동 복원 실패") == true)
+        XCTAssertTrue(backend.operations.contains("request-cancellation"))
+    }
+
+    func testLEDRestoreFailureDoesNotBlockReleasedControlShutdown() async throws {
+        let (controller, backend, _, settings) = makeSUT(charge: 50, isCharging: true)
+        settings.controlMagSafeLED = true
+        controller.processBatteryInfo(makeBatteryInfo(charge: 50, isCharging: true))
+        let ledWasCaptured = await eventually { backend.operations.contains("set-led:04") }
+        XCTAssertTrue(ledWasCaptured)
+        try settings.completeBatteryControlRelease(lastLimit: 80)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .enabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        backend.failNext("restore-led")
+
+        try await controller.shutdown()
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertEqual(settings.batteryControlOwnership, .system(lastLimit: 80))
+        XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("maintain:") }))
+    }
+
+    func testReenablingHeatProtectionRejectsStaleCachedSMCTemperature() async throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_000_000))
+        let backend = FakeChargeBackend()
+        backend.temperature = 30
+        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { info },
+            runsMonitoringInfrastructure: false
+        )
+        monitor.batteryInfo = info
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.heatProtectionEnabled = true
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings,
+            now: { clock.now() }
+        )
+        try await controller.initialize()
+        monitor.batteryInfo = nil
+        controller.setHeatProtectionEnabled(false)
+        clock.advance(by: 16)
+
+        controller.setHeatProtectionEnabled(true)
+
+        let blocked = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(blocked)
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        try await controller.shutdown()
     }
 
     func testEnableBatteryGuardControlEstablishesMaintainBeforePersistingOwnership() async throws {

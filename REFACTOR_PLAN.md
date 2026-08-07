@@ -209,6 +209,19 @@ PR #7 이후에도 `ChargeController`는 lifecycle, Heat Protection, 사용자 i
 
 이 수정은 단계 순서를 바꾸지 않는다. checkpoint 1~8의 자동·실기 안전 gate는 PR #8로 완료됐다. 다음 코드 작업은 계획대로 subsystem 계약을 먼저 정의하는 `ChargeController` 책임 분리다.
 
+### 0.15 PR #2~8 병합 전 누적 리뷰 보완 (2026-08-07)
+
+PR #2~8 누적 리뷰에서 병합을 막는 종료·프로세스·온도 안전 경로를 PR #8에서 추가 보완한다.
+
+- CLI preflight나 ownership journal 검사처럼 backend가 사용 가능해지기 전에 초기화가 실패한 경우, 종료는 backend를 다시 호출하지 않고 로컬 task·timer·observer만 정리한다. backend open 이후 실패에는 기존 verified hardware cleanup 계약을 유지한다.
+- Top Up/Discharge 종료에서는 long-running cancellation과 verified Maintain/charging-off 복구가 성공한 뒤에만 sleep assertion을 해제한다. 정리 실패 시 assertion과 retry 가능한 controller 상태를 유지한다.
+- MagSafe LED 자동 복원은 verified battery cleanup 뒤의 best-effort peripheral cleanup으로 분리한다. LED 오류는 진단과 UI 오류로 남기지만 안전하게 복원된 배터리 상태와 앱 종료를 되돌리지 않는다.
+- cached SMC 온도는 모든 Heat Protection 진입 경로에서 동일한 15초 freshness 규칙을 사용한다. Heat Protection 재활성화도 stale cache를 정상 온도로 재사용하지 않고 unavailable로 처리해 fail closed 한다.
+- Maintain worker 종료 대상은 PID, exact command와 프로세스 시작 시각으로 묶고 각 `SIGTERM`/`SIGKILL` 직전에 시작 identity를 다시 읽는다. PID가 재사용되거나 identity 확인이 불완전하면 신호를 보내지 않는다.
+- `BatteryMonitor` sleep assertion 경계를 주입 가능하게 만들어 자동 테스트가 실제 시스템 assertion을 만들지 않으면서 보유·해제 순서를 검증한다.
+
+이 보완은 checkpoint 순서를 바꾸지 않는다. PR #8 병합 뒤 다음 PR #9는 controller subsystem의 명시적 input/output 계약을 먼저 정의하고, 그 경계대로 production code와 단일 테스트 파일을 나누는 maintainability 단계다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -708,6 +721,8 @@ enum ChargeMode: Equatable {
 8. `[PR #6 구현 및 자동 검증, PR #8 실기 검증 완료]` macOS native Charge Limit 제어 소유권 안내, crash-safe release intent와 명시적 `Disable BatteryGuard Control` UX
 9. `[PR #7 구현 및 자동 검증 완료]` 동작 변경 없이 durable ownership journal과 순수 reconciliation policy를 각각 독립 파일/타입으로 분리하고 policy 경계 테스트 추가
 10. `[PR #8 완료]` 실제 CLI 계약에 맞춘 Discharge 검증 수정, 전체 자동 검증과 승인된 하드웨어 checklist
+11. `[PR #8 병합 전 보완]` 초기 preflight 실패 종료, sleep assertion 수명, LED best-effort cleanup, temperature cache freshness와 PID start identity 재검증
+12. `[PR #9 예정]` `ChargeController` subsystem 계약 정의와 책임 분리, 동일 경계에 맞춘 테스트 파일 분할
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 

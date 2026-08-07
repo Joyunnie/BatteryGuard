@@ -40,16 +40,23 @@ final class BatteryMonitor: ObservableObject {
 
     private let batteryInfoProvider: (() -> BatteryInfo?)?
     private let runsMonitoringInfrastructure: Bool
+    private let preventSleepHandler: ((String) -> Bool)?
+    private let allowSleepHandler: (() -> Void)?
     var usesMonitoringInfrastructure: Bool { runsMonitoringInfrastructure }
+    private(set) var isSleepPreventionActive = false
     private var timer: Timer?
     private var runLoopSource: CFRunLoopSource?
 
     init(
         batteryInfoProvider: (() -> BatteryInfo?)? = nil,
-        runsMonitoringInfrastructure: Bool = true
+        runsMonitoringInfrastructure: Bool = true,
+        preventSleepHandler: ((String) -> Bool)? = nil,
+        allowSleepHandler: (() -> Void)? = nil
     ) {
         self.batteryInfoProvider = batteryInfoProvider
         self.runsMonitoringInfrastructure = runsMonitoringInfrastructure
+        self.preventSleepHandler = preventSleepHandler
+        self.allowSleepHandler = allowSleepHandler
     }
 
     // MARK: - Helper
@@ -245,6 +252,11 @@ final class BatteryMonitor: ObservableObject {
     private var sleepAssertionID: IOPMAssertionID = 0
 
     func preventSleep(reason: String) -> Bool {
+        if let preventSleepHandler {
+            let didPreventSleep = preventSleepHandler(reason)
+            isSleepPreventionActive = didPreventSleep
+            return didPreventSleep
+        }
         // 이전 assertion이 남아있으면 해제 후 재생성 — 누수 방지
         if sleepAssertionID != 0 {
             IOPMAssertionRelease(sleepAssertionID)
@@ -256,13 +268,22 @@ final class BatteryMonitor: ObservableObject {
             reason as CFString,
             &sleepAssertionID
         )
-        return result == kIOReturnSuccess
+        let didPreventSleep = result == kIOReturnSuccess
+        if !didPreventSleep { sleepAssertionID = 0 }
+        isSleepPreventionActive = didPreventSleep
+        return didPreventSleep
     }
 
     func allowSleep() {
+        if let allowSleepHandler {
+            allowSleepHandler()
+            isSleepPreventionActive = false
+            return
+        }
         if sleepAssertionID != 0 {
             IOPMAssertionRelease(sleepAssertionID)
             sleepAssertionID = 0
         }
+        isSleepPreventionActive = false
     }
 }
