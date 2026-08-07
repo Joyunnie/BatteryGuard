@@ -3,6 +3,7 @@
 
 import Foundation
 import AppKit
+import Combine
 import OSLog
 
 @MainActor
@@ -199,7 +200,7 @@ final class ChargeController: ObservableObject {
         get { issueRegistry.message(for: .externalDrift) }
         set { issueRegistry.set(.externalDrift, severity: .blocking, message: newValue, at: now()) }
     }
-    private var controlTimer: Timer?
+    private var batteryInfoObservation: AnyCancellable?
     private var smcTemperatureTimer: Timer?
     private var reconciliationTimer: Timer?
     private var activationObserver: NSObjectProtocol?
@@ -350,7 +351,7 @@ final class ChargeController: ObservableObject {
             }
 
             guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
-            startDisplayLoop()
+            startBatteryInfoObservation()
             readiness = .ready
             do {
                 try setupSleepWakeObservers()
@@ -392,8 +393,8 @@ final class ChargeController: ObservableObject {
 
     private func cleanupAfterFailedInitialization() {
         cancelSMCTemperatureSample(clearCache: true)
-        controlTimer?.invalidate()
-        controlTimer = nil
+        batteryInfoObservation?.cancel()
+        batteryInfoObservation = nil
         smcTemperatureTimer?.invalidate()
         smcTemperatureTimer = nil
         monitor.stopMonitoring()
@@ -597,8 +598,8 @@ final class ChargeController: ObservableObject {
 
     private func finishLocalShutdown() {
         cancelSMCTemperatureSample(clearCache: true)
-        controlTimer?.invalidate()
-        controlTimer = nil
+        batteryInfoObservation?.cancel()
+        batteryInfoObservation = nil
         smcTemperatureTimer?.invalidate()
         smcTemperatureTimer = nil
         monitor.stopMonitoring()
@@ -766,10 +767,19 @@ final class ChargeController: ObservableObject {
 
     // MARK: - Monitoring
 
-    private func startDisplayLoop() {
-        controlTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateDisplayState() }
-        }
+    private func startBatteryInfoObservation() {
+        batteryInfoObservation?.cancel()
+        batteryInfoObservation = monitor.$batteryInfo
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.readiness == .ready,
+                          !self.isShuttingDown else { return }
+                    self.updateDisplayState()
+                }
+            }
     }
 
     private func startSMCTemperatureLoop() {

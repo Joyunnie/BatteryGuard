@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import BatteryGuard
 
 
@@ -66,5 +67,26 @@ final class BatteryValueTests: XCTestCase {
             "Temperature": 1
         ])
         XCTAssertNil(rawOne?.temperature)
+    }
+
+    @MainActor
+    func testMonitorPublishesOnlyChangedBatteryInformation() {
+        var suppliedInfo = makeBatteryInfo(charge: 70)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { suppliedInfo },
+            runsMonitoringInfrastructure: false
+        )
+        var publishedValues: [BatteryInfo?] = []
+        let observation = monitor.$batteryInfo
+            .dropFirst()
+            .sink { publishedValues.append($0) }
+
+        monitor.refreshBatteryInfo()
+        monitor.refreshBatteryInfo()
+        suppliedInfo = makeBatteryInfo(charge: 71)
+        monitor.refreshBatteryInfo()
+
+        XCTAssertEqual(publishedValues.compactMap { $0?.currentCharge }, [70, 71])
+        withExtendedLifetime(observation) {}
     }
 }

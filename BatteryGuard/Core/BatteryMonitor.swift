@@ -10,7 +10,7 @@ import Combine
 
 // MARK: - BatteryInfo
 /// IOPMPowerSource에서 읽어오는 배터리 상태 정보
-struct BatteryInfo {
+struct BatteryInfo: Equatable, Sendable {
     let currentCharge: Int           // 현재 충전 퍼센트 (0-100)
     let isCharging: Bool             // 충전 중 여부
     let isPluggedIn: Bool            // 전원 연결 여부
@@ -31,7 +31,7 @@ struct BatteryInfo {
 /// 배터리 상태를 주기적으로 모니터링하는 클래스
 /// - IOPMPowerSource: macOS 전원 관리 프레임워크. 배터리 상태를 userspace에 노출
 /// - IOServiceGetMatchingService: IOKit 레지스트리에서 AppleSmartBattery 서비스 검색
-/// - 2초 간격 폴링 + IOPowerSource notification 조합
+/// - IOPowerSource notification을 주 경로로 사용하고 저빈도 watchdog으로 누락을 보완
 @MainActor
 final class BatteryMonitor: ObservableObject {
     static let shared = BatteryMonitor(runsMonitoringInfrastructure: !AppRuntime.isRunningTests)
@@ -204,20 +204,28 @@ final class BatteryMonitor: ObservableObject {
 
     // MARK: - 모니터링 시작/중지
 
-    func startMonitoring(interval: TimeInterval = 2.0) {
+    func startMonitoring(interval: TimeInterval = 30.0) {
         stopMonitoring()
 
-        batteryInfo = readBatteryInfo()
+        refreshBatteryInfo()
         guard runsMonitoringInfrastructure else { return }
 
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.batteryInfo = self.readBatteryInfo()
+                self?.refreshBatteryInfo()
             }
         }
+        timer?.tolerance = min(5, max(0, interval * 0.2))
 
         registerPowerSourceNotification()
+    }
+
+    /// Reads once and publishes only a material state change. This keeps IOKit
+    /// notifications and the watchdog from producing duplicate UI/control work.
+    func refreshBatteryInfo() {
+        let freshInfo = readBatteryInfo()
+        guard freshInfo != batteryInfo else { return }
+        batteryInfo = freshInfo
     }
 
     func stopMonitoring() {
@@ -236,7 +244,7 @@ final class BatteryMonitor: ObservableObject {
             guard let context = context else { return }
             let monitor = Unmanaged<BatteryMonitor>.fromOpaque(context).takeUnretainedValue()
             DispatchQueue.main.async {
-                monitor.batteryInfo = monitor.readBatteryInfo()
+                monitor.refreshBatteryInfo()
             }
         }
 
