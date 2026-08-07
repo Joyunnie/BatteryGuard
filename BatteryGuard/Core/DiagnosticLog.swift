@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import Darwin
 
 enum DiagnosticCategory: String, Codable, Sendable {
     case command
@@ -168,6 +169,7 @@ extension DiagnosticEvent {
 }
 
 actor DiagnosticLog {
+    private static let maximumFileBytes = 1_048_576
     static let disabled = DiagnosticLog(fileURL: nil, capacity: 0)
     static let shared = AppRuntime.isRunningTests
         ? disabled
@@ -236,10 +238,9 @@ actor DiagnosticLog {
     private func loadFromDiskIfNeeded() {
         guard !hasLoadedFromDisk else { return }
         hasLoadedFromDisk = true
-        guard let fileURL,
-              FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        guard let fileURL else { return }
         do {
-            let data = try Data(contentsOf: fileURL)
+            guard let data = try Self.readBoundedRegularFile(fileURL) else { return }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let decoded = try decoder.decode([DiagnosticEvent].self, from: data)
@@ -254,7 +255,8 @@ actor DiagnosticLog {
         guard let fileURL else { return }
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
         try Self.encode(events, to: fileURL)
         persistenceError = nil
@@ -264,7 +266,46 @@ actor DiagnosticLog {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(events).write(to: fileURL, options: .atomic)
+        let data = try encoder.encode(events)
+        guard data.count <= maximumFileBytes else { throw CocoaError(.fileWriteOutOfSpace) }
+        try data.write(to: fileURL, options: .atomic)
+        guard Darwin.chmod(fileURL.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private nonisolated static func readBoundedRegularFile(_ fileURL: URL) throws -> Data? {
+        let descriptor = Darwin.open(fileURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { Darwin.close(descriptor) }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard metadata.st_mode & S_IFMT == S_IFREG,
+              metadata.st_uid == geteuid(),
+              metadata.st_size >= 0,
+              metadata.st_size <= maximumFileBytes else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        var data = Data(count: Int(metadata.st_size))
+        var offset = 0
+        try data.withUnsafeMutableBytes { buffer in
+            while offset < buffer.count {
+                guard let base = buffer.baseAddress else { throw CocoaError(.fileReadCorruptFile) }
+                let count = Darwin.read(descriptor, base.advanced(by: offset), buffer.count - offset)
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                guard count > 0 else { throw CocoaError(.fileReadCorruptFile) }
+                offset += count
+            }
+        }
+        return data
     }
 
     private nonisolated static func productionFileURL() -> URL? {

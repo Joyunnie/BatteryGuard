@@ -113,6 +113,7 @@ struct BatteryControlOwnershipJournal {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        try validateAndSecureDirectory(directoryURL)
 
         let data = try JSONEncoder().encode(ownership)
         guard !data.isEmpty, data.count <= Self.maximumBytes else {
@@ -169,5 +170,21 @@ struct BatteryControlOwnershipJournal {
 
     private func posixError() -> POSIXError {
         POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
+    private func validateAndSecureDirectory(_ directoryURL: URL) throws {
+        var metadata = stat()
+        guard lstat(directoryURL.path, &metadata) == 0 else { throw posixError() }
+        guard metadata.st_mode & S_IFMT == S_IFDIR,
+              metadata.st_uid == geteuid() else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        guard Darwin.chmod(directoryURL.path, mode_t(S_IRWXU)) == 0 else { throw posixError() }
+        guard lstat(directoryURL.path, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFDIR,
+              metadata.st_uid == geteuid(),
+              metadata.st_mode & mode_t(S_IRWXG | S_IRWXO) == 0 else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
     }
 }

@@ -143,4 +143,37 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertEqual(events.first?.outcome, .failed)
         XCTAssertEqual(events.first?.message, "legacy failure")
     }
+
+    func testOversizedDiagnosticFileIsRejectedWithoutLoadingIt() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-large-diagnostics-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(repeating: 0x20, count: 1_048_577).write(to: fileURL)
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 10)
+
+        let events = await log.recentEvents()
+        let persistenceError = await log.persistenceError
+
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertNotNil(persistenceError)
+    }
+
+    func testDiagnosticSymlinkIsRejected() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-symlink-diagnostics-\(UUID().uuidString)", isDirectory: true)
+        let target = directory.appendingPathComponent("target.json")
+        let link = directory.appendingPathComponent("Diagnostics.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("[]".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: link, capacity: 10)
+
+        let events = await log.recentEvents()
+        let persistenceError = await log.persistenceError
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertNotNil(persistenceError)
+    }
 }

@@ -882,6 +882,7 @@ enum ChargeMode: Equatable {
 14. `[PR #10 누적 리뷰 보완]` failure Boolean을 typed disposition으로 교체하고 stale long-running probe가 shutdown/new operation 뒤 상태를 바꾸지 못하게 generation 검증
 15. `[PR #11 구현·혹독 리뷰 보완]` Top Up/Discharge long-running decision을 pure policy로 분리하고 target/liveness/recovery/drift 및 sleep assertion 수명 테스트 추가
 16. `[완료: PR #14]` IOKit sleep acknowledgement 전 verified charging-off와 wake 시 Maintain 복원 추가. 전역 Boolean인 `SleepDisabled`는 외부 소유권을 증명할 수 없어 charge-to-limit sleep inhibition/lease/watchdog 설계는 hostile review 후 제거
+17. `[구현 완료, 실기 검증 대기]` 누적 hostile review 보완: Discharge assertion 선획득, drift/manual failure를 보존하는 Heat 전이, 신규·분실 journal의 monitoring-only 기본값과 일회성 legacy migration, injectable IOKit transport 계약 테스트, process-group cleanup을 포함한 absolute deadline, typed issue/safety-temperature UI, backend capability 분리, exact CLI v1.3.4 및 실행 파일 identity 재검증, bounded diagnostics, ownership directory hardening, history queue/extrema 보존, Release Hardened Runtime
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -896,6 +897,7 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 - 실제 CLI, 로그인 항목과 운영 store가 격리되기 전에는 기존 전체 테스트를 실행하지 않는다.
 - 실제 하드웨어 테스트는 사용자의 명시적 승인 후 수동으로 실행한다.
 - 각 수동 검증 전후에 실제 status를 기록하고 테스트 종료 시 의도한 maintain 상태로 복원한다.
+- 17번의 자동 검증이 완료된 뒤 실제 Mac에서 lid close, vetoed idle sleep, forced sleep, wake, sleep negotiation 중 Quit, Discharge assertion 실패/복구를 순서대로 확인한다. 물리 lid-close 검증 전에는 Sleep Protection 기본값을 `disabled`로 유지한다.
 
 ## 9. 변경 거절 기준
 

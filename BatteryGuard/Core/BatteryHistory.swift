@@ -74,7 +74,7 @@ final class BatteryHistory {
     private let heartbeatInterval: TimeInterval
     private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "History")
     private var readinessWaiters: [CheckedContinuation<BatteryHistoryReadiness, Never>] = []
-    private var pendingRecord: (chargePercent: Int, chargeLimit: Int)?
+    private var pendingRecords: [(chargePercent: Int, chargeLimit: Int)] = []
     private var lastChargePercent: Int?
     private var lastChargeLimit: Int?
     private var lastRecordDate: Date?
@@ -160,8 +160,9 @@ final class BatteryHistory {
                 }
                 self.readiness = .ready
                 self.resolveReadinessWaiters()
-                if let pending = self.pendingRecord {
-                    self.pendingRecord = nil
+                let pendingRecords = self.pendingRecords
+                self.pendingRecords.removeAll()
+                for pending in pendingRecords {
                     self.record(chargePercent: pending.chargePercent, chargeLimit: pending.chargeLimit)
                 }
             }
@@ -189,7 +190,10 @@ final class BatteryHistory {
         }
         guard readiness == .ready else {
             if readiness == .loading {
-                pendingRecord = (chargePercent, chargeLimit)
+                pendingRecords.append((chargePercent, chargeLimit))
+                if pendingRecords.count > 256 {
+                    pendingRecords.removeFirst(pendingRecords.count - 256)
+                }
             }
             return
         }
@@ -256,11 +260,47 @@ final class BatteryHistory {
         guard records.count > maxPoints else { return records }
         guard maxPoints > 1 else { return [records[records.count - 1]] }
 
-        let lastIndex = records.count - 1
-        return (0..<maxPoints).map { position in
-            let index = position * lastIndex / (maxPoints - 1)
-            return records[index]
+        guard maxPoints > 2 else { return [records.first!, records.last!] }
+
+        // Largest-Triangle-Three-Buckets retains spikes and drops that uniform
+        // index sampling silently discarded.
+        let threshold = maxPoints
+        let every = Double(records.count - 2) / Double(threshold - 2)
+        var sampled = [records[0]]
+        var selectedIndex = 0
+
+        for bucket in 0..<(threshold - 2) {
+            let averageStart = min(Int(floor(Double(bucket + 1) * every)) + 1, records.count - 1)
+            let averageEnd = min(Int(floor(Double(bucket + 2) * every)) + 1, records.count)
+            let averageRange = records[averageStart..<max(averageStart + 1, averageEnd)]
+            let averageX = averageRange.map { $0.timestamp.timeIntervalSinceReferenceDate }.reduce(0, +)
+                / Double(averageRange.count)
+            let averageY = averageRange.map { Double($0.chargePercent) }.reduce(0, +)
+                / Double(averageRange.count)
+
+            let rangeStart = min(Int(floor(Double(bucket) * every)) + 1, records.count - 2)
+            let rangeEnd = min(Int(floor(Double(bucket + 1) * every)) + 1, records.count - 1)
+            let pointA = records[selectedIndex]
+            let ax = pointA.timestamp.timeIntervalSinceReferenceDate
+            let ay = Double(pointA.chargePercent)
+            var bestArea = -1.0
+            var bestIndex = rangeStart
+            for index in rangeStart..<max(rangeStart + 1, rangeEnd) {
+                let point = records[index]
+                let area = abs(
+                    (ax - averageX) * (Double(point.chargePercent) - ay)
+                    - (ax - point.timestamp.timeIntervalSinceReferenceDate) * (averageY - ay)
+                )
+                if area > bestArea {
+                    bestArea = area
+                    bestIndex = index
+                }
+            }
+            sampled.append(records[bestIndex])
+            selectedIndex = bestIndex
         }
+        sampled.append(records[records.count - 1])
+        return sampled
     }
 
     private func removeRecords(olderThan cutoff: Date, from context: NSManagedObjectContext) throws {
