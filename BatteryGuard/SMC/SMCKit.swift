@@ -125,6 +125,12 @@ struct BatteryControlStatus: Equatable, Sendable {
             maintainWorker.isStopped
     }
 
+    var isVerifiedDischarging: Bool {
+        charging == .enabled &&
+            isDischarging == true &&
+            maintainWorker.isStopped
+    }
+
     var isVerifiedControlReleased: Bool {
         charging == .enabled &&
             isDischarging == false &&
@@ -469,9 +475,7 @@ actor SMCKit: ChargeBackend {
                 let label = "battery discharge \(level)"
                 try await launchLongRunning(["discharge", "\(level)"], label: label)
                 let after = try await verifyLongRunningStart(command: label) {
-                    $0.isDischarging == true &&
-                        $0.charging == .disabled &&
-                        $0.maintainWorker.isStopped
+                    $0.isVerifiedDischarging
                 }
                 await recordVerifiedOperation("start discharge \(level)", before: before, after: after)
             }

@@ -72,6 +72,7 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var recordedOperations: [String] = []
     private var failures: [String: Error] = [:]
     private var longRunning = false
+    private var discharging = false
     private var temperatureValue: Float? = 30
     private var maintainLevel = 80
     private var maintainWorkerRunning = true
@@ -196,7 +197,7 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
             if let controlStatusOverride { return controlStatusOverride }
             return BatteryControlStatus(
                 charging: chargingStatus,
-                isDischarging: longRunning,
+                isDischarging: discharging,
                 maintainLevel: maintainLevel,
                 maintainWorker: maintainWorkerRunning
                     ? .running(pid: 4_242, target: maintainLevel)
@@ -211,6 +212,7 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
             maintainLevel = level
             chargingStatus = .disabled
             maintainWorkerRunning = true
+            discharging = false
             return (maintainDelayValue, longRunning)
         }
         if state.0 > 0 {
@@ -230,6 +232,7 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         }
         lock.withLock {
             longRunning = false
+            discharging = false
             maintainWorkerRunning = false
             chargingStatus = .enabled
         }
@@ -239,6 +242,7 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         try record("disable-charging")
         let longOperationIsActive = lock.withLock {
             chargingStatus = .disabled
+            discharging = false
             maintainWorkerRunning = false
             return longRunning
         }
@@ -251,7 +255,8 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         try record("discharge", detail: "\(level)")
         lock.withLock {
             maintainWorkerRunning = false
-            chargingStatus = .disabled
+            chargingStatus = .enabled
+            discharging = true
             longRunning = true
         }
     }
@@ -265,6 +270,7 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         lock.withLock {
             maintainWorkerRunning = false
             chargingStatus = .enabled
+            discharging = false
             longRunning = true
         }
     }
@@ -313,6 +319,7 @@ private final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private func setLongRunning(_ value: Bool) {
         lock.lock()
         longRunning = value
+        if !value { discharging = false }
         lock.unlock()
     }
 
@@ -1174,6 +1181,50 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         let isStillActive = await backend.isLongRunningOperationActive()
         XCTAssertTrue(processExited)
         XCTAssertFalse(isStillActive)
+    }
+
+    func testDischargeVerificationAcceptsCLIForceDischargeTuple() async throws {
+        let pidFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-discharge-\(UUID().uuidString).pid")
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            case "$1" in
+              discharge)
+                echo $$ > \(shellQuote(pidFile.path))
+                while true; do sleep 1; done
+                ;;
+              status_csv)
+                if [[ -s \(shellQuote(pidFile.path)) ]]; then
+                  echo "81,attached;,enabled,discharging,80"
+                else
+                  echo "81,attached;,disabled,not discharging,80"
+                fi
+                ;;
+            esac
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: fixture)
+            try? FileManager.default.removeItem(at: pidFile)
+        }
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.startDischarge(to: 80)
+        let isActive = await backend.isLongRunningOperationActive()
+        XCTAssertTrue(isActive)
+
+        try await backend.cancelLongRunningOperation()
+        let pid = try XCTUnwrap(Int32(
+            String(contentsOf: pidFile, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+        let processExited = await eventually { Darwin.kill(pid, 0) == -1 && errno == ESRCH }
+        XCTAssertTrue(processExited)
     }
 
     func testControlCommandAndVerificationRemainAtomic() async throws {
@@ -2522,7 +2573,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         let (controller, backend, _, _) = makeSUT(history: history)
         backend.setControlStatus(
             BatteryControlStatus(
-                charging: .disabled,
+                charging: .enabled,
                 isDischarging: true,
                 maintainLevel: 80,
                 maintainWorker: .stopped
@@ -2652,7 +2703,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         backend.setOwnedLongRunningOperation(false)
         backend.setControlStatus(
             BatteryControlStatus(
-                charging: .disabled,
+                charging: .enabled,
                 isDischarging: true,
                 maintainLevel: nil,
                 maintainWorker: .stopped
@@ -2846,7 +2897,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         let (controller, backend, _, _) = makeSUT()
         backend.setControlStatus(
             BatteryControlStatus(
-                charging: .disabled,
+                charging: .enabled,
                 isDischarging: true,
                 maintainLevel: nil,
                 maintainWorker: .stopped
@@ -2888,7 +2939,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         await controller.reconcileExternalState()
         backend.setControlStatus(
             BatteryControlStatus(
-                charging: .disabled,
+                charging: .enabled,
                 isDischarging: true,
                 maintainLevel: nil,
                 maintainWorker: .stopped

@@ -42,7 +42,9 @@ IOKit readings ---+                    result + verified CLI status
 - Treat cleanup failure as a terminal runner failure and reject later commands instead of continuing in an unknown state.
 - Verify control-changing commands with a subsequent status read before updating UI state.
 - Verify the complete expected control tuple: charging, discharging, maintain level, and exact worker state; a matching subset is not success.
+- For battery CLI v1.3.4 force discharge, the verified tuple is charging enabled, discharging true, and the Maintain worker stopped. Do not require charging disabled: `CHTE=00` permits the forced `CHIE=08` discharge path.
 - Treat maintain as valid only when exactly one worker with the expected target exists and the PID file points to it; stale, mismatched, or duplicate workers are failures.
+- Never trust the CLI's “killing old maintain process” log by itself. Re-read the PID file and exact command line; the script can leave an orphaned stale worker after external commands.
 - Read PID files without following links or blocking on special files; accept only bounded, current-user-owned regular files.
 - Stop exact maintain worker PIDs before Top Up, Discharge, or charging-off transitions. Never signal an unrelated process group.
 - Coalesce rapid slider changes and block conflicting or duplicate operations.

@@ -131,7 +131,7 @@ final class ChargeReconciliationPolicyTests: XCTestCase {
     func testDischargeRequiresOwnedOperationAndCompleteTuple() {
         let expectation = ReconciledChargeExpectation.discharging(target: 65, returnLimit: 80)
         let valid = BatteryControlStatus(
-            charging: .disabled,
+            charging: .enabled,
             isDischarging: true,
             maintainLevel: 80,
             maintainWorker: .stopped
@@ -143,7 +143,7 @@ final class ChargeReconciliationPolicyTests: XCTestCase {
         XCTAssertFalse(
             matches(
                 BatteryControlStatus(
-                    charging: .enabled,
+                    charging: .disabled,
                     isDischarging: true,
                     maintainLevel: 80,
                     maintainWorker: .stopped
@@ -167,7 +167,7 @@ final class ChargeReconciliationPolicyTests: XCTestCase {
         XCTAssertFalse(
             matches(
                 BatteryControlStatus(
-                    charging: .disabled,
+                    charging: .enabled,
                     isDischarging: true,
                     maintainLevel: 80,
                     maintainWorker: .duplicate(pids: [80, 81])
@@ -265,7 +265,7 @@ final class ChargeReconciliationPolicyTests: XCTestCase {
         XCTAssertEqual(
             ChargeReconciliationPolicy.observedMode(
                 from: BatteryControlStatus(
-                    charging: .disabled,
+                    charging: .enabled,
                     isDischarging: true,
                     maintainLevel: 80,
                     maintainWorker: .stopped

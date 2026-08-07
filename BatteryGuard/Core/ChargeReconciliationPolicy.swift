@@ -25,9 +25,7 @@ enum ChargeReconciliationPolicy {
                 status.maintainWorker.isStopped
         case .discharging:
             return snapshot.ownedLongRunningOperation == .active &&
-                status.charging == .disabled &&
-                status.isDischarging == true &&
-                status.maintainWorker.isStopped
+                status.isVerifiedDischarging
         case .chargingDisabled:
             return status.isVerifiedChargingDisabled
         case .controlReleasing:
@@ -39,9 +37,7 @@ enum ChargeReconciliationPolicy {
     }
 
     static func observedMode(from status: BatteryControlStatus) -> ObservedChargeMode {
-        if status.isDischarging == true,
-           status.charging == .disabled,
-           status.maintainWorker.isStopped {
+        if status.isVerifiedDischarging {
             return .discharging
         }
         if status.charging == .enabled,
