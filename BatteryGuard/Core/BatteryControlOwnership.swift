@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-enum BatteryControlOwnership: Equatable, Codable {
+enum BatteryControlOwnership: Equatable, Codable, Sendable {
     case batteryGuard(lastLimit: Int)
     case releasing(lastLimit: Int)
     case system(lastLimit: Int)

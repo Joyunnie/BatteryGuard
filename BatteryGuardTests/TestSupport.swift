@@ -1,0 +1,359 @@
+import XCTest
+import ServiceManagement
+import Combine
+import Darwin
+import AppKit
+@testable import BatteryGuard
+
+private let testDefaultsSuite = "com.jiwon.batteryguard.tests.isolated"
+
+func makeTestDefaults() -> UserDefaults {
+    let defaults = UserDefaults(suiteName: testDefaultsSuite)!
+    defaults.removePersistentDomain(forName: testDefaultsSuite)
+    return defaults
+}
+
+func makeOwnershipJournalURL() -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("batteryguard-ownership-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("ownership.json", isDirectory: false)
+}
+
+final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
+
+    func now() -> Date {
+        lock.withLock { value }
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.withLock { value = value.addingTimeInterval(interval) }
+    }
+}
+
+func shellQuote(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+}
+
+func makeExecutableFixture(_ contents: String) throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("batteryguard-fixture-\(UUID().uuidString)")
+    try Data(contents.utf8).write(to: url, options: .atomic)
+    guard Darwin.chmod(url.path, mode_t(S_IRUSR | S_IWUSR | S_IXUSR)) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    return url
+}
+
+final class FakeLaunchAtLoginService: LaunchAtLoginManaging {
+    var status: SMAppService.Status = .notRegistered
+    var statusAfterRegister: SMAppService.Status = .enabled
+    var registerError: Error?
+    var unregisterError: Error?
+
+    func register() throws {
+        if let registerError { throw registerError }
+        status = statusAfterRegister
+    }
+
+    func unregister() throws {
+        if let unregisterError { throw unregisterError }
+        status = .notRegistered
+    }
+}
+
+final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedOperations: [String] = []
+    private var failures: [String: Error] = [:]
+    private var longRunning = false
+    private var discharging = false
+    private var temperatureValue: Float? = 30
+    private var maintainLevel = 80
+    private var maintainWorkerRunning = true
+    private var chargingStatus: BatteryChargingStatus = .disabled
+    private var maintainDelayValue: TimeInterval = 0
+    private var topUpDelayValue: TimeInterval = 0
+    private var openDelayValue: TimeInterval = 0
+    private var releaseDelayValue: TimeInterval = 0
+    private var restoreLEDDelayValue: TimeInterval = 0
+    private var temperatureSequence: [Float?] = []
+    private var ledDelayByRawValue: [UInt8: TimeInterval] = [:]
+    private var controlStatusOverride: BatteryControlStatus?
+    private var controlStatusDelayValue: TimeInterval = 0
+
+    var operations: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedOperations
+    }
+
+    private var longRunningActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return longRunning
+    }
+
+    var temperature: Float? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return temperatureValue
+        }
+        set {
+            lock.lock()
+            temperatureValue = newValue
+            lock.unlock()
+        }
+    }
+
+    var maintainDelay: TimeInterval {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return maintainDelayValue
+        }
+        set {
+            lock.lock()
+            maintainDelayValue = newValue
+            lock.unlock()
+        }
+    }
+
+    var openDelay: TimeInterval {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return openDelayValue
+        }
+        set {
+            lock.lock()
+            openDelayValue = newValue
+            lock.unlock()
+        }
+    }
+
+    var topUpDelay: TimeInterval {
+        get { lock.withLock { topUpDelayValue } }
+        set { lock.withLock { topUpDelayValue = newValue } }
+    }
+
+    var releaseDelay: TimeInterval {
+        get { lock.withLock { releaseDelayValue } }
+        set { lock.withLock { releaseDelayValue = newValue } }
+    }
+
+    var restoreLEDDelay: TimeInterval {
+        get { lock.withLock { restoreLEDDelayValue } }
+        set { lock.withLock { restoreLEDDelayValue = newValue } }
+    }
+
+    func failNext(_ operation: String, error: Error = BatteryError.commandFailed("fake", 1, "injected failure")) {
+        lock.lock()
+        failures[operation] = error
+        lock.unlock()
+    }
+
+    func enqueueTemperatures(_ values: [Float?]) {
+        lock.withLock { temperatureSequence.append(contentsOf: values) }
+    }
+
+    func setLEDDelay(_ delay: TimeInterval, for state: MagSafeLEDState) {
+        lock.withLock { ledDelayByRawValue[state.rawValue] = delay }
+    }
+
+    func setControlStatus(_ status: BatteryControlStatus?) {
+        lock.withLock { controlStatusOverride = status }
+    }
+
+    func setControlStatusDelay(_ delay: TimeInterval) {
+        lock.withLock { controlStatusDelayValue = delay }
+    }
+
+    func setOwnedLongRunningOperation(_ isActive: Bool) {
+        setLongRunning(isActive)
+    }
+
+    func open() async throws {
+        try record("open")
+        let delay = lock.withLock { openDelayValue }
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+    }
+
+    func readControlStatus() async throws -> BatteryControlStatus {
+        try record("read-status")
+        let delay = lock.withLock { controlStatusDelayValue }
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+        return lock.withLock {
+            if let controlStatusOverride { return controlStatusOverride }
+            return BatteryControlStatus(
+                charging: chargingStatus,
+                isDischarging: discharging,
+                maintainLevel: maintainLevel,
+                maintainWorker: maintainWorkerRunning
+                    ? .running(pid: 4_242, target: maintainLevel)
+                    : .stopped
+            )
+        }
+    }
+
+    func applyMaintain(level: Int) async throws {
+        try record("maintain", detail: "\(level)")
+        let state = lock.withLock {
+            maintainLevel = level
+            chargingStatus = .disabled
+            maintainWorkerRunning = true
+            discharging = false
+            return (maintainDelayValue, longRunning)
+        }
+        if state.0 > 0 {
+            try await Task.sleep(nanoseconds: UInt64(state.0 * 1_000_000_000))
+        }
+        if state.1 {
+            lock.withLock { maintainWorkerRunning = false }
+            throw BatteryError.commandFailed("maintain", -1, "long-running operation is still active")
+        }
+    }
+
+    func releaseBatteryGuardControl() async throws {
+        try record("release-control")
+        let delay = lock.withLock { releaseDelayValue }
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+        lock.withLock {
+            longRunning = false
+            discharging = false
+            maintainWorkerRunning = false
+            chargingStatus = .enabled
+        }
+    }
+
+    func disableCharging() async throws {
+        try record("disable-charging")
+        let longOperationIsActive = lock.withLock {
+            chargingStatus = .disabled
+            discharging = false
+            maintainWorkerRunning = false
+            return longRunning
+        }
+        if longOperationIsActive {
+            throw BatteryError.commandFailed("disable charging", -1, "long-running operation is still active")
+        }
+    }
+
+    func startDischarge(to level: Int) async throws {
+        try record("discharge", detail: "\(level)")
+        lock.withLock {
+            maintainWorkerRunning = false
+            chargingStatus = .enabled
+            discharging = true
+            longRunning = true
+        }
+    }
+
+    func startTopUp(to level: Int) async throws {
+        try record("top-up", detail: "\(level)")
+        let delay = lock.withLock { topUpDelayValue }
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+        lock.withLock {
+            maintainWorkerRunning = false
+            chargingStatus = .enabled
+            discharging = false
+            longRunning = true
+        }
+    }
+
+    func isLongRunningOperationActive() async -> Bool { longRunningActive }
+
+    func longRunningOperationResult() async -> BatteryCommandResult? { nil }
+
+    func cancelLongRunningOperation() async throws {
+        try record("cancel-long")
+        setLongRunning(false)
+    }
+
+    func requestCancellation() async throws {
+        try record("request-cancellation")
+        setLongRunning(false)
+    }
+
+    func readBatteryTemperature() async throws -> Float {
+        try record("read-temperature")
+        let nextTemperature = lock.withLock {
+            temperatureSequence.isEmpty ? temperatureValue : temperatureSequence.removeFirst()
+        }
+        guard let nextTemperature else {
+            throw BatteryError.commandFailed("temperature", 1, "sensor unavailable")
+        }
+        return nextTemperature
+    }
+
+    func setMagSafeLED(_ state: MagSafeLEDState) async throws {
+        let delay = lock.withLock { ledDelayByRawValue[state.rawValue] ?? 0 }
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+        try record("set-led", detail: String(format: "%02x", state.rawValue))
+    }
+
+    func restoreMagSafeLED() async throws {
+        let delay = lock.withLock { restoreLEDDelayValue }
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+        try record("restore-led")
+    }
+
+    private func setLongRunning(_ value: Bool) {
+        lock.lock()
+        longRunning = value
+        if !value { discharging = false }
+        lock.unlock()
+    }
+
+    private func record(_ operation: String, detail: String? = nil) throws {
+        lock.lock()
+        recordedOperations.append(detail.map { "\(operation):\($0)" } ?? operation)
+        let error = failures.removeValue(forKey: operation)
+        lock.unlock()
+        if let error { throw error }
+    }
+}
+
+func makeBatteryInfo(
+    charge: Int = 80,
+    isCharging: Bool = false,
+    isPluggedIn: Bool = true,
+    temperature: Double? = 30,
+    amperage: Int? = -500,
+    health: Double? = 90
+) -> BatteryInfo {
+    BatteryInfo(
+        currentCharge: charge,
+        isCharging: isCharging,
+        isPluggedIn: isPluggedIn,
+        maxCapacity: 5_000,
+        designCapacity: 5_500,
+        cycleCount: 100,
+        temperature: temperature,
+        amperage: amperage,
+        voltage: 12_000,
+        timeToFull: -1,
+        timeToEmpty: 120,
+        healthPercent: health,
+        isPresent: true,
+        serialNumber: "TEST"
+    )
+}

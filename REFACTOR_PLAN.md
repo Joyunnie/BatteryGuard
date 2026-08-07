@@ -222,6 +222,19 @@ PR #2~8 누적 리뷰에서 병합을 막는 종료·프로세스·온도 안전
 
 이 보완은 checkpoint 순서를 바꾸지 않는다. PR #8 병합 뒤 다음 PR #9는 controller subsystem의 명시적 input/output 계약을 먼저 정의하고, 그 경계대로 production code와 단일 테스트 파일을 나누는 maintainability 단계다.
 
+### 0.16 PR #9 controller subsystem 계약 분리 (2026-08-07)
+
+PR #2~8 병합 뒤 동작을 바꾸지 않는 maintainability 단계로 lifecycle과 temperature freshness 경계를 `ChargeController` 밖에 정의한다.
+
+- durable `BatteryControlOwnership`, current mode와 effective limit을 묶은 `ChargeShutdownContext`를 shutdown planning의 명시적 입력으로, `ChargeShutdownPolicy` 또는 typed `ChargeShutdownPlanningError`를 출력으로 둔다. requested policy와 fresh full tuple 기반 최종 policy를 고르는 로직을 I/O 없는 `ChargeShutdownPlanner`로 이동한다.
+- SMC sample 값과 측정 시각을 `SafetyTemperatureCache` 한 값 타입으로 묶는다. future sample, expired sample, nonfinite max age를 모두 unavailable로 처리하며 `ChargeController`는 유효한 측정의 record/clear와 freshness 조회만 orchestration한다.
+- 3,600줄 단일 테스트 파일에서 `ChargeControllerSafetyTests`와 shared `TestSupport`를 독립 파일로 분리한다. pure lifecycle과 temperature 계약은 각각 `ChargeLifecyclePolicyTests`, `SafetyTemperatureCacheTests`에서 직접 검증한다.
+- actor ownership, hardware command 순서, UI-visible state와 기존 테스트 의미는 변경하지 않는다. 다음 책임 분리는 새 순수 계약이 안정된 뒤 Heat Protection decision과 long-running lifecycle을 각각 독립 PR에서 다룬다.
+
+PR #9 혹독 리뷰에서 Boolean ownership 입력이 durable enum과 경쟁하고, verified planning이 `restoreMaintain`에 기록된 limit을 fallback limit으로 덮을 수 있는 계약 오류를 발견했다. context 입력을 `BatteryControlOwnership` 하나로 정규화하고 recorded limit을 끝까지 보존했다. planning error는 문자열 대신 typed `BatteryControlStatus`를 보유한다. `SafetyTemperatureCache`도 nonfinite·물리적으로 불가능한 온도와 잘못된 timestamp를 자체적으로 거부하도록 강화했다. 모든 transition family, ownership 우선순위, full-tuple fallback, invalid/stale/future temperature 경계를 별도 pure-policy 테스트로 검증한다.
+
+최종 자동 검증은 strict-concurrency complete와 warnings-as-errors에서 151개 테스트, Release build와 Debug analyze가 모두 통과했다. 이 PR은 실제 CLI나 하드웨어를 실행하지 않는다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -722,7 +735,7 @@ enum ChargeMode: Equatable {
 9. `[PR #7 구현 및 자동 검증 완료]` 동작 변경 없이 durable ownership journal과 순수 reconciliation policy를 각각 독립 파일/타입으로 분리하고 policy 경계 테스트 추가
 10. `[PR #8 완료]` 실제 CLI 계약에 맞춘 Discharge 검증 수정, 전체 자동 검증과 승인된 하드웨어 checklist
 11. `[PR #8 병합 전 보완]` 초기 preflight 실패 종료, sleep assertion 수명, LED best-effort cleanup, temperature cache freshness와 PID start identity 재검증
-12. `[PR #9 예정]` `ChargeController` subsystem 계약 정의와 책임 분리, 동일 경계에 맞춘 테스트 파일 분할
+12. `[PR #9 구현]` shutdown planning과 temperature freshness 계약 분리, 동일 경계에 맞춘 controller/policy 테스트 파일 분할
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
