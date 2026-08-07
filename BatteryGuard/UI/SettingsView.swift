@@ -154,7 +154,7 @@ struct SettingsView: View {
                         .foregroundColor(sleepProtectionColor)
                 }
 
-                Text("기본 모드는 잠자기 직전에 Top Up/Discharge를 중단하고 충전 비활성을 검증합니다. ‘한도까지 충전 후 잠자기’는 최대 3시간 동안 목표치까지 시스템 잠자기를 보류하며, BatteryGuard가 직접 설정한 경우에만 다시 해제합니다.")
+                Text("잠자기 직전에 Top Up/Discharge를 중단하고 충전 비활성을 검증합니다. 실제 Mac에서 동작을 확인한 뒤 활성화하세요. 시스템이 이미 잠자기를 시작한 뒤에는 실패를 되돌릴 수 없습니다.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
@@ -299,7 +299,6 @@ struct SettingsView: View {
 
     private var sleepProtectionColor: Color {
         if case .unavailable = controller.sleepProtectionState { return .red }
-        if case .holdingAwake(_, .external) = controller.sleepProtectionState { return .orange }
         return .secondary
     }
 }

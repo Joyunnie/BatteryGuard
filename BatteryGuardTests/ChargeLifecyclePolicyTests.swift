@@ -82,6 +82,21 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
         )
     }
 
+    func testShutdownRestoresMaintainWhenSleepPreparationIsActiveOrComplete() throws {
+        let previous = RestorableChargeMode.toppingUp(returnLimit: 75)
+
+        XCTAssertEqual(
+            try requestedPolicy(
+                for: .transitioning(.preparingForSleep(previous: previous))
+            ),
+            .restoreMaintain(75)
+        )
+        XCTAssertEqual(
+            try requestedPolicy(for: .sleepProtected(previous: previous, charge: 70)),
+            .restoreMaintain(75)
+        )
+    }
+
     func testUnsafeExternalStateIsRejectedBeforeShutdownMutation() {
         XCTAssertThrowsError(
             try ChargeShutdownPlanner.requestedPolicy(
@@ -152,7 +167,7 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
             (.stoppingDischarge(returnLimit: 70), .restoreMaintain(70)),
             (.enteringHeat(previous: previous), .keepChargingDisabled),
             (.restoringHeat(previous: previous), .keepChargingDisabled),
-            (.preparingForSleep(previous: previous), .keepChargingDisabled),
+            (.preparingForSleep(previous: previous), .restoreMaintain(75)),
             (.recoveringMaintain(limit: 65), .restoreMaintain(65)),
             (.releasingControl(previous: previous), .releaseControl)
         ]

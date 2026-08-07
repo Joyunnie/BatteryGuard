@@ -171,7 +171,7 @@ final class UserSettings: ObservableObject {
         self.controlMagSafeLED = defaults.bool(forKey: "controlMagSafe")
         self.sleepChargingStrategy = defaults.string(forKey: "sleepChargingStrategy")
             .flatMap(SleepChargingStrategy.init(rawValue:))
-            ?? .pauseOnSleep
+            ?? .disabled
 
         let journalURL: URL?
         let journalResolutionError: String?

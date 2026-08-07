@@ -10,8 +10,6 @@ final class ChargeController: ObservableObject {
     static let shared = ChargeController(history: .shared, diagnostics: .shared)
     private static let defaultReconciliationInterval: TimeInterval = 60
     private static let minimumReconciliationInterval: TimeInterval = 1
-    private static let sleepInhibitionMaximumDuration: TimeInterval = 3 * 60 * 60
-    private static let sleepOwnershipVerificationInterval: TimeInterval = 60
 
     private struct HeatRestoreReblockedError: LocalizedError {
         let underlying: Error
@@ -35,8 +33,7 @@ final class ChargeController: ObservableObject {
     private let settings: UserSettings
     private let history: BatteryHistory?
     private let diagnostics: DiagnosticLog
-    private let sleepInhibitor: SystemSleepInhibiting
-    private let systemPowerObserver: SystemPowerObserver
+    private let systemPowerObserver: SystemPowerObserving
     private let runsSystemPowerObservation: Bool
     private let reconciliationInterval: TimeInterval
     private let now: @Sendable () -> Date
@@ -52,7 +49,7 @@ final class ChargeController: ObservableObject {
     var isCommandPending: Bool {
         if isReconcilingExternalState { return true }
         if activeOperationID != nil { return true }
-        if sleepProtectionTask != nil { return true }
+        if sleepPreparationTask != nil { return true }
         if case .transitioning = mode { return true }
         return false
     }
@@ -159,6 +156,7 @@ final class ChargeController: ObservableObject {
     private var smcTemperatureTimer: Timer?
     private var reconciliationTimer: Timer?
     private var activationObserver: NSObjectProtocol?
+    private var wakeFallbackObserver: NSObjectProtocol?
     private var chargeLimitDebounceWork: DispatchWorkItem?
     private var isShuttingDown = false
     private var backendAvailableForShutdown: Bool
@@ -176,10 +174,10 @@ final class ChargeController: ObservableObject {
     private var heatProtectionRetryAfter: Date?
     private var ledIntent: MagSafeLEDIntent?
     private var ledGeneration: UInt64 = 0
-    private var sleepProtectionGeneration: UInt64 = 0
-    private var sleepProtectionTask: Task<Void, Never>?
-    private var sleepInhibitionOwnership: SleepInhibitionOwnership = .none
-    private var nextSleepOwnershipCheck: Date?
+    private var systemPowerObservationError: String?
+    private var sleepPreparationGeneration: UInt64 = 0
+    private var sleepPreparationTask: Task<Bool, Never>?
+    private var sleepChargingOffWasRequested = false
     private(set) var magSafeLED: MagSafeLEDController
 
     init(
@@ -191,8 +189,7 @@ final class ChargeController: ObservableObject {
         history: BatteryHistory? = nil,
         reconciliationInterval: TimeInterval = 60,
         diagnostics: DiagnosticLog = .disabled,
-        sleepInhibitor: SystemSleepInhibiting = SystemSleepInhibitor.shared,
-        systemPowerObserver: SystemPowerObserver = SystemPowerObserver(),
+        systemPowerObserver: SystemPowerObserving = SystemPowerObserver(),
         runsSystemPowerObservation: Bool = !AppRuntime.isRunningTests,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -203,7 +200,6 @@ final class ChargeController: ObservableObject {
         self.settings = resolvedSettings
         self.history = history
         self.diagnostics = diagnostics
-        self.sleepInhibitor = sleepInhibitor
         self.systemPowerObserver = systemPowerObserver
         self.runsSystemPowerObservation = runsSystemPowerObservation
         self.now = now
@@ -308,15 +304,22 @@ final class ChargeController: ObservableObject {
 
             guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
             startDisplayLoop()
-            try setupSleepWakeObservers()
-            if settings.sleepChargingStrategy == .finishChargingThenSleep {
-                do {
-                    try await sleepInhibitor.prepare()
-                } catch {
-                    sleepProtectionState = .unavailable(error.localizedDescription)
-                }
-            }
             readiness = .ready
+            do {
+                try setupSleepWakeObservers()
+            } catch {
+                systemPowerObservationError = error.localizedDescription
+                setupWakeFallbackObserver()
+                sleepProtectionState = settings.sleepChargingStrategy == .disabled
+                    ? .inactive
+                    : .unavailable(error.localizedDescription)
+                recordDiagnostic(
+                    category: .lifecycle,
+                    operation: "register system sleep observer",
+                    error: error,
+                    stateAfter: readiness.diagnosticLabel
+                )
+            }
             startSMCTemperatureLoop()
             startExternalReconciliation()
             refreshDisplayedError()
@@ -355,6 +358,10 @@ final class ChargeController: ObservableObject {
         guard !isShuttingDown else {
             throw BatteryError.unsupported("종료 정리가 이미 진행됐거나 실패했습니다.")
         }
+        // Claim lifecycle ownership before the first suspension point so wake
+        // reconciliation and duplicate quit requests cannot race this plan.
+        isShuttingDown = true
+        await finishSleepPreparationIfNeeded()
 
         let initializationFailedBeforeHardwareMutation: Bool
         if case .failed = readiness {
@@ -363,7 +370,6 @@ final class ChargeController: ObservableObject {
             initializationFailedBeforeHardwareMutation = false
         }
         guard backendAvailableForShutdown, !initializationFailedBeforeHardwareMutation else {
-            isShuttingDown = true
             readiness = .shuttingDown
             prepareLocalShutdown()
             finishLocalShutdown()
@@ -372,7 +378,12 @@ final class ChargeController: ObservableObject {
 
         if !settings.batteryControlReleasePending,
            case .externalDrift(let expectation, _) = mode {
-            try await refreshExternalDriftBeforeShutdown(expectation: expectation)
+            do {
+                try await refreshExternalDriftBeforeShutdown(expectation: expectation)
+            } catch {
+                isShuttingDown = false
+                throw error
+            }
         }
 
         let modeBeforeShutdown = mode
@@ -380,13 +391,20 @@ final class ChargeController: ObservableObject {
         let requestedLimit = effectiveChargeLimit
         let requestedPolicy: ChargeShutdownPolicy
         do {
-            requestedPolicy = try ChargeShutdownPlanner.requestedPolicy(
-                for: ChargeShutdownContext(
-                    ownership: settings.batteryControlOwnership,
-                    mode: modeBeforeShutdown,
-                    effectiveLimit: requestedLimit
+            if systemPowerObserver.requiresChargingDisabledForSleepTransition,
+               sleepChargingOffWasRequested {
+                // A forced systemWillSleep request cannot be rejected. Keep the
+                // already verified charging-off tuple while allowing it to finish.
+                requestedPolicy = .keepChargingDisabled
+            } else {
+                requestedPolicy = try ChargeShutdownPlanner.requestedPolicy(
+                    for: ChargeShutdownContext(
+                        ownership: settings.batteryControlOwnership,
+                        mode: modeBeforeShutdown,
+                        effectiveLimit: requestedLimit
+                    )
                 )
-            )
+            }
         } catch {
             let message = error.localizedDescription
             commandError = message
@@ -400,14 +418,12 @@ final class ChargeController: ObservableObject {
                     stateBefore: mode.diagnosticLabel
                 )
             )
+            isShuttingDown = false
             throw BatteryError.unsupported(message)
         }
 
-        cancelSleepProtectionTask()
-        try await releaseOwnedSleepInhibitionIfNecessary()
         sleepProtectionState = settings.sleepChargingStrategy == .disabled ? .inactive : .ready
 
-        isShuttingDown = true
         readiness = .shuttingDown
         prepareLocalShutdown()
         ledGeneration &+= 1
@@ -483,7 +499,10 @@ final class ChargeController: ObservableObject {
         chargeLimitDebounceWork?.cancel()
         chargeLimitDebounceWork = nil
         pendingChargeLimit = nil
-        cancelSleepProtectionTask()
+        sleepPreparationGeneration &+= 1
+        sleepPreparationTask?.cancel()
+        sleepPreparationTask = nil
+        systemPowerObserver.resolvePendingSleepRequestsForShutdown()
     }
 
     private func performVerifiedBatteryShutdown(
@@ -595,6 +614,10 @@ final class ChargeController: ObservableObject {
 
     private func removeSleepWakeObservers() {
         systemPowerObserver.stop()
+        if let wakeFallbackObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeFallbackObserver)
+            self.wakeFallbackObserver = nil
+        }
     }
 
     // MARK: - Serialized operations
@@ -810,158 +833,18 @@ final class ChargeController: ObservableObject {
             ),
             batteryMeasurementAvailable: true
         )
-        evaluateAwakeSleepProtection(using: info)
         updateLED()
     }
 
     func setSleepChargingStrategy(_ strategy: SleepChargingStrategy) {
         settings.sleepChargingStrategy = strategy
-        cancelSleepProtectionTask()
-        guard strategy != .disabled else {
+        if strategy == .disabled {
             sleepProtectionState = .inactive
-            releaseSleepInhibitionIfOwned()
-            return
-        }
-        sleepProtectionState = .ready
-        nextSleepOwnershipCheck = nil
-        if strategy == .finishChargingThenSleep {
-            let inhibitor = sleepInhibitor
-            sleepProtectionTask = Task { [weak self] in
-                do {
-                    try await inhibitor.prepare()
-                    guard let self, !Task.isCancelled else { return }
-                    self.sleepProtectionTask = nil
-                    self.sleepProtectionState = .ready
-                    if let info = self.monitor.batteryInfo {
-                        self.evaluateAwakeSleepProtection(using: info)
-                    }
-                } catch {
-                    guard let self, !Task.isCancelled else { return }
-                    self.sleepProtectionTask = nil
-                    self.sleepProtectionState = .unavailable(error.localizedDescription)
-                }
-            }
+        } else if let systemPowerObservationError {
+            sleepProtectionState = .unavailable(systemPowerObservationError)
         } else {
-            releaseSleepInhibitionIfOwned()
+            sleepProtectionState = .ready
         }
-    }
-
-    private func evaluateAwakeSleepProtection(using info: BatteryInfo) {
-        guard readiness == .ready, !isShuttingDown, sleepProtectionTask == nil else { return }
-        let action = SleepChargingPolicy.awakeAction(
-            strategy: settings.sleepChargingStrategy,
-            ownsBatteryControl: settings.batteryControlEnabled,
-            mode: mode,
-            charge: info.currentCharge,
-            isPluggedIn: info.isPluggedIn,
-            inhibitionOwnership: sleepInhibitionOwnership,
-            operationPending: activeOperationID != nil || pendingChargeLimit != nil
-        )
-        switch action {
-        case .none:
-            if settings.sleepChargingStrategy == .disabled {
-                sleepProtectionState = .inactive
-            } else if sleepInhibitionOwnership == .none {
-                sleepProtectionState = .ready
-            }
-        case .acquire(let limit):
-            if let nextSleepOwnershipCheck,
-               now() < nextSleepOwnershipCheck {
-                return
-            }
-            runSleepProtectionTask(operation: "hold awake until charge limit") { [sleepInhibitor] in
-                let ownership = try await sleepInhibitor.acquire(
-                    until: limit,
-                    maximumDuration: Self.sleepInhibitionMaximumDuration
-                )
-                return (ownership, .holdingAwake(limit: limit, ownership: ownership))
-            }
-        case .verifyLimitThenRelease(let limit):
-            runSleepProtectionTask(operation: "release sleep at charge limit") { [backend, sleepInhibitor] in
-                let status = try await backend.readControlStatus()
-                guard status.isVerifiedMaintain(level: limit) else {
-                    throw BatteryError.commandFailed(
-                        "verify charge limit before sleep",
-                        -1,
-                        "Maintain \(limit)% and its worker were not strictly verified"
-                    )
-                }
-                try await sleepInhibitor.releaseOwnedInhibition()
-                return (.none, .ready)
-            }
-        case .release:
-            releaseSleepInhibitionIfOwned()
-        }
-    }
-
-    private func runSleepProtectionTask(
-        operation: String,
-        work: @escaping @Sendable () async throws -> (SleepInhibitionOwnership, SleepChargingProtectionState)
-    ) {
-        sleepProtectionGeneration &+= 1
-        let generation = sleepProtectionGeneration
-        let inhibitor = sleepInhibitor
-        sleepProtectionTask = Task { [weak self] in
-            do {
-                let result = try await work()
-                guard let self else {
-                    if result.0 == .batteryGuard {
-                        try? await inhibitor.releaseOwnedInhibition()
-                    }
-                    return
-                }
-                guard !Task.isCancelled,
-                      self.sleepProtectionGeneration == generation else {
-                    if result.0 == .batteryGuard {
-                        try? await self.sleepInhibitor.releaseOwnedInhibition()
-                    }
-                    return
-                }
-                self.sleepProtectionTask = nil
-                self.sleepInhibitionOwnership = result.0
-                self.sleepProtectionState = result.1
-                self.nextSleepOwnershipCheck = result.0 == .none
-                    ? nil
-                    : self.now().addingTimeInterval(Self.sleepOwnershipVerificationInterval)
-            } catch {
-                guard let self,
-                      !Task.isCancelled,
-                      self.sleepProtectionGeneration == generation else { return }
-                self.sleepProtectionTask = nil
-                self.sleepProtectionState = .unavailable(error.localizedDescription)
-                if error as? SleepInhibitionError == .maximumDurationExceeded {
-                    self.sleepInhibitionOwnership = .none
-                    self.nextSleepOwnershipCheck = .distantFuture
-                } else {
-                    self.nextSleepOwnershipCheck = self.now().addingTimeInterval(Self.sleepOwnershipVerificationInterval)
-                }
-                self.commandError = "\(operation) 실패: \(error.localizedDescription)"
-                self.refreshDisplayedError()
-            }
-        }
-    }
-
-    private func releaseSleepInhibitionIfOwned() {
-        guard sleepInhibitionOwnership == .batteryGuard else {
-            sleepInhibitionOwnership = .none
-            return
-        }
-        runSleepProtectionTask(operation: "restore system sleep") { [sleepInhibitor] in
-            try await sleepInhibitor.releaseOwnedInhibition()
-            return (.none, .ready)
-        }
-    }
-
-    private func cancelSleepProtectionTask() {
-        sleepProtectionGeneration &+= 1
-        sleepProtectionTask?.cancel()
-        sleepProtectionTask = nil
-    }
-
-    private func releaseOwnedSleepInhibitionIfNecessary() async throws {
-        guard sleepInhibitionOwnership == .batteryGuard else { return }
-        try await sleepInhibitor.releaseOwnedInhibition()
-        sleepInhibitionOwnership = .none
     }
 
     private func measuredTemperature(using info: BatteryInfo) -> Double? {
@@ -1847,22 +1730,100 @@ final class ChargeController: ObservableObject {
     private func setupSleepWakeObservers() throws {
         guard runsSystemPowerObservation else { return }
         try systemPowerObserver.start(
-            willSleep: { [weak self] in await self?.prepareForSleep() },
+            willSleep: { [weak self] deadline in
+                guard let self else { return true }
+                return await self.prepareForSleep(deadlineUptimeNanoseconds: deadline)
+            },
             didWake: { [weak self] in
                 Task { @MainActor in await self?.reconcileAfterWake() }
             }
         )
+        if let wakeFallbackObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeFallbackObserver)
+            self.wakeFallbackObserver = nil
+        }
+        systemPowerObservationError = nil
     }
 
-    func prepareForSleep() async {
+    private func setupWakeFallbackObserver() {
+        guard runsSystemPowerObservation, wakeFallbackObserver == nil else { return }
+        wakeFallbackObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.reconcileAfterWake() }
+        }
+    }
+
+    @discardableResult
+    func prepareForSleep(deadlineUptimeNanoseconds: UInt64? = nil) async -> Bool {
+        if let sleepPreparationTask {
+            return await sleepPreparationTask.value
+        }
         cancelPendingChargeLimit(reason: "Sleep으로 대기 중인 Charge Limit 변경이 취소됐습니다.")
         cancelSMCTemperatureSample(clearCache: true)
-        cancelSleepProtectionTask()
-        guard !isShuttingDown,
-              settings.sleepChargingStrategy != .disabled,
-              settings.batteryControlEnabled else { return }
+        guard !isShuttingDown else { return false }
 
-        let previous = mode.restorableMode ?? .maintaining(limit: effectiveChargeLimit)
+        let action = SleepChargingPolicy.preparationAction(
+            strategy: settings.sleepChargingStrategy,
+            ownsBatteryControl: settings.batteryControlEnabled,
+            mode: mode,
+            effectiveLimit: effectiveChargeLimit
+        )
+        switch action {
+        case .allowWithoutMutation:
+            sleepChargingOffWasRequested = false
+            return true
+        case .rejectWithoutMutation:
+            sleepChargingOffWasRequested = false
+            return false
+        case .verifyAlreadyProtected:
+            if case .sleepProtected = mode {
+                sleepChargingOffWasRequested = true
+            } else {
+                sleepChargingOffWasRequested = false
+            }
+            do {
+                let status = try await backend.readControlStatus()
+                guard status.isVerifiedChargingDisabled else {
+                    throw BatteryError.commandFailed(
+                        "verify sleep protection",
+                        -1,
+                        "charging was no longer strictly disabled"
+                    )
+                }
+                return true
+            } catch {
+                sleepProtectionState = .unavailable(error.localizedDescription)
+                commandError = "잠자기 충전 보호 검증 실패: \(error.localizedDescription)"
+                refreshDisplayedError()
+                return false
+            }
+        case .stopCharging(let previous):
+            sleepChargingOffWasRequested = true
+            sleepPreparationGeneration &+= 1
+            let generation = sleepPreparationGeneration
+            let task = Task { [weak self] in
+                guard let self else { return false }
+                return await self.stopChargingForSleep(
+                    previous: previous,
+                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                )
+            }
+            sleepPreparationTask = task
+            let prepared = await task.value
+            if sleepPreparationGeneration == generation {
+                sleepPreparationTask = nil
+            }
+            return prepared
+        }
+    }
+
+    private func stopChargingForSleep(
+        previous: RestorableChargeMode,
+        deadlineUptimeNanoseconds: UInt64?
+    ) async -> Bool {
         activeOperationTask?.cancel()
         activeOperationTask = nil
         operationGeneration &+= 1
@@ -1871,23 +1832,15 @@ final class ChargeController: ObservableObject {
         mode = .transitioning(.preparingForSleep(previous: previous))
 
         do {
-            do {
-                try await backend.requestCancellation()
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                recordDiagnostic(
-                    category: .lifecycle,
-                    operation: "prepare for sleep cancellation request",
-                    error: error
-                )
+            guard activeOperationID == operationID, !Task.isCancelled else { return false }
+            let backendDeadline = deadlineUptimeNanoseconds.map { deadline in
+                let acknowledgementReserve: UInt64 = 2_000_000_000
+                return deadline > acknowledgementReserve ? deadline - acknowledgementReserve : 0
             }
-            try Task.checkCancellation()
-            try await backend.cancelLongRunningOperation()
-            try Task.checkCancellation()
-            try await backend.disableCharging()
-            try Task.checkCancellation()
-            let status = try await backend.readControlStatus()
+            let status = try await backend.prepareForSystemSleep(
+                deadlineUptimeNanoseconds: backendDeadline
+            )
+            guard activeOperationID == operationID else { return false }
             try Task.checkCancellation()
             guard status.isVerifiedChargingDisabled else {
                 throw BatteryError.commandFailed(
@@ -1896,8 +1849,10 @@ final class ChargeController: ObservableObject {
                     "charging was not strictly verified disabled before sleep"
                 )
             }
-            guard activeOperationID == operationID else { return }
-            try await releaseOwnedSleepInhibitionIfNecessary()
+            guard activeOperationID == operationID else { return false }
+            if case .discharging = previous {
+                monitor.allowSleep()
+            }
             activeOperationID = nil
             let charge = monitor.batteryInfo?.currentCharge
             mode = .sleepProtected(previous: previous, charge: charge)
@@ -1905,8 +1860,9 @@ final class ChargeController: ObservableObject {
             commandError = nil
             refreshDisplayedError()
             updateLED()
+            return true
         } catch {
-            guard activeOperationID == operationID else { return }
+            guard activeOperationID == operationID else { return false }
             activeOperationID = nil
             mode = .failed(
                 previous: previous,
@@ -1922,23 +1878,42 @@ final class ChargeController: ObservableObject {
                 error: error,
                 stateAfter: mode.diagnosticLabel
             )
+            return false
         }
     }
 
     func reconcileAfterWake() async {
         guard !isShuttingDown else { return }
-        cancelSleepProtectionTask()
+        await finishSleepPreparationIfNeeded()
+        sleepChargingOffWasRequested = false
+        if let activeOperationTask {
+            await activeOperationTask.value
+        }
+        guard !isShuttingDown else { return }
         cancelSMCTemperatureSample(clearCache: true)
+        var shouldRestoreSleepProtection = false
+        let sleepExpectation: ReconciledChargeExpectation?
         if case .externalDrift(.sleepProtected(let previous), _) = mode {
-            mode = .sleepProtected(previous: previous, charge: monitor.batteryInfo?.currentCharge)
+            sleepExpectation = .sleepProtected(previous: previous)
+        } else if case .sleepProtected(let previous, _) = mode {
+            sleepExpectation = .sleepProtected(previous: previous)
+        } else {
+            sleepExpectation = nil
+        }
+        if let sleepExpectation {
+            await reconcileExternalDriftAfterWake(expectation: sleepExpectation)
+            guard case .sleepProtected = mode else { return }
+            shouldRestoreSleepProtection = true
         } else if case .externalDrift(let expectation, _) = mode {
             await reconcileExternalDriftAfterWake(expectation: expectation)
             return
         }
-        if case .controlDisabled(let lastLimit) = mode {
-            await reconcileExternalDriftAfterWake(
-                expectation: .controlReleased(lastLimit: lastLimit)
-            )
+        if !shouldRestoreSleepProtection {
+            let expectation = reconciliationExpectation
+                ?? mode.restorableMode.map(ChargeReconciliationPolicy.expectation(from:))
+            if let expectation {
+                await reconcileExternalDriftAfterWake(expectation: expectation)
+            }
             return
         }
         let prior = RestorableChargeMode.maintaining(
@@ -1998,10 +1973,25 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    private func finishSleepPreparationIfNeeded() async {
+        guard let sleepPreparationTask else { return }
+        let generation = sleepPreparationGeneration
+        _ = await sleepPreparationTask.value
+        if sleepPreparationGeneration == generation {
+            self.sleepPreparationTask = nil
+        }
+    }
+
     private func reconcileExternalDriftAfterWake(
         expectation: ReconciledChargeExpectation
     ) async {
-        let prior = expectation.restorableMode
+        let prior: RestorableChargeMode
+        if case .sleepProtected(let previous) = expectation {
+            // Wake never resumes an interrupted Top Up or Discharge implicitly.
+            prior = .maintaining(limit: previous.maintainLimit)
+        } else {
+            prior = expectation.restorableMode
+        }
         activeOperationTask?.cancel()
         activeOperationTask = nil
         operationGeneration &+= 1
@@ -2014,6 +2004,18 @@ final class ChargeController: ObservableObject {
         do {
             try await backend.requestCancellation()
             guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
+            let snapshot = try await readReconciliationSnapshot(for: expectation)
+            guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
+            guard ChargeReconciliationPolicy.status(snapshot, matches: expectation) else {
+                let observed = ChargeReconciliationPolicy.observedMode(from: snapshot.status)
+                mode = .externalDrift(expected: expectation, observed: observed)
+                driftError = "Wake 후 외부 CLI 변경 유지: \(observed.userDescription)"
+                readiness = .ready
+                activeOperationID = nil
+                refreshDisplayedError()
+                updateLED()
+                return
+            }
             let freshInfo = monitor.readBatteryInfo()
             if let freshInfo {
                 monitor.batteryInfo = freshInfo
@@ -2041,19 +2043,11 @@ final class ChargeController: ObservableObject {
                 }
             }
 
-            let snapshot = try await readReconciliationSnapshot(for: expectation)
-            guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
-            if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
-                if case .maintaining = expectation {
-                    monitor.allowSleep()
-                }
-                mode = expectation.reconciledMode
-                driftError = nil
-            } else {
-                let observed = ChargeReconciliationPolicy.observedMode(from: snapshot.status)
-                mode = .externalDrift(expected: expectation, observed: observed)
-                driftError = "Wake 후 외부 CLI 변경 유지: \(observed.userDescription)"
+            if case .maintaining = expectation {
+                monitor.allowSleep()
             }
+            mode = expectation.reconciledMode
+            driftError = nil
             readiness = .ready
             activeOperationID = nil
             refreshDisplayedError()
@@ -2101,8 +2095,6 @@ final class ChargeController: ObservableObject {
 
     private func completeControlRelease(lastLimit: Int) async throws {
         cancelSMCTemperatureSample(clearCache: true)
-        cancelSleepProtectionTask()
-        try await releaseOwnedSleepInhibitionIfNecessary()
         try settings.completeBatteryControlRelease(lastLimit: lastLimit)
         settings.heatProtectionEnabled = false
         settings.controlMagSafeLED = false

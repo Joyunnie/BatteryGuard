@@ -6,13 +6,25 @@ import IOKit
 import IOKit.pwr_mgt
 
 @MainActor
-final class SystemPowerObserver {
-    typealias SleepHandler = @MainActor () async -> Void
+protocol SystemPowerObserving: AnyObject {
+    var requiresChargingDisabledForSleepTransition: Bool { get }
+    func start(
+        willSleep: @escaping @MainActor (_ deadlineUptimeNanoseconds: UInt64) async -> Bool,
+        didWake: @escaping @MainActor () -> Void
+    ) throws
+    func resolvePendingSleepRequestsForShutdown()
+    func stop()
+}
+
+@MainActor
+final class SystemPowerObserver: SystemPowerObserving {
+    typealias SleepHandler = @MainActor (_ deadlineUptimeNanoseconds: UInt64) async -> Bool
 
     private static let acknowledgementDeadline: TimeInterval = 25
     // Swift cannot import IOMessage.h's nested iokit_common_msg macros.
     private static let canSystemSleepMessage: UInt32 = 0xe000_0270
     private static let systemWillSleepMessage: UInt32 = 0xe000_0280
+    private static let systemWillNotSleepMessage: UInt32 = 0xe000_0290
     private static let systemHasPoweredOnMessage: UInt32 = 0xe000_0300
 
     private var rootPort: io_connect_t = 0
@@ -21,6 +33,16 @@ final class SystemPowerObserver {
     private var runLoopSource: CFRunLoopSource?
     private var sleepHandler: SleepHandler?
     private var wakeHandler: (@MainActor () -> Void)?
+    private struct PendingSleepRequest {
+        let canVeto: Bool
+        let operation: SleepAcknowledgedOperation
+    }
+
+    private var pendingSleepOperations: [Int: PendingSleepRequest] = [:]
+    private let powerChangeResponder = PowerChangeResponder()
+    private var sleepTransitionInProgress = false
+
+    var requiresChargingDisabledForSleepTransition: Bool { sleepTransitionInProgress }
 
     func start(
         willSleep: @escaping SleepHandler,
@@ -40,12 +62,15 @@ final class SystemPowerObserver {
                     .fromOpaque(context)
                     .takeUnretainedValue()
                 let token = Int(bitPattern: messageArgument)
-                Task { @MainActor in
+                // This callback is delivered by the source installed on the main
+                // run loop, so start the absolute IOKit budget without queueing.
+                MainActor.assumeIsolated {
                     observer.receive(messageType: messageType, token: token)
                 }
             },
             &notifier
         )
+        powerChangeResponder.activate(rootPort)
         guard rootPort != 0,
               let notificationPort,
               let source = IONotificationPortGetRunLoopSource(notificationPort)?.takeUnretainedValue()
@@ -58,15 +83,14 @@ final class SystemPowerObserver {
     }
 
     func stop() {
+        resolvePendingSleepRequestsForShutdown()
         if let runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         }
         if notifier != 0 {
             IODeregisterForSystemPower(&notifier)
         }
-        if rootPort != 0 {
-            IOServiceClose(rootPort)
-        }
+        powerChangeResponder.close()
         if let notificationPort {
             IONotificationPortDestroy(notificationPort)
         }
@@ -76,52 +100,131 @@ final class SystemPowerObserver {
         runLoopSource = nil
         sleepHandler = nil
         wakeHandler = nil
+        sleepTransitionInProgress = false
+    }
+
+    func resolvePendingSleepRequestsForShutdown() {
+        for (_, request) in pendingSleepOperations {
+            request.operation.invalidate(resolving: request.canVeto ? .reject : .allow)
+        }
+        pendingSleepOperations.removeAll()
     }
 
     private func receive(messageType: UInt32, token: Int) {
+        let deadline = Self.monotonicDeadline(after: Self.acknowledgementDeadline)
         switch messageType {
         case Self.canSystemSleepMessage:
-            acknowledge(token)
+            // Latch the whole accepted/rejected negotiation window. Shutdown is
+            // conservative until IOKit reports that sleep was cancelled or ended.
+            sleepTransitionInProgress = true
+            handleSleepRequest(token: token, canVeto: true, deadline: deadline)
         case Self.systemWillSleepMessage:
-            guard let sleepHandler else {
-                acknowledge(token)
-                return
-            }
-            let operation = SleepAcknowledgedOperation(
-                deadline: Self.acknowledgementDeadline
-            ) { [weak self] in
-                Task { @MainActor in self?.acknowledge(token) }
-            }
-            let task = Task { @MainActor in
-                await sleepHandler()
-                operation.finish()
-            }
-            operation.setTask(task)
+            // Keep this latched after acknowledgement: IOAllowPowerChange means
+            // the non-vetoable transition may still suspend the process.
+            sleepTransitionInProgress = true
+            handleSleepRequest(token: token, canVeto: false, deadline: deadline)
+        case Self.systemWillNotSleepMessage:
+            wakeHandler?()
+            sleepTransitionInProgress = false
         case Self.systemHasPoweredOnMessage:
             wakeHandler?()
+            sleepTransitionInProgress = false
         default:
             break
         }
     }
 
-    private func acknowledge(_ token: Int) {
-        guard rootPort != 0 else { return }
-        IOAllowPowerChange(rootPort, token)
+    private func handleSleepRequest(token: Int, canVeto: Bool, deadline: UInt64) {
+        guard let sleepHandler else {
+            powerChangeResponder.resolve(token: token, decision: .allow)
+            return
+        }
+        let timeoutDecision: SleepAcknowledgementDecision = canVeto ? .reject : .allow
+        let operation = SleepAcknowledgedOperation(
+            deadlineUptimeNanoseconds: deadline,
+            timeoutDecision: timeoutDecision
+        ) { [weak self, powerChangeResponder] decision in
+            powerChangeResponder.resolve(token: token, decision: decision)
+            Task { @MainActor in
+                self?.completeSleepRequest(token: token)
+            }
+        }
+        pendingSleepOperations[token] = PendingSleepRequest(
+            canVeto: canVeto,
+            operation: operation
+        )
+        let task = Task { @MainActor in
+            let prepared = await sleepHandler(deadline)
+            operation.finish(prepared || !canVeto ? .allow : .reject)
+        }
+        operation.setTask(task)
     }
+
+    private func completeSleepRequest(
+        token: Int
+    ) {
+        pendingSleepOperations.removeValue(forKey: token)
+    }
+
+    private static func monotonicDeadline(after interval: TimeInterval) -> UInt64 {
+        let duration = UInt64(interval * 1_000_000_000)
+        let now = DispatchTime.now().uptimeNanoseconds
+        let result = now.addingReportingOverflow(duration)
+        return result.overflow ? UInt64.max : result.partialValue
+    }
+}
+
+private final class PowerChangeResponder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var port: io_connect_t = 0
+
+    func activate(_ port: io_connect_t) {
+        lock.withLock { self.port = port }
+    }
+
+    func resolve(token: Int, decision: SleepAcknowledgementDecision) {
+        lock.withLock {
+            guard port != 0 else { return }
+            switch decision {
+            case .allow: IOAllowPowerChange(port, token)
+            case .reject: IOCancelPowerChange(port, token)
+            }
+        }
+    }
+
+    func close() {
+        lock.withLock {
+            guard port != 0 else { return }
+            IOServiceClose(port)
+            port = 0
+        }
+    }
+}
+
+enum SleepAcknowledgementDecision: Equatable, Sendable {
+    case allow
+    case reject
 }
 
 final class SleepAcknowledgedOperation: @unchecked Sendable {
     private let lock = NSLock()
     private var completed = false
-    private let completion: @Sendable () -> Void
+    private let completion: @Sendable (SleepAcknowledgementDecision) -> Void
     private var timeoutTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
 
-    init(deadline: TimeInterval, completion: @escaping @Sendable () -> Void) {
+    init(
+        deadlineUptimeNanoseconds: UInt64,
+        timeoutDecision: SleepAcknowledgementDecision,
+        completion: @escaping @Sendable (SleepAcknowledgementDecision) -> Void
+    ) {
         self.completion = completion
         timeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
-            self?.finish(cancelOperation: true)
+            let now = DispatchTime.now().uptimeNanoseconds
+            if deadlineUptimeNanoseconds > now {
+                try? await Task.sleep(nanoseconds: deadlineUptimeNanoseconds - now)
+            }
+            self?.finish(timeoutDecision)
         }
     }
 
@@ -134,23 +237,29 @@ final class SleepAcknowledgedOperation: @unchecked Sendable {
         if shouldCancel { task.cancel() }
     }
 
-    func finish() {
-        finish(cancelOperation: false)
-    }
-
-    private func finish(cancelOperation: Bool) {
-        var taskToCancel: Task<Void, Never>?
+    func finish(_ decision: SleepAcknowledgementDecision) {
         let shouldComplete = lock.withLock {
             guard !completed else { return false }
             completed = true
-            if cancelOperation { taskToCancel = operationTask }
             operationTask = nil
+            completion(decision)
             return true
         }
         guard shouldComplete else { return }
-        taskToCancel?.cancel()
         timeoutTask?.cancel()
         timeoutTask = nil
-        completion()
+    }
+
+    func invalidate(resolving decision: SleepAcknowledgementDecision) {
+        let didInvalidate = lock.withLock {
+            guard !completed else { return false }
+            completed = true
+            operationTask = nil
+            completion(decision)
+            return true
+        }
+        guard didInvalidate else { return }
+        timeoutTask?.cancel()
+        timeoutTask = nil
     }
 }

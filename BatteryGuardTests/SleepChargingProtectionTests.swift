@@ -1,384 +1,180 @@
 import XCTest
-import Darwin
 @testable import BatteryGuard
 
 final class SleepChargingPolicyTests: XCTestCase {
-    func testAcquireRequiresOwnedMaintainBelowLimitOnAC() {
-        XCTAssertEqual(
-            SleepChargingPolicy.awakeAction(
-                strategy: .finishChargingThenSleep,
-                ownsBatteryControl: true,
-                mode: .maintaining(limit: 80),
-                charge: 79,
-                isPluggedIn: true,
-                inhibitionOwnership: .none,
-                operationPending: false
-            ),
-            .acquire(limit: 80)
-        )
-    }
-
-    func testOwnedInhibitionReleasesWhenFeatureNoLongerEligible() {
-        let ineligibleModes: [ChargeMode] = [
+    func testStableOwnedModesRequireChargingOff() {
+        let modes: [ChargeMode] = [
+            .maintaining(limit: 80),
             .toppingUp(returnLimit: 80),
-            .discharging(target: 60, returnLimit: 80),
-            .heatBlocked(previous: .maintaining(limit: 80)),
-            .controlDisabled(lastLimit: 80)
+            .discharging(target: 60, returnLimit: 80)
         ]
-        for mode in ineligibleModes {
+
+        for mode in modes {
             XCTAssertEqual(
-                SleepChargingPolicy.awakeAction(
-                    strategy: .finishChargingThenSleep,
+                SleepChargingPolicy.preparationAction(
+                    strategy: .pauseOnSleep,
                     ownsBatteryControl: true,
                     mode: mode,
-                    charge: 50,
-                    isPluggedIn: true,
-                    inhibitionOwnership: .batteryGuard,
-                    operationPending: false
+                    effectiveLimit: 80
                 ),
-                .release
+                .stopCharging(previous: mode.restorableMode ?? .maintaining(limit: 80))
             )
         }
     }
 
-    func testTargetRequiresVerifiedReleaseOnlyForOwnedInhibition() {
-        XCTAssertEqual(
-            SleepChargingPolicy.awakeAction(
-                strategy: .finishChargingThenSleep,
-                ownsBatteryControl: true,
-                mode: .maintaining(limit: 80),
-                charge: 80,
-                isPluggedIn: true,
-                inhibitionOwnership: .batteryGuard,
-                operationPending: false
-            ),
-            .verifyLimitThenRelease(limit: 80)
-        )
-        XCTAssertEqual(
-            SleepChargingPolicy.awakeAction(
-                strategy: .finishChargingThenSleep,
-                ownsBatteryControl: true,
-                mode: .maintaining(limit: 80),
-                charge: 80,
-                isPluggedIn: true,
-                inhibitionOwnership: .external,
-                operationPending: false
-            ),
-            .none
-        )
-    }
-
-    func testExternalOwnershipIsRecheckedBelowLimit() {
-        XCTAssertEqual(
-            SleepChargingPolicy.awakeAction(
-                strategy: .finishChargingThenSleep,
-                ownsBatteryControl: true,
-                mode: .maintaining(limit: 80),
-                charge: 60,
-                isPluggedIn: true,
-                inhibitionOwnership: .external,
-                operationPending: false
-            ),
-            .acquire(limit: 80)
-        )
-    }
-
-    func testOwnedInhibitionIsReverifiedBelowLimit() {
-        XCTAssertEqual(
-            SleepChargingPolicy.awakeAction(
-                strategy: .finishChargingThenSleep,
-                ownsBatteryControl: true,
-                mode: .maintaining(limit: 80),
-                charge: 60,
-                isPluggedIn: true,
-                inhibitionOwnership: .batteryGuard,
-                operationPending: false
-            ),
-            .acquire(limit: 80)
-        )
-    }
-}
-
-final class SystemSleepInhibitorTests: XCTestCase {
-    func testAcquireAndReleaseRoundTripsOwnedSleepDisabledLease() async throws {
-        let fixture = try makeSleepInhibitorFixture(initialValue: "0")
-        defer { fixture.cleanup() }
-        let inhibitor = SystemSleepInhibitor(
-            sudoPath: fixture.sudo.path,
-            pmsetPath: fixture.pmset.path,
-            shellPath: "/bin/sh",
-            batteryPath: fixture.battery.path,
-            journalURL: fixture.journal,
-            trustPolicy: .testFixture,
-            processID: getpid()
-        )
-
-        let ownership = try await inhibitor.acquire(until: 80, maximumDuration: 60)
-        XCTAssertEqual(ownership, .batteryGuard)
-        XCTAssertEqual(try fixture.readState(), "1")
-
-        try await inhibitor.releaseOwnedInhibition()
-        XCTAssertEqual(try fixture.readState(), "0")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.journal.path))
-    }
-
-    func testExternalSleepDisabledIsObservedWithoutBeingCleared() async throws {
-        let fixture = try makeSleepInhibitorFixture(initialValue: "1")
-        defer { fixture.cleanup() }
-        let inhibitor = SystemSleepInhibitor(
-            sudoPath: fixture.sudo.path,
-            pmsetPath: fixture.pmset.path,
-            shellPath: "/bin/sh",
-            batteryPath: fixture.battery.path,
-            journalURL: fixture.journal,
-            trustPolicy: .testFixture,
-            processID: getpid()
-        )
-
-        let ownership = try await inhibitor.acquire(until: 80, maximumDuration: 60)
-        XCTAssertEqual(ownership, .external)
-        do {
-            try await inhibitor.releaseOwnedInhibition()
-            XCTFail("missing ownership lease must prevent release")
-        } catch {
-            XCTAssertTrue(error.localizedDescription.contains("ownership lease is missing"))
-        }
-
-        XCTAssertEqual(try fixture.readState(), "1")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.journal.path))
-    }
-
-    func testWatchdogStopsMaintainAndChargingWhenOwnerDies() async throws {
-        let fixture = try makeSleepInhibitorFixture(initialValue: "0")
-        defer { fixture.cleanup() }
-        let owner = Process()
-        owner.executableURL = URL(fileURLWithPath: "/bin/sleep")
-        owner.arguments = ["30"]
-        try owner.run()
-        let inhibitor = SystemSleepInhibitor(
-            sudoPath: fixture.sudo.path,
-            pmsetPath: fixture.pmset.path,
-            shellPath: "/bin/sh",
-            batteryPath: fixture.battery.path,
-            journalURL: fixture.journal,
-            trustPolicy: .testFixture,
-            processID: owner.processIdentifier
-        )
-        let ownership = try await inhibitor.acquire(until: 80, maximumDuration: 60)
-        XCTAssertEqual(ownership, .batteryGuard)
-
-        owner.terminate()
-        while owner.isRunning {
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
-        let deadline = Date().addingTimeInterval(4)
-        while Date() < deadline, try fixture.readState() != "0" {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-
-        XCTAssertEqual(try fixture.readState(), "0")
-        let batteryCommands = try String(contentsOf: fixture.batteryLog, encoding: .utf8)
-        XCTAssertTrue(batteryCommands.contains("maintain stop\ncharging off"))
-        try await inhibitor.releaseOwnedInhibition()
-    }
-
-    func testMissingOwnedSleepDisabledStateIsReacquired() async throws {
-        let fixture = try makeSleepInhibitorFixture(initialValue: "0")
-        defer { fixture.cleanup() }
-        let inhibitor = SystemSleepInhibitor(
-            sudoPath: fixture.sudo.path,
-            pmsetPath: fixture.pmset.path,
-            shellPath: "/bin/sh",
-            batteryPath: fixture.battery.path,
-            journalURL: fixture.journal,
-            trustPolicy: .testFixture,
-            processID: getpid()
-        )
-        _ = try await inhibitor.acquire(until: 80, maximumDuration: 60)
-        try fixture.writeState("0")
-
-        let ownership = try await inhibitor.acquire(until: 80, maximumDuration: 60)
-
-        XCTAssertEqual(ownership, .batteryGuard)
-        XCTAssertEqual(try fixture.readState(), "1")
-        try await inhibitor.releaseOwnedInhibition()
-    }
-
-    func testExpiredLeaseStopsChargingAndCannotExtendItself() async throws {
-        let fixture = try makeSleepInhibitorFixture(initialValue: "0")
-        defer { fixture.cleanup() }
-        let clock = TestClock(Date())
-        let inhibitor = SystemSleepInhibitor(
-            sudoPath: fixture.sudo.path,
-            pmsetPath: fixture.pmset.path,
-            shellPath: "/bin/sh",
-            batteryPath: fixture.battery.path,
-            journalURL: fixture.journal,
-            trustPolicy: .testFixture,
-            processID: getpid(),
-            now: { clock.now() }
-        )
-        _ = try await inhibitor.acquire(until: 80, maximumDuration: 60)
-        clock.advance(by: 61)
-
-        do {
-            _ = try await inhibitor.acquire(until: 80, maximumDuration: 60)
-            XCTFail("an expired lease must not silently extend its deadline")
-        } catch let error as SleepInhibitionError {
-            XCTAssertEqual(error, .maximumDurationExceeded)
-        }
-
-        XCTAssertEqual(try fixture.readState(), "0")
-        let batteryCommands = try String(contentsOf: fixture.batteryLog, encoding: .utf8)
-        XCTAssertTrue(batteryCommands.contains("maintain stop\ncharging off"))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.journal.path))
-    }
-
-    func testCorruptMarkerPathCannotDeleteAnArbitraryFileOrClearExternalSleepState() async throws {
-        let fixture = try makeSleepInhibitorFixture(initialValue: "1")
-        defer { fixture.cleanup() }
-        let sentinel = fixture.directory.appendingPathComponent("keep.txt")
-        try Data("keep".utf8).write(to: sentinel)
-        let lease: [String: Any] = [
-            "phase": "owned",
-            "ownerPID": Int(getpid()),
-            "releaseMarkerPath": sentinel.path,
-            "deadline": Date().addingTimeInterval(60).timeIntervalSinceReferenceDate
+    func testAlreadyProtectedModeRequiresReadOnlyVerification() {
+        let modes: [ChargeMode] = [
+            .sleepProtected(previous: .maintaining(limit: 80), charge: 70),
+            .heatBlocked(previous: .maintaining(limit: 80))
         ]
-        let data = try JSONSerialization.data(withJSONObject: lease)
-        try data.write(to: fixture.journal)
-        let inhibitor = SystemSleepInhibitor(
-            sudoPath: fixture.sudo.path,
-            pmsetPath: fixture.pmset.path,
-            shellPath: "/bin/sh",
-            batteryPath: fixture.battery.path,
-            journalURL: fixture.journal,
-            trustPolicy: .testFixture,
-            processID: getpid()
-        )
-
-        do {
-            try await inhibitor.releaseOwnedInhibition()
-            XCTFail("an invalid release marker must reject the lease")
-        } catch {
-            XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
-            XCTAssertEqual(try fixture.readState(), "1")
+        for mode in modes {
+            XCTAssertEqual(
+                SleepChargingPolicy.preparationAction(
+                    strategy: .pauseOnSleep,
+                    ownsBatteryControl: true,
+                    mode: mode,
+                    effectiveLimit: 80
+                ),
+                .verifyAlreadyProtected
+            )
         }
     }
 
-    private func makeSleepInhibitorFixture(initialValue: String) throws -> SleepInhibitorFixture {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("batteryguard-sleep-inhibitor-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let state = directory.appendingPathComponent("state")
-        try Data(initialValue.utf8).write(to: state)
-        let pmset = try makeExecutableFixture("""
-        #!/bin/sh
-        state=\(shellQuote(state.path))
-        if [ "$1" = "-g" ]; then
-          printf ' SleepDisabled %s\\n' "$(/bin/cat "$state")"
-          exit 0
-        fi
-        [ "$1" = "-a" ] && [ "$2" = "disablesleep" ] || exit 64
-        printf '%s' "$3" > "$state"
-        """)
-        let sudo = try makeExecutableFixture("""
-        #!/bin/sh
-        [ "$1" = "-n" ] && shift
-        [ "$1" = "-l" ] && exit 0
-        exec "$@"
-        """)
-        let batteryLog = directory.appendingPathComponent("battery.log")
-        let battery = try makeExecutableFixture("""
-        #!/bin/sh
-        printf '%s\\n' "$*" >> \(shellQuote(batteryLog.path))
-        exit 0
-        """)
-        return SleepInhibitorFixture(
-            directory: directory,
-            state: state,
-            pmset: pmset,
-            sudo: sudo,
-            battery: battery,
-            batteryLog: batteryLog,
-            journal: directory.appendingPathComponent("lease.json")
+    func testOwnedTransitionIsPreemptedButControlReleaseIsNotReclaimed() {
+        XCTAssertEqual(
+            SleepChargingPolicy.preparationAction(
+                strategy: .pauseOnSleep,
+                ownsBatteryControl: true,
+                mode: .transitioning(.startingTopUp(returnLimit: 80)),
+                effectiveLimit: 80
+            ),
+            .stopCharging(previous: .maintaining(limit: 80))
         )
+        XCTAssertEqual(
+            SleepChargingPolicy.preparationAction(
+                strategy: .pauseOnSleep,
+                ownsBatteryControl: true,
+                mode: .transitioning(.releasingControl(previous: .maintaining(limit: 80))),
+                effectiveLimit: 80
+            ),
+            .rejectWithoutMutation
+        )
+    }
+
+    func testDisabledMonitoringAndUncertainStatesRemainUntouched() {
+        let externalDrift = ChargeMode.externalDrift(
+            expected: .maintaining(limit: 80),
+            observed: .maintaining(limit: 60)
+        )
+        let manualFailure = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "uncertain",
+            disposition: .manualIntervention
+        )
+        let cases: [(SleepChargingStrategy, Bool, ChargeMode)] = [
+            (.disabled, true, .maintaining(limit: 80)),
+            (.pauseOnSleep, false, .controlDisabled(lastLimit: 80)),
+            (.pauseOnSleep, true, externalDrift),
+            (.pauseOnSleep, true, manualFailure),
+            (.pauseOnSleep, true, .idle)
+        ]
+
+        for (strategy, ownsControl, mode) in cases {
+            XCTAssertEqual(
+                SleepChargingPolicy.preparationAction(
+                    strategy: strategy,
+                    ownsBatteryControl: ownsControl,
+                    mode: mode,
+                    effectiveLimit: 80
+                ),
+                strategy == .disabled || !ownsControl
+                    ? .allowWithoutMutation
+                    : .rejectWithoutMutation
+            )
+        }
     }
 }
 
 final class SleepAcknowledgedOperationTests: XCTestCase {
-    func testTimeoutCancelsCleanupAndAcknowledgesExactlyOnce() async {
-        let acknowledgementCount = LockedCounter()
-        let operation = SleepAcknowledgedOperation(deadline: 0.02) {
-            acknowledgementCount.increment()
-        }
+    func testTimeoutDecidesExactlyOnceWithoutCancellingSafetyCleanup() async {
+        let decisions = LockedDecisions()
+        let operation = SleepAcknowledgedOperation(
+            deadlineUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + 20_000_000,
+            timeoutDecision: .reject
+        ) { decisions.append($0) }
+        let cleanupFinished = LockedFlag()
         let task = Task {
-            while !Task.isCancelled {
-                await Task.yield()
-            }
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            cleanupFinished.setTrue()
+            operation.finish(.allow)
         }
         operation.setTask(task)
 
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        operation.finish()
+        try? await Task.sleep(nanoseconds: 100_000_000)
 
-        XCTAssertTrue(task.isCancelled)
-        XCTAssertEqual(acknowledgementCount.value, 1)
+        XCTAssertTrue(cleanupFinished.value)
+        XCTAssertFalse(task.isCancelled)
+        XCTAssertEqual(decisions.values, [.reject])
+    }
+
+    func testCompletedPreparationBeatsTimeout() async {
+        let decisions = LockedDecisions()
+        let operation = SleepAcknowledgedOperation(
+            deadlineUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_000_000_000,
+            timeoutDecision: .reject
+        ) { decisions.append($0) }
+        operation.finish(.allow)
+
+        try? await Task.sleep(nanoseconds: 10_000_000)
+
+        XCTAssertEqual(decisions.values, [.allow])
+    }
+
+    func testInvalidationResolvesTheRequestedDecisionExactlyOnce() {
+        let decisions = LockedDecisions()
+        let operation = SleepAcknowledgedOperation(
+            deadlineUptimeNanoseconds: UInt64.max,
+            timeoutDecision: .allow
+        ) { decisions.append($0) }
+
+        operation.invalidate(resolving: .reject)
+        operation.finish(.allow)
+
+        XCTAssertEqual(decisions.values, [.reject])
     }
 }
 
-private final class LockedCounter: @unchecked Sendable {
+private final class LockedDecisions: @unchecked Sendable {
     private let lock = NSLock()
-    private var storage = 0
-
-    var value: Int { lock.withLock { storage } }
-    func increment() { lock.withLock { storage += 1 } }
+    private var storage: [SleepAcknowledgementDecision] = []
+    var values: [SleepAcknowledgementDecision] { lock.withLock { storage } }
+    func append(_ decision: SleepAcknowledgementDecision) {
+        lock.withLock { storage.append(decision) }
+    }
 }
 
-private struct SleepInhibitorFixture {
-    let directory: URL
-    let state: URL
-    let pmset: URL
-    let sudo: URL
-    let battery: URL
-    let batteryLog: URL
-    let journal: URL
-
-    func readState() throws -> String {
-        try String(contentsOf: state, encoding: .utf8)
-    }
-
-    func writeState(_ value: String) throws {
-        try Data(value.utf8).write(to: state, options: .atomic)
-    }
-
-    func cleanup() {
-        try? FileManager.default.removeItem(at: directory)
-        try? FileManager.default.removeItem(at: pmset)
-        try? FileManager.default.removeItem(at: sudo)
-        try? FileManager.default.removeItem(at: battery)
-    }
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = false
+    var value: Bool { lock.withLock { storage } }
+    func setTrue() { lock.withLock { storage = true } }
 }
 
 @MainActor
 extension ChargeControllerSafetyTests {
-    func testDefaultStrategyPausesAndWakeRestoresVerifiedMaintain() async {
-        let inhibitor = FakeSystemSleepInhibitor()
+    func testPauseStrategyStopsChargingAndWakeRestoresVerifiedMaintain() async {
         let (controller, backend, _, _) = makeSUT(
             charge: 67,
-            initialMode: .toppingUp(returnLimit: 80),
-            sleepInhibitor: inhibitor
+            initialMode: .toppingUp(returnLimit: 80)
         )
         backend.setOwnedLongRunningOperation(true)
 
-        await controller.prepareForSleep()
+        let prepared = await controller.prepareForSleep()
 
+        XCTAssertTrue(prepared)
         XCTAssertEqual(controller.mode, .sleepProtected(previous: .toppingUp(returnLimit: 80), charge: 67))
         XCTAssertEqual(controller.sleepProtectionState, .pausedForSleep(charge: 67))
-        XCTAssertTrue(backend.operations.contains("cancel-long"))
-        XCTAssertTrue(backend.operations.contains("disable-charging"))
-        let sleepOperations = await inhibitor.operations
-        XCTAssertEqual(sleepOperations, [])
+        XCTAssertTrue(backend.operations.contains("prepare-system-sleep"))
 
         await controller.reconcileAfterWake()
 
@@ -398,14 +194,305 @@ extension ChargeControllerSafetyTests {
             )
         )
 
-        await controller.prepareForSleep()
+        let prepared = await controller.prepareForSleep()
 
+        XCTAssertFalse(prepared)
         guard case .failed(_, _, .manualIntervention) = controller.mode else {
             return XCTFail("unverified charging state must fail closed")
         }
         guard case .unavailable = controller.sleepProtectionState else {
             return XCTFail("sleep protection failure must be visible")
         }
+    }
+
+    func testSleepPreparationFailsBeforeAcknowledgementReserveExpires() async {
+        let (controller, backend, _, _) = makeSUT(initialMode: .maintaining(limit: 80))
+        backend.setCancelLongRunningDelay(0.03, ignoringCancellation: true)
+        let deadline = DispatchTime.now().uptimeNanoseconds + 10_000_000
+
+        let prepared = await controller.prepareForSleep(
+            deadlineUptimeNanoseconds: deadline
+        )
+
+        XCTAssertFalse(prepared)
+        guard case .failed(_, _, .manualIntervention) = controller.mode else {
+            return XCTFail("expired preparation must fail closed")
+        }
+    }
+
+    func testPreparingDischargeForSleepReleasesItsSleepAssertionAfterVerification() async {
+        let assertionReleased = LockedFlag()
+        let (controller, _, _, _) = makeSUT(
+            initialMode: .discharging(target: 60, returnLimit: 80),
+            allowSleepHandler: { assertionReleased.setTrue() }
+        )
+
+        let prepared = await controller.prepareForSleep()
+
+        XCTAssertTrue(prepared)
+        XCTAssertTrue(assertionReleased.value)
+        XCTAssertEqual(
+            controller.mode,
+            .sleepProtected(previous: .discharging(target: 60, returnLimit: 80), charge: 80)
+        )
+    }
+
+    func testHeatBlockSurvivesSleepPreparationAndImmediateShutdown() async throws {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .heatBlocked(previous: previous)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+
+        let prepared = await controller.prepareForSleep()
+        XCTAssertTrue(prepared)
+        XCTAssertEqual(controller.mode, .heatBlocked(previous: previous))
+
+        try await controller.shutdown()
+
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+    }
+
+    func testConcurrentSleepRequestsShareOneSafetyTransition() async {
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .toppingUp(returnLimit: 80)
+        )
+        backend.setOwnedLongRunningOperation(true)
+        backend.setCancelLongRunningDelay(0.05, ignoringCancellation: true)
+
+        async let first = controller.prepareForSleep()
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        async let second = controller.prepareForSleep()
+        let results = await [first, second]
+
+        XCTAssertEqual(results, [true, true])
+        XCTAssertEqual(backend.operations.filter { $0 == "prepare-system-sleep" }.count, 1)
+    }
+
+    func testWakeWaitsForTimedOutSleepCleanupBeforeRestoringMaintain() async {
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .toppingUp(returnLimit: 80)
+        )
+        backend.setOwnedLongRunningOperation(true)
+        backend.setCancelLongRunningDelay(0.08, ignoringCancellation: true)
+
+        let sleepTask = Task { await controller.prepareForSleep() }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        await controller.reconcileAfterWake()
+        _ = await sleepTask.value
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        let operations = backend.operations
+        guard let disableIndex = operations.firstIndex(of: "prepare-system-sleep"),
+              let maintainIndex = operations.lastIndex(of: "maintain:80") else {
+            return XCTFail("sleep cleanup and wake restoration must both run")
+        }
+        XCTAssertLessThan(disableIndex, maintainIndex)
+    }
+
+    func testShutdownClaimsLifecycleBeforeWaitingForSleepCleanup() async throws {
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .toppingUp(returnLimit: 80)
+        )
+        backend.setCancelLongRunningDelay(0.08, ignoringCancellation: true)
+
+        let sleepTask = Task { await controller.prepareForSleep() }
+        let preparationStarted = await eventually {
+            backend.operations.contains("prepare-system-sleep")
+        }
+        XCTAssertTrue(preparationStarted)
+        let shutdownTask = Task { try await controller.shutdown() }
+        await Task.yield()
+
+        await controller.reconcileAfterWake()
+        do {
+            try await controller.shutdown()
+            XCTFail("duplicate shutdown must be rejected while cleanup is owned")
+        } catch {
+            // Expected: the first shutdown owns the lifecycle before its first await.
+        }
+
+        _ = await sleepTask.value
+        try await shutdownTask.value
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+    }
+
+    func testForcedSleepPendingDuringShutdownKeepsChargingDisabled() async throws {
+        let observer = FakeSystemPowerObserver()
+        observer.requiresChargingDisabledForSleepTransition = true
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .sleepProtected(previous: previous, charge: 70),
+            systemPowerObserver: observer
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+
+        let prepared = await controller.prepareForSleep()
+        XCTAssertTrue(prepared)
+
+        try await controller.shutdown()
+
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        XCTAssertFalse(observer.requiresChargingDisabledForSleepTransition)
+    }
+
+    func testDisabledSleepStrategyPreservesMaintainDuringIOKitNegotiationShutdown() async throws {
+        let observer = FakeSystemPowerObserver()
+        observer.requiresChargingDisabledForSleepTransition = true
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .maintaining(limit: 80),
+            sleepChargingStrategy: .disabled,
+            systemPowerObserver: observer
+        )
+
+        let prepared = await controller.prepareForSleep()
+        XCTAssertTrue(prepared)
+        try await controller.shutdown()
+
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+    }
+
+    func testRejectedDriftIsNotOverwrittenDuringIOKitNegotiationShutdown() async throws {
+        let observer = FakeSystemPowerObserver()
+        observer.requiresChargingDisabledForSleepTransition = true
+        let drift = ChargeMode.externalDrift(
+            expected: .maintaining(limit: 80),
+            observed: .maintaining(limit: 60)
+        )
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: drift,
+            systemPowerObserver: observer
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 660, target: 60)
+            )
+        )
+
+        let prepared = await controller.prepareForSleep()
+        XCTAssertFalse(prepared)
+        try await controller.shutdown()
+
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
+    func testExternalDriftRejectsVoluntarySleepWithoutMutatingHardware() async {
+        let drift = ChargeMode.externalDrift(
+            expected: .maintaining(limit: 80),
+            observed: .maintaining(limit: 60)
+        )
+        let (controller, backend, _, _) = makeSUT(initialMode: drift)
+
+        let prepared = await controller.prepareForSleep()
+
+        XCTAssertFalse(prepared)
+        XCTAssertEqual(controller.mode, drift)
+        XCTAssertFalse(backend.operations.contains("prepare-system-sleep"))
+
+        await controller.reconcileAfterWake()
+
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
+    func testWakeObservesNewTerminalDriftBeforeRestoringAnything() async {
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .maintaining(limit: 80),
+            sleepChargingStrategy: .disabled
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .enabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 600, target: 60)
+            )
+        )
+
+        await controller.reconcileAfterWake()
+
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(
+                expected: .maintaining(limit: 80),
+                observed: .maintaining(limit: 60)
+            )
+        )
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
+    func testWakeDoesNotRestoreMaintainWhenSleepProtectedTupleDrifted() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .sleepProtected(previous: previous, charge: 70)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .enabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 601, target: 60)
+            )
+        )
+
+        await controller.reconcileAfterWake()
+
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(
+                expected: .sleepProtected(previous: previous),
+                observed: .maintaining(limit: 60)
+            )
+        )
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
+    func testHotWakePreservesTerminalDriftBeforeApplyingHeatProtection() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 45,
+            initialMode: .sleepProtected(previous: previous, charge: 70)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 602, target: 60)
+            )
+        )
+
+        await controller.reconcileAfterWake()
+
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(
+                expected: .sleepProtected(previous: previous),
+                observed: .maintaining(limit: 60)
+            )
+        )
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
     }
 
     func testHotWakeNeverResumesInterruptedTopUp() async {
@@ -416,6 +503,14 @@ extension ChargeControllerSafetyTests {
             initialMode: .sleepProtected(previous: .toppingUp(returnLimit: 80), charge: 70)
         )
         backend.temperature = 45
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
 
         await controller.reconcileAfterWake()
 
@@ -429,53 +524,31 @@ extension ChargeControllerSafetyTests {
             sleepChargingStrategy: .disabled
         )
 
-        await controller.prepareForSleep()
+        let prepared = await controller.prepareForSleep()
 
+        XCTAssertTrue(prepared)
         XCTAssertEqual(controller.mode, .maintaining(limit: 80))
-        XCTAssertFalse(backend.operations.contains("disable-charging"))
+        XCTAssertFalse(backend.operations.contains("prepare-system-sleep"))
     }
 
-    func testFinishThenSleepAcquiresAndReleasesOnlyOwnedInhibition() async {
-        let inhibitor = FakeSystemSleepInhibitor()
+    func testObserverRegistrationFailureDegradesOnlySleepProtection() async throws {
+        let observer = FakeSystemPowerObserver()
+        observer.startError = BatteryError.unsupported("observer unavailable")
+        let batteryInfo = makeBatteryInfo(charge: 70)
         let (controller, _, _, _) = makeSUT(
-            charge: 60,
-            initialMode: .maintaining(limit: 80),
-            sleepChargingStrategy: .finishChargingThenSleep,
-            sleepInhibitor: inhibitor
+            batteryInfoOnRead: batteryInfo,
+            initialReadiness: .initializing,
+            initialMode: .idle,
+            systemPowerObserver: observer,
+            runsSystemPowerObservation: true
         )
 
-        controller.processBatteryInfo(makeBatteryInfo(charge: 60))
-        let acquired = await eventually {
-            controller.sleepProtectionState == .holdingAwake(limit: 80, ownership: .batteryGuard)
+        try await controller.initialize()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        guard case .unavailable(let message) = controller.sleepProtectionState else {
+            return XCTFail("observer failure must degrade only sleep protection")
         }
-        XCTAssertTrue(acquired)
-
-        controller.processBatteryInfo(makeBatteryInfo(charge: 80))
-        let released = await eventually { controller.sleepProtectionState == .ready }
-        XCTAssertTrue(released)
-        let operations = await inhibitor.operations
-        XCTAssertEqual(operations.filter { $0 == "release" }.count, 1)
-    }
-
-    func testExternalSleepDisabledIsNeverReleased() async {
-        let inhibitor = FakeSystemSleepInhibitor()
-        await inhibitor.setAcquireOwnership(.external)
-        let (controller, _, _, _) = makeSUT(
-            charge: 60,
-            initialMode: .maintaining(limit: 80),
-            sleepChargingStrategy: .finishChargingThenSleep,
-            sleepInhibitor: inhibitor
-        )
-
-        controller.processBatteryInfo(makeBatteryInfo(charge: 60))
-        let detectedExternalOwnership = await eventually {
-            controller.sleepProtectionState == .holdingAwake(limit: 80, ownership: .external)
-        }
-        XCTAssertTrue(detectedExternalOwnership)
-        controller.processBatteryInfo(makeBatteryInfo(charge: 80))
-        try? await Task.sleep(nanoseconds: 50_000_000)
-
-        let operations = await inhibitor.operations
-        XCTAssertFalse(operations.contains("release"))
+        XCTAssertTrue(message.contains("observer unavailable"))
     }
 }
