@@ -10,6 +10,9 @@ final class ChargeController: ObservableObject {
     static let shared = ChargeController(history: .shared, diagnostics: .shared)
     private static let defaultReconciliationInterval: TimeInterval = 60
     private static let minimumReconciliationInterval: TimeInterval = 1
+    private nonisolated static let normalSMCTemperatureInterval: TimeInterval = 15
+    private nonisolated static let elevatedSMCTemperatureInterval: TimeInterval = 5
+    private nonisolated static let elevatedTemperatureMargin = 5.0
 
     private struct HeatRestoreReblockedError: LocalizedError {
         let underlying: Error
@@ -775,15 +778,23 @@ final class ChargeController: ObservableObject {
         smcTemperatureTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sampleSMCTemperature() }
         }
-        sampleSMCTemperature()
+        smcTemperatureTimer?.tolerance = 1
+        sampleSMCTemperature(force: true)
     }
 
-    private func sampleSMCTemperature() {
+    private func sampleSMCTemperature(force: Bool = false) {
         guard readiness == .ready,
               !isShuttingDown,
               settings.heatProtectionEnabled,
               case .batteryGuard = settings.batteryControlOwnership,
               smcTemperatureSampleTask == nil else { return }
+        let maximumAge = Self.smcTemperatureSamplingInterval(
+            ioKitTemperature: monitor.batteryInfo?.temperature,
+            threshold: settings.heatProtectionThreshold
+        )
+        guard force || safetyTemperatureCache.recentValue(at: now(), maxAge: maximumAge) == nil else {
+            return
+        }
         smcTemperatureSampleGeneration &+= 1
         let generation = smcTemperatureSampleGeneration
         let backend = self.backend
@@ -827,6 +838,19 @@ final class ChargeController: ObservableObject {
                 }
             }
         }
+    }
+
+    nonisolated static func smcTemperatureSamplingInterval(
+        ioKitTemperature: Double?,
+        threshold: Double
+    ) -> TimeInterval {
+        guard let ioKitTemperature = ioKitTemperature.flatMap(BatteryMonitor.validatedTemperature),
+              threshold.isFinite else {
+            return elevatedSMCTemperatureInterval
+        }
+        return ioKitTemperature >= threshold - elevatedTemperatureMargin
+            ? elevatedSMCTemperatureInterval
+            : normalSMCTemperatureInterval
     }
 
     private func cancelSMCTemperatureSample(clearCache: Bool) {
@@ -1051,7 +1075,7 @@ final class ChargeController: ObservableObject {
                 self.mode = .heatBlocked(previous: previous)
                 if self.sampleAfterHeatEnableGeneration == self.smcTemperatureSampleGeneration {
                     self.sampleAfterHeatEnableGeneration = nil
-                    self.sampleSMCTemperature()
+                    self.sampleSMCTemperature(force: true)
                 }
             },
             onFailure: { [weak self] error in
@@ -1187,7 +1211,7 @@ final class ChargeController: ObservableObject {
         settings.heatProtectionEnabled = enabled
         if enabled {
             if let info = monitor.batteryInfo {
-                sampleSMCTemperature()
+                sampleSMCTemperature(force: true)
                 evaluateHeatProtection(using: info)
             } else {
                 sampleAfterHeatEnableGeneration = smcTemperatureSampleGeneration
