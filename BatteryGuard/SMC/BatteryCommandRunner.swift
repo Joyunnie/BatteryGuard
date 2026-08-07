@@ -659,21 +659,21 @@ actor BatteryCommandRunner {
         let termDeadline = min(deadline, monotonicDeadline(nanoseconds: termBudget))
         while processGroupExists(child.pid), DispatchTime.now().uptimeNanoseconds < termDeadline {
             if waitStatus == nil { waitStatus = pollWaitStatus(pid: child.pid) }
-            await Self.pollDelay()
+            await Self.teardownPollDelay()
         }
 
         if processGroupExists(child.pid) {
             try signalProcessGroup(child, signal: SIGKILL)
             while processGroupExists(child.pid), DispatchTime.now().uptimeNanoseconds < deadline {
                 if waitStatus == nil { waitStatus = pollWaitStatus(pid: child.pid) }
-                await Self.pollDelay()
+                await Self.teardownPollDelay()
             }
         }
 
         if waitStatus == nil {
             while waitStatus == nil, DispatchTime.now().uptimeNanoseconds < deadline {
                 waitStatus = pollWaitStatus(pid: child.pid)
-                if waitStatus == nil { await Self.pollDelay() }
+                if waitStatus == nil { await Self.teardownPollDelay() }
             }
         }
 
@@ -949,6 +949,14 @@ actor BatteryCommandRunner {
     }
 
     private nonisolated static func pollDelay() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(20)) {
+                continuation.resume()
+            }
+        }
+    }
+
+    private nonisolated static func teardownPollDelay() async {
         await withCheckedContinuation { continuation in
             DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(2)) {
                 continuation.resume()
