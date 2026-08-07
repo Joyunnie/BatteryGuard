@@ -646,10 +646,13 @@ actor SMCKit: ChargeBackend {
 
     static func classifyMaintainWorkers(
         pidFilePID: Int32?,
-        processTable: String,
+        pgrepOutput: String,
         batteryPath: String
     ) -> MaintainWorkerStatus {
-        let workers = parseMaintainWorkerProcesses(processTable: processTable, batteryPath: batteryPath)
+        let workers = parsePgrepMaintainWorkerProcesses(
+            pgrepOutput: pgrepOutput,
+            batteryPath: batteryPath
+        )
         return classifyMaintainWorkers(pidFilePID: pidFilePID, workers: workers)
     }
 
@@ -665,24 +668,24 @@ actor SMCKit: ChargeBackend {
         return .running(pid: worker.pid, target: worker.target)
     }
 
-    private static func parseMaintainWorkerProcesses(
-        processTable: String,
+    private static func parsePgrepMaintainWorkerProcesses(
+        pgrepOutput: String,
         batteryPath: String
     ) -> [MaintainWorkerProcess] {
-        processTable.split(whereSeparator: \Character.isNewline).compactMap { line in
-            let fields = line.split(maxSplits: 2, whereSeparator: { $0.isWhitespace })
-            guard fields.count == 3,
+        pgrepOutput.split(whereSeparator: \Character.isNewline).compactMap { line in
+            let fields = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 2,
                   let pid = Int32(fields[0]),
                   pid > 1,
                   let parsed = Self.parseExactMaintainCommand(
-                    String(fields[2]),
+                    String(fields[1]),
                     batteryPath: batteryPath
                   ) else {
                 return nil
             }
             return MaintainWorkerProcess(
                 pid: pid,
-                command: String(fields[2]),
+                command: String(fields[1]),
                 target: parsed.target,
                 identity: nil
             )
@@ -802,8 +805,8 @@ actor SMCKit: ChargeBackend {
         let escapedPath = NSRegularExpression.escapedPattern(for: batteryPath)
         let candidates = try await runProcess(
             executable: "/usr/bin/pgrep",
-            arguments: ["-f", escapedPath],
-            label: "locate battery CLI processes",
+            arguments: ["-fl", escapedPath],
+            label: "inspect battery CLI processes",
             timeout: try boundedSleepPreparationTimeout(
                 maximum: statusCommandTimeout,
                 deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
@@ -812,39 +815,18 @@ actor SMCKit: ChargeBackend {
         )
         guard candidates.exitCode == 0 else { return [] }
 
-        let candidatePIDs = candidates.stdout
-            .split(whereSeparator: \Character.isNewline)
-            .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            .filter { $0 > 1 && $0 != getpid() }
-        guard candidatePIDs.count <= 32 else {
+        let candidateLines = candidates.stdout.split(whereSeparator: \Character.isNewline)
+        guard candidateLines.count <= 32 else {
             throw BatteryError.commandFailed(
                 "inspect battery CLI processes",
                 -1,
-                "refusing unbounded process inspection: \(candidatePIDs.count) candidates"
+                "refusing unbounded process inspection: \(candidateLines.count) candidates"
             )
         }
-        guard !candidatePIDs.isEmpty else { return [] }
-
-        let inspection = try await runProcess(
-            executable: "/bin/ps",
-            arguments: [
-                "-p",
-                candidatePIDs.map(String.init).joined(separator: ","),
-                "-o",
-                "pid=,pgid=,command="
-            ],
-            label: "inspect battery CLI processes",
-            timeout: try boundedSleepPreparationTimeout(
-                maximum: statusCommandTimeout,
-                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-            ),
-            allowedExitCodes: [0, 1]
-        )
-        guard inspection.exitCode == 0 else { return [] }
-        return try Self.parseMaintainWorkerProcesses(
-            processTable: inspection.stdout,
+        return try Self.parsePgrepMaintainWorkerProcesses(
+            pgrepOutput: candidates.stdout,
             batteryPath: batteryPath
-        ).compactMap { worker in
+        ).filter { $0.pid != getpid() }.compactMap { worker in
             guard let identity = try currentIdentity(for: worker.pid) else { return nil }
             return MaintainWorkerProcess(
                 pid: worker.pid,
