@@ -43,7 +43,6 @@ final class BatteryMonitor: ObservableObject {
     var usesMonitoringInfrastructure: Bool { runsMonitoringInfrastructure }
     private var timer: Timer?
     private var runLoopSource: CFRunLoopSource?
-    private var hasLoggedDictOnce = false
 
     init(
         batteryInfoProvider: (() -> BatteryInfo?)? = nil,
@@ -89,31 +88,6 @@ final class BatteryMonitor: ObservableObject {
               let dict = props?.takeRetainedValue() as? [String: Any] else {
             return nil
         }
-
-        // 초회 기동 시 전체 딕셔너리 덤프 (Debug 전용)
-        #if DEBUG
-        if !hasLoggedDictOnce {
-            hasLoggedDictOnce = true
-            print("[BatteryMonitor] ── AppleSmartBattery dictionary dump ──")
-            let interestingKeys = [
-                "CurrentCapacity", "MaxCapacity", "AppleRawMaxCapacity",
-                "DesignCapacity", "IsCharging", "ExternalConnected",
-                "ExternalChargeCapable", "AppleRawExternalConnected",
-                "Temperature", "Amperage", "InstantAmperage", "Voltage",
-                "CycleCount", "BatteryInstalled", "Serial",
-                "AvgTimeToFull", "AvgTimeToEmpty", "NominalChargeCapacity",
-                "AppleRawCurrentCapacity", "FullyCharged", "AtCriticalLevel"
-            ]
-            for key in interestingKeys {
-                if let val = dict[key] {
-                    print("  \(key) = \(val)  (type: \(type(of: val)))")
-                } else {
-                    print("  \(key) = <missing>")
-                }
-            }
-            print("[BatteryMonitor] ── end dump ──")
-        }
-        #endif
 
         return Self.parseBatteryInfo(dict)
     }

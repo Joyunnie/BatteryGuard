@@ -7,6 +7,9 @@ struct SettingsView: View {
     @EnvironmentObject var settings: UserSettings
     @EnvironmentObject var controller: ChargeController
     @State private var diagnosticLogError: String?
+    @State private var batterySettingsOpenError: String?
+    @State private var showsDisableControlConfirmation = false
+    @State private var showsEnableControlConfirmation = false
 
     var body: some View {
         TabView {
@@ -43,6 +46,7 @@ struct SettingsView: View {
                         controller.isCommandPending ||
                         controller.isDischarging ||
                         controller.isTopUpActive ||
+                        controller.isBatteryControlDisabled ||
                         controller.hasExternalControlDrift ||
                         controller.isHeatProtectionBlockingControls
                     )
@@ -52,6 +56,72 @@ struct SettingsView: View {
                 }
 
                 ExternalDriftStatusView(controller: controller)
+            }
+
+            Section("충전 제어 소유권") {
+                if controller.isBatteryControlDisabled {
+                    Label("macOS 제어 / BatteryGuard 모니터링 전용", systemImage: "eye")
+                        .foregroundColor(.secondary)
+                    if controller.isReleasedControlDrift {
+                        Button("제어 해제 다시 시도") {
+                            controller.disableBatteryGuardControl()
+                        }
+                        .disabled(!controller.isReady || controller.isCommandPending)
+                    } else {
+                        Button("BatteryGuard 제어 켜기") {
+                            showsEnableControlConfirmation = true
+                        }
+                        .disabled(!controller.isReady || controller.isCommandPending)
+                    }
+                } else {
+                    Label("BatteryGuard가 충전 제어 중", systemImage: "checkmark.shield")
+                    Button("BatteryGuard 제어 끄기", role: .destructive) {
+                        showsDisableControlConfirmation = true
+                    }
+                    .disabled(!controller.isReady || controller.isCommandPending || controller.hasExternalControlDrift)
+                }
+
+                Text("BatteryGuard의 Maintain, Top Up, Discharge, Heat Protection과 macOS Charge Limit를 동시에 사용하지 마세요. 단순 제한만 필요하면 BatteryGuard 제어를 끈 뒤 macOS 배터리 설정에서 Charge Limit를 사용하세요. macOS Charge Limit는 Tahoe 26.4 이상 Apple Silicon Mac에서 제공됩니다.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+
+                Button("macOS 배터리 설정 열기") {
+                    guard let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension"),
+                          NSWorkspace.shared.open(url) else {
+                        batterySettingsOpenError = "macOS 배터리 설정을 열지 못했습니다. 시스템 설정에서 배터리를 직접 여세요."
+                        return
+                    }
+                    batterySettingsOpenError = nil
+                }
+                if let batterySettingsOpenError {
+                    Text(batterySettingsOpenError)
+                        .font(.system(size: 11))
+                        .foregroundColor(.red)
+                }
+            }
+            .confirmationDialog(
+                "BatteryGuard 충전 제어를 끌까요?",
+                isPresented: $showsDisableControlConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("제어 끄기", role: .destructive) {
+                    controller.disableBatteryGuardControl()
+                }
+                Button("취소", role: .cancel) {}
+            } message: {
+                Text("실행 중인 Top Up/Discharge와 Maintain을 중지하고 기본 충전을 복원합니다. Heat Protection과 MagSafe LED 제어도 꺼집니다.")
+            }
+            .confirmationDialog(
+                "BatteryGuard 충전 제어를 켤까요?",
+                isPresented: $showsEnableControlConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("제어 켜기") {
+                    controller.enableBatteryGuardControl()
+                }
+                Button("취소", role: .cancel) {}
+            } message: {
+                Text("먼저 macOS Battery 설정에서 Charge Limit를 꺼야 두 제어 시스템이 충돌하지 않습니다.")
             }
 
             Section("정보") {
@@ -72,6 +142,7 @@ struct SettingsView: View {
                         set: { controller.setHeatProtectionEnabled($0) }
                     )
                 )
+                .disabled(controller.isBatteryControlDisabled)
 
                 if settings.heatProtectionEnabled {
                     VStack(alignment: .leading, spacing: 6) {
@@ -134,6 +205,7 @@ struct SettingsView: View {
                         set: { controller.setLEDControlEnabled($0) }
                     )
                 )
+                .disabled(controller.isBatteryControlDisabled)
                 Text("""
                 초록: Limit 도달 / 주황: 충전 중 / 점멸: 방전 중
                 MagSafe 3 모델에서만 작동합니다.

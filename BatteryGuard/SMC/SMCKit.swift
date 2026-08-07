@@ -124,6 +124,18 @@ struct BatteryControlStatus: Equatable, Sendable {
             isDischarging == false &&
             maintainWorker.isStopped
     }
+
+    var isVerifiedControlReleased: Bool {
+        charging == .enabled &&
+            isDischarging == false &&
+            maintainWorker.isStopped
+    }
+
+    var isCompatibleWithReleasedControl: Bool {
+        charging != .unknown &&
+            isDischarging == false &&
+            maintainWorker.isStopped
+    }
 }
 
 private extension BatteryChargingStatus {
@@ -155,6 +167,7 @@ protocol ChargeBackend: AnyObject, Sendable {
     func open() async throws
     func readControlStatus() async throws -> BatteryControlStatus
     func applyMaintain(level: Int) async throws
+    func releaseBatteryGuardControl() async throws
     func disableCharging() async throws
     func startDischarge(to level: Int) async throws
     func startTopUp(to level: Int) async throws
@@ -395,6 +408,31 @@ actor SMCKit: ChargeBackend {
             )
         }
         await recordVerifiedOperation("maintain \(level)", before: before, after: status)
+    }
+
+    func releaseBatteryGuardControl() async throws {
+        let operationID = DiagnosticContext.operationID ?? UUID()
+        try await DiagnosticContext.$operationID.withValue(operationID) {
+            try await withGate(controlGate) {
+                let before = await readPreOperationStatus()
+                _ = try await runner.cancelLongRunning()
+                try await terminateMaintainWorkersUnlocked()
+                _ = try await batteryCommand(["maintain", "stop"])
+                let status = try await readControlStatusUnlocked()
+                guard status.isVerifiedControlReleased else {
+                    throw BatteryError.commandFailed(
+                        "release BatteryGuard control",
+                        -1,
+                        "status_csv did not confirm released control: \(status.diagnosticDescription)"
+                    )
+                }
+                await recordVerifiedOperation(
+                    "release BatteryGuard control",
+                    before: before,
+                    after: status
+                )
+            }
+        }
     }
 
     func disableCharging() async throws {
@@ -864,7 +902,7 @@ actor SMCKit: ChargeBackend {
     private var batteryEnvironment: [String: String] {
         let batteryDirectory = URL(fileURLWithPath: batteryPath).deletingLastPathComponent().path
         return [
-            "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\(batteryDirectory)",
+            "PATH": "\(batteryDirectory):/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
             "USER": NSUserName()
         ]

@@ -739,7 +739,7 @@ actor BatteryCommandRunner {
 
     private func scheduleLongRunningTimeout(commandID: UUID, timeout: TimeInterval) {
         longRunningTimeoutTask?.cancel()
-        let nanoseconds = timeout > 0 ? UInt64(timeout * 1_000_000_000) : 0
+        let nanoseconds = Self.nanoseconds(from: timeout)
         longRunningTimeoutTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: nanoseconds)
             guard !Task.isCancelled else { return }
@@ -850,8 +850,16 @@ actor BatteryCommandRunner {
     }
 
     private func monotonicDeadline(after seconds: TimeInterval) -> UInt64 {
-        let nanoseconds = seconds > 0 ? UInt64(seconds * 1_000_000_000) : 0
+        let nanoseconds = Self.nanoseconds(from: seconds)
         return monotonicDeadline(nanoseconds: nanoseconds)
+    }
+
+    private nonisolated static func nanoseconds(from seconds: TimeInterval) -> UInt64 {
+        guard !seconds.isNaN, seconds > 0 else { return 0 }
+        guard seconds.isFinite else { return UInt64.max }
+        let scaled = seconds * 1_000_000_000
+        guard scaled < Double(UInt64.max) else { return UInt64.max }
+        return UInt64(scaled)
     }
 
     private func monotonicDeadline(nanoseconds: UInt64) -> UInt64 {
