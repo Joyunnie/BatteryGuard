@@ -93,6 +93,22 @@ enum ReconciledChargeExpectation: Equatable, Sendable {
         case .controlReleased: return "BatteryGuard 제어 끔"
         }
     }
+
+    var reconciledMode: ChargeMode {
+        switch self {
+        case .controlReleasing:
+            return .externalDrift(
+                expected: self,
+                observed: .unavailable("BatteryGuard control release is still pending")
+            )
+        case .controlReleased(let lastLimit): return .controlDisabled(lastLimit: lastLimit)
+        case .maintaining(let limit): return .maintaining(limit: limit)
+        case .toppingUp(let returnLimit): return .toppingUp(returnLimit: returnLimit)
+        case .discharging(let target, let returnLimit):
+            return .discharging(target: target, returnLimit: returnLimit)
+        case .chargingDisabled(let previous): return .heatBlocked(previous: previous)
+        }
+    }
 }
 
 enum ChargeControllerReadiness: Equatable {
