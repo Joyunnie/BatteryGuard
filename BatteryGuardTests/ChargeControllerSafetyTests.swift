@@ -254,6 +254,58 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertTrue(backend.operations.contains("disable-charging"))
     }
 
+    func testDisablingHeatDuringEntryPreemptsStaleChargingBlock() async {
+        let (controller, backend, monitor, settings) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 80
+        )
+        backend.setCancelLongRunningDelay(0.3, ignoringCancellation: true)
+
+        let hotInfo = makeBatteryInfo(temperature: 45)
+        monitor.batteryInfo = hotInfo
+        controller.processBatteryInfo(hotInfo)
+        let entryStarted = await eventually { backend.operations.contains("cancel-long") }
+        XCTAssertTrue(entryStarted)
+        monitor.batteryInfo = nil
+
+        controller.setHeatProtectionEnabled(false)
+        let restored = await eventually {
+            controller.mode == .maintaining(limit: 80) && !controller.isCommandPending
+        }
+        XCTAssertTrue(restored)
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertFalse(settings.heatProtectionEnabled)
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+    }
+
+    func testHeatPreemptionStopsStaleTopUpCancellationBeforeMaintain() async {
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 80,
+            initialMode: .toppingUp(returnLimit: 80)
+        )
+        backend.setCancelLongRunningDelay(0.3, ignoringCancellation: true)
+
+        controller.cancelTopUp()
+        let stopStarted = await eventually { backend.operations.contains("cancel-long") }
+        XCTAssertTrue(stopStarted)
+
+        let hotInfo = makeBatteryInfo(temperature: 45)
+        monitor.batteryInfo = hotInfo
+        controller.processBatteryInfo(hotInfo)
+        let blocked = await eventually {
+            controller.heatProtectionTriggered && !controller.isCommandPending
+        }
+        XCTAssertTrue(blocked)
+
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+    }
+
     func testHeatProtectionRestoresRecordedModeOnlyAfterSafeTemperature() async {
         let (controller, backend, monitor, _) = makeSUT(
             heatProtectionEnabled: true,
@@ -303,6 +355,42 @@ final class ChargeControllerSafetyTests: XCTestCase {
             controller.heatProtectionTriggered && !controller.isCommandPending
         }
         XCTAssertTrue(reblocked)
+        XCTAssertGreaterThanOrEqual(
+            backend.operations.filter { $0 == "disable-charging" }.count,
+            2
+        )
+    }
+
+    func testPreemptedTemperaturePreflightCannotRestoreMaintainAfterReblock() async {
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 45,
+            charge: 80
+        )
+        controller.processBatteryInfo(makeBatteryInfo(temperature: 45))
+        let initiallyProtected = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(initiallyProtected)
+
+        backend.enqueueTemperatures([37])
+        backend.enqueueTemperatureReadDelays([0.3], ignoringCancellation: true)
+        let coolInfo = makeBatteryInfo(temperature: 37)
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+        let preflightStarted = await eventually {
+            backend.operations.contains("read-temperature")
+        }
+        XCTAssertTrue(preflightStarted)
+
+        let hotAgain = makeBatteryInfo(temperature: 45)
+        monitor.batteryInfo = hotAgain
+        controller.processBatteryInfo(hotAgain)
+        let reblocked = await eventually {
+            controller.heatProtectionTriggered && !controller.isCommandPending
+        }
+        XCTAssertTrue(reblocked)
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
         XCTAssertGreaterThanOrEqual(
             backend.operations.filter { $0 == "disable-charging" }.count,
             2
@@ -1073,6 +1161,28 @@ final class ChargeControllerSafetyTests: XCTestCase {
         XCTAssertFalse(controller.hasExternalControlDrift)
     }
 
+    func testShutdownInvalidatesWakeTemperatureReadBeforeHardwareMutation() async throws {
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 80
+        )
+        backend.enqueueTemperatures([30])
+        backend.enqueueTemperatureReadDelays([0.3], ignoringCancellation: true)
+
+        let wake = Task { await controller.reconcileAfterWake() }
+        let temperatureReadStarted = await eventually {
+            backend.operations.contains("read-temperature")
+        }
+        XCTAssertTrue(temperatureReadStarted)
+
+        try await controller.shutdown()
+        await wake.value
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
     func testExternalActiveOperationRejectsShutdownWithoutDisablingController() async throws {
         let (controller, backend, _, _) = makeSUT()
         backend.setControlStatus(
@@ -1453,6 +1563,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         try await controller.initialize()
         monitor.batteryInfo = nil
         controller.setHeatProtectionEnabled(false)
+        backend.temperature = nil
         clock.advance(by: 16)
 
         controller.setHeatProtectionEnabled(true)
@@ -1708,5 +1819,179 @@ final class ChargeControllerSafetyTests: XCTestCase {
             maintainCount
         )
         XCTAssertFalse(backend.operations.contains("release-control"))
+    }
+
+    func testDelayedSMCTemperatureSampleCannotMutateStateAfterShutdown() async throws {
+        let backend = FakeChargeBackend()
+        backend.enqueueTemperatures([30, 45])
+        backend.enqueueTemperatureReadDelays([0, 0.3], ignoringCancellation: true)
+        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let infoSource = TestBatteryInfoSource(info)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { infoSource.read() },
+            runsMonitoringInfrastructure: false
+        )
+        monitor.batteryInfo = info
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.heatProtectionEnabled = true
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings
+        )
+
+        try await controller.initialize()
+        let delayedSampleStarted = await eventually {
+            backend.operations.filter { $0 == "read-temperature" }.count == 2
+        }
+        XCTAssertTrue(delayedSampleStarted)
+        infoSource.set(nil)
+        monitor.batteryInfo = nil
+
+        try await controller.shutdown()
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+    }
+
+    func testDelayedPreWakeSMCTemperatureSampleCannotOverrideWakeResult() async throws {
+        let backend = FakeChargeBackend()
+        backend.enqueueTemperatures([30, 45, 30])
+        backend.enqueueTemperatureReadDelays([0, 0.3, 0], ignoringCancellation: true)
+        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let infoSource = TestBatteryInfoSource(info)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { infoSource.read() },
+            runsMonitoringInfrastructure: false
+        )
+        monitor.batteryInfo = info
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.heatProtectionEnabled = true
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings
+        )
+
+        try await controller.initialize()
+        let delayedSampleStarted = await eventually {
+            backend.operations.filter { $0 == "read-temperature" }.count == 2
+        }
+        XCTAssertTrue(delayedSampleStarted)
+        infoSource.set(nil)
+        monitor.batteryInfo = nil
+
+        await controller.reconcileAfterWake()
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+        try await controller.shutdown()
+    }
+
+    func testHeatToggleIgnoresDelayedSampleFromPreviousEnableGeneration() async throws {
+        let backend = FakeChargeBackend()
+        backend.enqueueTemperatures([30, 45, 30])
+        backend.enqueueTemperatureReadDelays([0, 0.3, 0], ignoringCancellation: true)
+        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let infoSource = TestBatteryInfoSource(info)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { infoSource.read() },
+            runsMonitoringInfrastructure: false
+        )
+        monitor.batteryInfo = info
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.heatProtectionEnabled = true
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings
+        )
+
+        try await controller.initialize()
+        let delayedSampleStarted = await eventually {
+            backend.operations.filter { $0 == "read-temperature" }.count == 2
+        }
+        XCTAssertTrue(delayedSampleStarted)
+        infoSource.set(nil)
+        monitor.batteryInfo = nil
+
+        controller.setHeatProtectionEnabled(false)
+        controller.setHeatProtectionEnabled(true)
+        let replacementSampleCompleted = await eventually {
+            backend.operations.filter { $0 == "read-temperature" }.count >= 3
+                && controller.mode == .maintaining(limit: 80)
+        }
+        XCTAssertTrue(replacementSampleCompleted)
+        let operationsAfterReplacement = backend.operations
+        let chargingWasBlockedAt = try XCTUnwrap(
+            operationsAfterReplacement.firstIndex(of: "disable-charging")
+        )
+        let replacementSampleStartedAt = try XCTUnwrap(
+            operationsAfterReplacement.lastIndex(of: "read-temperature")
+        )
+        XCTAssertLessThan(chargingWasBlockedAt, replacementSampleStartedAt)
+        let disableCount = backend.operations.filter { $0 == "disable-charging" }.count
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertEqual(
+            backend.operations.filter { $0 == "disable-charging" }.count,
+            disableCount
+        )
+        try await controller.shutdown()
+    }
+
+    func testControlReleaseInvalidatesDelayedSMCTemperatureSample() async throws {
+        let backend = FakeChargeBackend()
+        backend.enqueueTemperatures([30, 45])
+        backend.enqueueTemperatureReadDelays([0, 0.3], ignoringCancellation: true)
+        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let infoSource = TestBatteryInfoSource(info)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { infoSource.read() },
+            runsMonitoringInfrastructure: false
+        )
+        monitor.batteryInfo = info
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.heatProtectionEnabled = true
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings
+        )
+
+        try await controller.initialize()
+        let delayedSampleStarted = await eventually {
+            backend.operations.filter { $0 == "read-temperature" }.count == 2
+        }
+        XCTAssertTrue(delayedSampleStarted)
+        infoSource.set(nil)
+        monitor.batteryInfo = nil
+
+        controller.disableBatteryGuardControl()
+        let released = await eventually {
+            controller.mode == .controlDisabled(lastLimit: 80)
+        }
+        XCTAssertTrue(released)
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertEqual(settings.batteryControlOwnership, .system(lastLimit: 80))
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+        try await controller.shutdown()
     }
 }

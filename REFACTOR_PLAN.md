@@ -283,14 +283,14 @@ PR #9 merge
     -> PR #10 base를 main으로 변경하고 diff/검증 후 merge
         -> PR #11 base를 main으로 변경하고 diff/검증 후 merge
             -> main에서 strict tests + Release + analyze
-                -> PR #12 SMC sample task lifetime
+                -> PR #12 SMC sample task lifetime [구현·혹독 리뷰 보완 완료, merge 대기]
                     -> PR #13 test topology cleanup
                         -> [사용자 승인 시] 영향 범위만 수동 hardware 재검증
 ```
 
-1. **Stacked PR 병합:** PR #9를 먼저 병합한다. 그 뒤 PR #10의 base를 `main`으로 바꾸고 PR #9 변경이 중복되지 않는지 확인한 후 병합한다. 같은 방식으로 PR #11의 base를 `main`으로 바꾸고 병합한다. merge commit을 임의로 재작성하거나 force-push하지 않는다.
-2. **병합 후 자동 gate:** 갱신된 `main`에서 전체 170개 strict-concurrency tests, Release build와 Debug analyze를 다시 실행한다. 이 단계에서 실패하면 새 리팩터링을 시작하지 않고 최초 실패 PR을 추적한다.
-3. **PR #12 — SMC temperature sampling task lifetime:** `isSamplingSMCTemperature` Boolean 대신 controller가 sample task와 generation을 소유한다. shutdown, failed initialization, sleep/wake와 Heat Protection disable/re-enable에서 오래된 sample을 취소하고, 모든 await 뒤 generation·readiness·ownership을 다시 확인한 경우에만 cache나 mode를 변경한다. 지연된 sample이 shutdown/wake/new intent 뒤 상태를 바꾸지 못하는 회귀 테스트를 같은 PR에 넣는다.
+1. **Stacked PR 병합 `[완료]`:** PR #9를 먼저 병합했다. 그 뒤 PR #10과 PR #11의 base를 각각 `main`으로 바꾸고 고유 diff를 확인한 후 순서대로 병합했다. merge commit을 재작성하거나 force-push하지 않았다.
+2. **병합 후 자동 gate `[완료]`:** 갱신된 `main`에서 전체 170개 strict-concurrency tests, Release build와 Debug analyze를 다시 실행해 통과했다.
+3. **PR #12 — SMC temperature sampling task lifetime `[구현·혹독 리뷰 보완 완료, merge 대기]`:** `isSamplingSMCTemperature` Boolean 대신 controller가 sample task와 generation을 소유한다. shutdown, failed initialization, sleep/wake와 Heat Protection disable/re-enable에서 오래된 sample을 취소하고, 모든 await 뒤 generation·readiness·ownership을 다시 확인한 경우에만 cache나 mode를 변경한다. 지연된 sample이 shutdown/wake/new intent/control release 뒤 상태를 바꾸지 못하는 회귀 테스트를 같은 PR에 넣었다.
 4. **PR #13 — test topology cleanup:** production 동작을 바꾸지 않고 `BatteryGuardTests.swift`와 `ChargeControllerSafetyTests.swift`를 기존 subsystem 경계별 파일로 나눈다. test target membership, test count와 assertion을 보존하며 helper 중복만 제거한다. PR #12가 controller safety tests를 추가하므로 충돌을 피하기 위해 그 뒤에 진행한다.
 5. **승인 기반 수동 검증:** PR #12가 실제 온도 sampling lifecycle을 변경하므로 자동 gate 통과 뒤 Heat enable/disable, sleep/wake와 최종 Maintain 복원을 실제 Mac에서 다시 확인할 가치가 있다. 사용자의 명시적 승인 없이는 실행하지 않는다. 검증만 통과하면 별도 code PR을 만들지 않고 기록만 남기며, 결함이 발견된 경우에만 원인별 독립 bug-fix PR을 연다.
 6. **종료 조건:** PR #13 뒤에는 구체적인 안전 결함, 재현 가능한 버그 또는 새 독립 테스트 경계가 없으면 추가 controller 분리를 중단한다.
@@ -330,11 +330,21 @@ silent failure이면서 테스트와 오류 처리가 모두 없는 새 경로�
 
 #### Implementation Tasks
 
-- [ ] **T1 (P1)** — PR #9 → #10 → #11을 순서대로 병합하고 각 base 변경 뒤 고유 diff를 확인한다.
-- [ ] **T2 (P1)** — 갱신된 `main`에서 strict tests, Release build와 Debug analyze를 실행한다.
-- [ ] **T3 (P2)** — PR #12에서 SMC sample task를 generation 기반으로 소유·취소하고 stale completion 테스트를 추가한다.
+- [x] **T1 (P1)** — PR #9 → #10 → #11을 순서대로 병합하고 각 base 변경 뒤 고유 diff를 확인한다.
+- [x] **T2 (P1)** — 갱신된 `main`에서 strict tests, Release build와 Debug analyze를 실행한다.
+- [x] **T3 (P2)** — PR #12에서 SMC sample task를 generation 기반으로 소유·취소하고 stale completion 테스트를 추가한다.
 - [ ] **T4 (P3)** — PR #13에서 두 대형 테스트 파일을 subsystem별로 물리 분리하고 test count를 보존한다.
 - [ ] **T5 (approval-gated)** — PR #12 영향 범위의 Heat/sleep-wake/Maintain 수동 검증을 수행하고 최종 복원 상태를 기록한다.
+
+### 0.21 PR #12 SMC sample task lifetime 결과 (2026-08-07)
+
+- background SMC read를 controller-owned `Task`와 generation으로 교체했다. completion은 generation, cancellation, readiness, shutdown, Heat intent와 durable battery-control ownership을 모두 다시 확인한 뒤에만 temperature cache나 mode를 변경한다.
+- failed initialization, shutdown, sleep/wake, Heat disable/re-enable와 control release가 sample task를 취소하고 generation을 무효화한다. 취소를 무시하는 fake read로 shutdown, wake, Heat re-enable와 ownership release 뒤 stale completion을 검증한다.
+- 혹독 리뷰에서 batteryInfo가 없는 Heat re-enable이 fresh sample을 기다리는 동안 실제 charging-off를 늦추는 fail-open 회귀를 발견했다. 먼저 verified Heat block을 완료하고 해당 enable generation에 한해서만 fresh sample을 시작하도록 수정했다. 일반 Heat transition에는 추가 read를 만들지 않는다.
+- PR #2~#13 누적 혹독 리뷰에서 foreground temperature preflight와 long-running 취소가 cancellation을 무시하고 늦게 반환할 때 최신 Heat/shutdown 전이 뒤 stale hardware mutation을 실행할 수 있는 P1 결함을 발견했다. 모든 관련 await 경계에서 cancellation과 operation generation을 다시 검증하고, Heat 전환 중 기능 해제는 진행 중 전이를 선점하며, 선점된 Top Up/Discharge 정리는 Maintain을 적용하지 못하게 했다.
+- strict-concurrency complete와 warnings-as-errors에서 전체 178개 테스트, Release build와 Debug analyze가 통과했다. 실제 battery/SMC 명령은 실행하지 않았다.
+
+PR #12의 남은 절차는 누적 리뷰 수정 commit/push와 PR #13 재적층 뒤 순차 merge다. PR #13은 production diff 없이 두 대형 테스트 파일을 subsystem 경계로 나눈다.
 
 ## 1. 프로젝트 전제
 
