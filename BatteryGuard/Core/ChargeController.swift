@@ -166,6 +166,7 @@ final class ChargeController: ObservableObject {
     private var lastTemperature: Double?
     private var smcTemperatureSampleGeneration: UInt64 = 0
     private var smcTemperatureSampleTask: Task<Void, Never>?
+    private var sampleAfterHeatEnableGeneration: UInt64?
     private var heatProtectionRetryAfter: Date?
     private var ledIntent: MagSafeLEDIntent?
     private var ledGeneration: UInt64 = 0
@@ -730,6 +731,7 @@ final class ChargeController: ObservableObject {
         smcTemperatureSampleGeneration &+= 1
         smcTemperatureSampleTask?.cancel()
         smcTemperatureSampleTask = nil
+        sampleAfterHeatEnableGeneration = nil
         if clearCache {
             safetyTemperatureCache.clear()
             lastTemperature = nil
@@ -886,9 +888,14 @@ final class ChargeController: ObservableObject {
                 self.heatProtectionRetryAfter = nil
                 self.monitor.allowSleep()
                 self.mode = .heatBlocked(previous: previous)
+                if self.sampleAfterHeatEnableGeneration == self.smcTemperatureSampleGeneration {
+                    self.sampleAfterHeatEnableGeneration = nil
+                    self.sampleSMCTemperature()
+                }
             },
             onFailure: { [weak self] error in
                 guard let self else { return }
+                self.sampleAfterHeatEnableGeneration = nil
                 self.heatProtectionRetryAfter = self.now().addingTimeInterval(10)
                 self.mode = .failed(
                     previous: previous,
@@ -991,9 +998,12 @@ final class ChargeController: ObservableObject {
         cancelSMCTemperatureSample(clearCache: true)
         settings.heatProtectionEnabled = enabled
         if enabled {
-            sampleSMCTemperature()
             if let info = monitor.batteryInfo {
+                sampleSMCTemperature()
                 evaluateHeatProtection(using: info)
+            } else {
+                sampleAfterHeatEnableGeneration = smcTemperatureSampleGeneration
+                evaluateHeatProtectionWithoutBatteryInfo(temperature: nil)
             }
         } else if case .heatBlocked(let previous) = mode {
             restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
