@@ -10,6 +10,7 @@ private let bundledTemperatureReaderName = "BatteryGuardSMCReader"
 private let defaultSMCTemperatureReadTimeout: TimeInterval = 2
 private let defaultSMCTemperatureTotalBudget: TimeInterval = 4.5
 private let defaultTemperatureReaderRetryDelay: TimeInterval = 60
+private let maximumMaintainWorkerCandidates = 32
 
 private func bundledTemperatureReaderPath() -> String {
     Bundle.main.bundleURL
@@ -302,7 +303,7 @@ actor SMCKit: ChargeBackend {
         let changedNanoseconds: Int
     }
 
-    private struct MaintainWorkerProcess: Equatable, Sendable {
+    struct MaintainWorkerProcess: Equatable, Sendable {
         let pid: Int32
         let command: String
         let target: Int?
@@ -843,6 +844,25 @@ actor SMCKit: ChargeBackend {
         }
     }
 
+    static func boundedPgrepMaintainWorkerProcesses(
+        pgrepOutput: String,
+        batteryPath: String,
+        excludingPID: Int32? = nil
+    ) throws -> [MaintainWorkerProcess] {
+        let parsedCandidates = parsePgrepMaintainWorkerProcesses(
+            pgrepOutput: pgrepOutput,
+            batteryPath: batteryPath
+        ).filter { $0.pid != excludingPID }
+        guard parsedCandidates.count <= maximumMaintainWorkerCandidates else {
+            throw BatteryError.commandFailed(
+                "inspect battery CLI processes",
+                -1,
+                "refusing unbounded process inspection: \(parsedCandidates.count) exact candidates"
+            )
+        }
+        return parsedCandidates
+    }
+
     private static func parsePSMaintainWorkerProcesses(
         processTable: String,
         batteryPath: String
@@ -1029,18 +1049,11 @@ actor SMCKit: ChargeBackend {
         )
         guard candidates.exitCode == 0 else { return [] }
 
-        let candidateLines = candidates.stdout.split(whereSeparator: \Character.isNewline)
-        guard candidateLines.count <= 32 else {
-            throw BatteryError.commandFailed(
-                "inspect battery CLI processes",
-                -1,
-                "refusing unbounded process inspection: \(candidateLines.count) candidates"
-            )
-        }
-        let parsedCandidates = Self.parsePgrepMaintainWorkerProcesses(
+        let parsedCandidates = try Self.boundedPgrepMaintainWorkerProcesses(
             pgrepOutput: candidates.stdout,
-            batteryPath: batteryPath
-        ).filter { $0.pid != getpid() }
+            batteryPath: batteryPath,
+            excludingPID: getpid()
+        )
         guard !parsedCandidates.isEmpty else { return [] }
 
         var identitiesBefore: [Int32: ProcessIdentity] = [:]

@@ -100,6 +100,42 @@ final class StatusParsingTests: XCTestCase {
         )
     }
 
+    func testPgrepCandidateLimitIgnoresUnrelatedCommandLinesContainingBatteryPath() throws {
+        let batteryPath = "/usr/local/co.palokaj.battery/battery"
+        let unrelated = (1...80).map { pid in
+            "\(pid + 1000) /bin/zsh -c profile --cli \(batteryPath) --trial \(pid)"
+        }
+        let exactWorker = "101 /bin/bash \(batteryPath) maintain_synchronous 80"
+
+        let candidates = try SMCKit.boundedPgrepMaintainWorkerProcesses(
+            pgrepOutput: (unrelated + [exactWorker]).joined(separator: "\n"),
+            batteryPath: batteryPath
+        )
+
+        XCTAssertEqual(candidates.map(\.pid), [101])
+        XCTAssertEqual(candidates.map(\.target), [80])
+    }
+
+    func testPgrepCandidateLimitRejectsTooManyExactWorkers() {
+        let batteryPath = "/usr/local/co.palokaj.battery/battery"
+        let exactWorkers = (1...33).map { index in
+            "\(index + 100) /bin/bash \(batteryPath) maintain_synchronous 80"
+        }.joined(separator: "\n")
+
+        XCTAssertThrowsError(
+            try SMCKit.boundedPgrepMaintainWorkerProcesses(
+                pgrepOutput: exactWorkers,
+                batteryPath: batteryPath
+            )
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Command failed (-1): inspect battery CLI processes — "
+                    + "refusing unbounded process inspection: 33 exact candidates"
+            )
+        }
+    }
+
     func testMaintainWorkerObservationRejectsIdentityChangesAcrossArgvInspection() {
         let path = "/usr/local/co.palokaj.battery/battery"
         let command = "/bin/bash \(path) maintain_synchronous 80"

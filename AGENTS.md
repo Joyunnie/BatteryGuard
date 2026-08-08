@@ -46,6 +46,7 @@ IOKit readings ---+                    result + verified CLI status
 - Verify the complete expected control tuple: charging, discharging, maintain level, and exact worker state; a matching subset is not success.
 - For battery CLI v1.3.4 force discharge, the verified tuple is charging enabled, discharging true, and the Maintain worker stopped. Do not require charging disabled: `CHTE=00` permits the forced `CHIE=08` discharge path.
 - Treat maintain as valid only when exactly one worker with the expected target exists and the PID file points to it; bind argv to a stable process identity by checking the start identity before and after inspection. Stale, mismatched, reused, or duplicate workers are failures.
+- Bound process inspection after exact Maintain argv parsing. Unrelated command lines that merely contain the battery CLI path must not count as worker candidates or block initialization.
 - Bind every worker selected for termination to its process start identity and revalidate that identity immediately before each signal; a reused PID must never be signaled.
 - Never trust the CLI's “killing old maintain process” log by itself. Re-read the PID file and exact command line; the script can leave an orphaned stale worker after external commands.
 - Read PID files without following links or blocking on special files; accept only bounded, current-user-owned regular files.
@@ -135,6 +136,7 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 
 - Do not run the full existing test suite until real hardware/login-item/store side effects have been isolated.
 - For manual hardware validation, record status before and after each operation and restore the intended maintain state at the end.
+- Accept a performance trial only after initialization/readiness succeeds, expected background child activity is nonzero, and the hardware state matches the comparison trial. Preserve the raw per-trial evidence; never average failed launches into a performance result.
 
 ## Implementation Order
 
