@@ -25,12 +25,16 @@ enum AppMetadata {
 final class AppActivationController {
     static let shared = AppActivationController()
 
+    private let currentPolicy: () -> NSApplication.ActivationPolicy
     private let setPolicy: (NSApplication.ActivationPolicy) -> Bool
     private let activate: () -> Void
     private let hasVisibleAppWindow: () -> Bool
     private let diagnostics: DiagnosticLog
 
     init(
+        currentPolicy: @escaping () -> NSApplication.ActivationPolicy = {
+            NSApp.activationPolicy()
+        },
         setPolicy: @escaping (NSApplication.ActivationPolicy) -> Bool = { NSApp.setActivationPolicy($0) },
         activate: @escaping () -> Void = { NSApp.activate(ignoringOtherApps: true) },
         hasVisibleAppWindow: @escaping () -> Bool = {
@@ -40,6 +44,7 @@ final class AppActivationController {
         },
         diagnostics: DiagnosticLog = .shared
     ) {
+        self.currentPolicy = currentPolicy
         self.setPolicy = setPolicy
         self.activate = activate
         self.hasVisibleAppWindow = hasVisibleAppWindow
@@ -65,13 +70,20 @@ final class AppActivationController {
     }
 
     private func apply(_ policy: NSApplication.ActivationPolicy, operation: String) -> Bool {
-        guard setPolicy(policy) else {
+        let previousPolicy = currentPolicy()
+        guard previousPolicy != policy else { return true }
+
+        let accepted = setPolicy(policy)
+        let appliedPolicy = currentPolicy()
+        guard accepted, appliedPolicy == policy else {
             diagnostics.submit(
                 DiagnosticEvent(
                     category: .lifecycle,
                     operation: operation,
                     outcome: .failed,
-                    message: "NSApplication rejected activation policy \(policy.rawValue)"
+                    message: "NSApplication activation policy transition failed: "
+                        + "requested=\(policy.rawValue), previous=\(previousPolicy.rawValue), "
+                        + "current=\(appliedPolicy.rawValue), accepted=\(accepted)"
                 )
             )
             return false
