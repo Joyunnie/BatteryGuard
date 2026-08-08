@@ -6,7 +6,16 @@ import Darwin
 
 private let defaultBatteryPath = "/usr/local/co.palokaj.battery/battery"
 private let defaultSMCBinaryPath = "/usr/local/co.palokaj.battery/smc"
+private let bundledTemperatureReaderName = "BatteryGuardSMCReader"
 private let smcTemperatureReadTimeout: TimeInterval = 2
+private let smcTemperatureFallbackBudget: TimeInterval = 4.5
+
+private func bundledTemperatureReaderPath() -> String {
+    Bundle.main.bundleURL
+        .appendingPathComponent("Contents/Helpers", isDirectory: true)
+        .appendingPathComponent(bundledTemperatureReaderName, isDirectory: false)
+        .path
+}
 
 private actor AsyncOperationGate {
     private var isLocked = false
@@ -212,6 +221,7 @@ actor SMCKit: ChargeBackend {
 
     static let shared = SMCKit(
         runner: BatteryCommandRunner(diagnostics: .shared),
+        temperatureReaderPath: bundledTemperatureReaderPath(),
         diagnostics: .shared
     )
 
@@ -220,6 +230,7 @@ actor SMCKit: ChargeBackend {
     private let ledGate = AsyncOperationGate()
     private let batteryPath: String
     private let smcBinaryPath: String
+    private let temperatureReaderPath: String?
     private let usesSudoForSMCWrites: Bool
     private let maintainPIDFilePath: String
     private let maintainWorkerProbe: MaintainWorkerProbe?
@@ -233,6 +244,8 @@ actor SMCKit: ChargeBackend {
     private var savedMagSafeLEDValue: UInt8?
     private var batteryExecutableIdentity: ExecutableIdentity?
     private var smcExecutableIdentity: ExecutableIdentity?
+    private var temperatureReaderExecutableIdentity: ExecutableIdentity?
+    private var supportsBundledTemperatureReader: Bool?
     private var supportsBatchedTemperatureRead: Bool?
 
     private struct BatteryTemperatureReadings {
@@ -271,6 +284,7 @@ actor SMCKit: ChargeBackend {
         runner: BatteryCommandRunner = BatteryCommandRunner(),
         batteryPath: String = defaultBatteryPath,
         smcBinaryPath: String = defaultSMCBinaryPath,
+        temperatureReaderPath: String? = nil,
         usesSudoForSMCWrites: Bool = true,
         maintainPIDFilePath: String? = nil,
         maintainWorkerProbe: MaintainWorkerProbe? = nil,
@@ -280,6 +294,7 @@ actor SMCKit: ChargeBackend {
         self.runner = runner
         self.batteryPath = batteryPath
         self.smcBinaryPath = smcBinaryPath
+        self.temperatureReaderPath = temperatureReaderPath
         self.usesSudoForSMCWrites = usesSudoForSMCWrites
         if let maintainPIDFilePath {
             self.maintainPIDFilePath = maintainPIDFilePath
@@ -315,6 +330,25 @@ actor SMCKit: ChargeBackend {
             displayName: "SMC binary"
         )
         rawSMCAvailable = true
+        if let temperatureReaderPath {
+            do {
+                temperatureReaderExecutableIdentity = try validateTemperatureReaderBeforeUse(
+                    path: temperatureReaderPath
+                )
+                supportsBundledTemperatureReader = nil
+            } catch {
+                temperatureReaderExecutableIdentity = nil
+                supportsBundledTemperatureReader = false
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .sensor,
+                        operation: "validate bundled SMC temperature reader",
+                        outcome: .failed,
+                        message: error.localizedDescription
+                    )
+                )
+            }
+        }
 
         try await validateBatteryCLIVersionUnlocked()
         _ = try await readControlStatusUnlocked()
@@ -387,6 +421,53 @@ actor SMCKit: ChargeBackend {
         if expectedType == S_IFREG, metadata.st_mode & S_IXUSR == 0 {
             throw BatteryError.preflightFailed("\(displayName) is not owner-executable: \(path)")
         }
+    }
+
+    private func validateTemperatureReaderBeforeUse(path: String) throws -> ExecutableIdentity {
+        guard path.hasPrefix("/") else {
+            throw BatteryError.preflightFailed(
+                "SMC temperature reader path is not absolute: \(path)"
+            )
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw BatteryError.binaryNotFound(
+                "SMC temperature reader is unavailable at \(path)"
+            )
+        }
+        if executableTrustPolicy == .production {
+            let expectedPath = bundledTemperatureReaderPath()
+            guard path == expectedPath else {
+                throw BatteryError.preflightFailed(
+                    "SMC temperature reader must use the bundled path \(expectedPath)"
+                )
+            }
+            let helperDirectory = URL(fileURLWithPath: path).deletingLastPathComponent().path
+            var directoryMetadata = stat()
+            guard lstat(helperDirectory, &directoryMetadata) == 0,
+                  directoryMetadata.st_mode & S_IFMT == S_IFDIR,
+                  directoryMetadata.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
+                throw BatteryError.preflightFailed(
+                    "SMC temperature reader directory is not a trusted directory"
+                )
+            }
+        }
+
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG,
+              metadata.st_mode & S_IXUSR != 0,
+              metadata.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
+            throw BatteryError.preflightFailed(
+                "SMC temperature reader is not a trusted executable regular file"
+            )
+        }
+        return ExecutableIdentity(
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+            size: metadata.st_size,
+            modifiedSeconds: metadata.st_mtimespec.tv_sec,
+            modifiedNanoseconds: metadata.st_mtimespec.tv_nsec
+        )
     }
 
     private func validateBatteryCLIVersionUnlocked() async throws {
@@ -1091,6 +1172,65 @@ actor SMCKit: ChargeBackend {
             displayName: "SMC binary"
         )
 
+        if supportsBundledTemperatureReader != false,
+           let temperatureReaderPath,
+           temperatureReaderExecutableIdentity != nil {
+            do {
+                try revalidateExecutableIdentity(
+                    path: temperatureReaderPath,
+                    expected: temperatureReaderExecutableIdentity,
+                    displayName: "SMC temperature reader"
+                )
+                let result = try await runProcess(
+                    executable: temperatureReaderPath,
+                    arguments: [],
+                    label: "read battery temperatures",
+                    timeout: smcTemperatureReadTimeout
+                )
+                let readings = Self.parseBatteryTemperatureReadings(result.stdout)
+                if readings.hasCompleteCoverage, let maximum = readings.maximum {
+                    supportsBundledTemperatureReader = true
+                    return maximum
+                }
+                supportsBundledTemperatureReader = false
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .sensor,
+                        operation: "read bundled battery temperatures",
+                        outcome: .failed,
+                        message: "output did not contain complete TB0T/TB1T/TB2T coverage"
+                    )
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as BatteryError {
+                switch error {
+                case .commandCancelled, .commandTimedOut:
+                    throw error
+                default:
+                    supportsBundledTemperatureReader = false
+                    await diagnostics.record(
+                        DiagnosticEvent(
+                            category: .sensor,
+                            operation: "read bundled battery temperatures",
+                            outcome: .failed,
+                            message: error.localizedDescription
+                        )
+                    )
+                }
+            } catch {
+                supportsBundledTemperatureReader = false
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .sensor,
+                        operation: "read bundled battery temperatures",
+                        outcome: .failed,
+                        message: error.localizedDescription
+                    )
+                )
+            }
+        }
+
         if supportsBatchedTemperatureRead != false {
             do {
                 let result = try await runProcess(
@@ -1123,13 +1263,21 @@ actor SMCKit: ChargeBackend {
 
         var temperatures: [Float] = []
         var failures: [String] = []
+        let fallbackDeadline = DispatchTime.now().uptimeNanoseconds
+            + UInt64(smcTemperatureFallbackBudget * 1_000_000_000)
         for key in ["TB0T", "TB1T", "TB2T"] {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < fallbackDeadline else {
+                failures.append("fallback deadline expired")
+                break
+            }
+            let remaining = TimeInterval(fallbackDeadline - now) / 1_000_000_000
             do {
                 let result = try await runProcess(
                     executable: smcBinaryPath,
                     arguments: ["-k", key, "-r"],
                     label: "smc -k \(key) -r",
-                    timeout: smcTemperatureReadTimeout
+                    timeout: min(smcTemperatureReadTimeout, remaining)
                 )
                 guard let value = Self.parseBatteryTemperatureReadings(result.stdout)
                     .valuesByKey[key] else {
