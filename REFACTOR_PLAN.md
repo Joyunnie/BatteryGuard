@@ -873,7 +873,7 @@ enum ChargeMode: Equatable {
 - 엔터프라이즈식 다층 서비스 구조: 테스트에 필요한 최소 경계만 둔다.
 - View를 포함한 100% 테스트 커버리지: 안전 경로와 실패 처리의 완전성을 우선한다.
 - 클라우드 텔레메트리와 원격 로그: 로컬 진단 로그만 유지한다.
-- 대규모 성능 최적화: 현재 규모에서는 프로세스 실행과 차트 상한 외에 우선할 병목이 없다.
+- 측정 근거 없는 대규모 성능 재작성: 이번에 확인된 background wakeup·subprocess·진단 저장 병목은 체크포인트 18에서 제한적으로 개선하고, 그 밖의 미세 최적화는 실제 profile 근거가 생길 때만 수행한다.
 
 ## 7. 구현 체크포인트
 
@@ -896,6 +896,7 @@ enum ChargeMode: Equatable {
 15. `[PR #11 구현·혹독 리뷰 보완]` Top Up/Discharge long-running decision을 pure policy로 분리하고 target/liveness/recovery/drift 및 sleep assertion 수명 테스트 추가
 16. `[완료: PR #14]` IOKit sleep acknowledgement 전 verified charging-off와 wake 시 Maintain 복원 추가. 전역 Boolean인 `SleepDisabled`는 외부 소유권을 증명할 수 없어 charge-to-limit sleep inhibition/lease/watchdog 설계는 hostile review 후 제거
 17. `[구현·자동·실기 검증 및 진단 보존 보완 완료]` 누적 hostile review 보완: Discharge assertion 선획득, drift/manual failure를 보존하는 Heat 전이, 신규·분실 journal의 monitoring-only 기본값과 일회성 legacy migration, injectable IOKit transport 계약 테스트, process-group cleanup을 포함한 absolute deadline, typed issue/safety-temperature UI, backend capability 분리, exact CLI v1.3.4 및 실행 파일 identity 재검증, priority-aware bounded diagnostics, ownership directory hardening, history queue/extrema 보존, Release Hardened Runtime
+18. `[hostile review 보완, profile 기반 2차 개선 및 자동·실기 검증 완료]` background 비용 축소와 안전 heartbeat 분리: routine diagnostics는 30초 단위로 묶고 safety/control/lifecycle/failure는 즉시 flush하며, 동기 producer가 승인한 event는 ordered submission queue를 거쳐 종료 flush와 happens-before 관계를 갖는다. IOKit 알림을 100ms 동안 coalesce해 주 측정 경로로 사용하고 30초 watchdog을 유지하되, controller에는 charge/power/temperature만 담은 control measurement를 전달한다. 독립 센서인 SMC는 IOKit 값으로 늦추지 않고 sample 시작 시점 기준 5초 상한을 유지하며, 세 battery key를 각각 실행하던 정상 경로를 신뢰 검증된 단일 `smc -t` 실행과 정확한 전체 key parser로 교체해 호환 fixture에서는 정상 샘플당 subprocess를 3개에서 1개로 줄였다. partial/unknown 출력은 실행 파일 identity별로 기억하는 bounded per-key fallback으로 안전하게 수용하며, 모든 센서 실패는 degraded 상태와 원인을 UI에 남긴다. SMC-only 온도 상승도 즉시 보호 결정을 구동하고, blocked 상태에서는 fresh preflight와 postflight 모두 독립 센서 실패가 없을 때만 복원한다. Runner의 정상 종료와 stdout/stderr close는 Dispatch event로 기다리고 20ms polling은 제거했으며, cancellation과 waiter 등록은 동일 lock state machine에서 원자적으로 처리한다. fixture one-shot 완료는 약 23ms에서 4ms, long-running exit 관찰은 약 6ms로 측정됐다. Top Up/Discharge는 process-exit event를 주 경로로 사용하고 30초 heartbeat는 missed-event watchdog으로만 남겨 정상 실행의 probe를 분당 30회에서 최대 2회로 줄였다. 정상 exit 직후 IOKit 최종 측정이 늦는 경우에는 총 850ms의 bounded settlement를 거친 뒤 generation을 재검증하고 완료/실패를 판정한다. verified stable limit 전이는 battery snapshot 변화가 없어도 즉시 history에 기록한다. diagnostics ring은 보통의 단조 증가 timestamp를 append하고 out-of-order event만 binary insertion하며, fractional timestamp와 command lifecycle 순서를 보존한다. exact Maintain worker는 bounded `pgrep -fl` 후보 조회 뒤 `identity-before -> ps argv -> identity-after`가 모두 일치할 때만 인정하므로 해당 2~3개 subprocess는 안전 계약을 위해 유지했다. 엄격 동시성·경고 오류화 조건의 265개 자동 테스트, Release 빌드와 Analyze를 모두 통과했다. 통제된 read-only 실기 검증에서 이 Mac의 `smc -t`는 exit 0과 빈 출력을 반환했고 `TB0T/TB1T/TB2T` 개별 읽기는 모두 32°C를 반환했다. 앱은 이를 batch 성공으로 오인하지 않고 약 5.16초 cadence의 cached three-key fallback으로 처리했으며 Dashboard는 `32.0°C (SMC)`를 표시했다. 실제 단일 설치 인스턴스의 30초 background Time Profiler 표본은 CPU 167ms, 평균 약 0.56%였고 검증 전후 실제 상태는 80% Maintain으로 동일했다.
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -943,6 +944,6 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | not needed | 새 UI 범위 없음 |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | not needed | 개인용 로컬 프로젝트이며 test topology만 후속 범위 |
 
-**VERDICT:** ENG CLEARED — 핵심 계획은 완료됐고, stacked merge 뒤 PR #12와 PR #13만 순차 진행한다.
+**VERDICT:** CHECKPOINT 18 CODE COMPLETE — 자동 검증 후 PR로 제출하며, 실제 `smc -t` 출력 계약 확인만 통제된 하드웨어 점검으로 남긴다.
 
 NO UNRESOLVED DECISIONS

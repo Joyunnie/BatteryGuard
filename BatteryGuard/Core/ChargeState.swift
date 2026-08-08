@@ -363,6 +363,18 @@ enum HeatProtectionPhase: Equatable, Sendable {
     case blocked
     case restoring
     case failed
+
+    var userDescription: String {
+        switch self {
+        case .disabled: return "열 보호 꺼짐"
+        case .monitoring: return "열 보호 모니터링"
+        case .degraded: return "열 보호 센서 degraded"
+        case .entering: return "열 보호 적용 중"
+        case .blocked: return "열 보호 작동 중"
+        case .restoring: return "열 보호 복원 중"
+        case .failed: return "열 보호 실패"
+        }
+    }
 }
 
 enum ChargeActionAvailability: Equatable, Sendable {
@@ -372,6 +384,15 @@ enum ChargeActionAvailability: Equatable, Sendable {
     var isAllowed: Bool {
         if case .allowed = self { return true }
         return false
+    }
+
+    var denialReason: String? {
+        guard case .denied(let reason) = self else { return nil }
+        return reason
+    }
+
+    func helpText(fallback: String) -> String {
+        denialReason ?? fallback
     }
 }
 

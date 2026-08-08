@@ -550,6 +550,7 @@ final class ProcessLifecycleTests: XCTestCase {
 
     func testLongRunningEarlyExitPreservesFailureOutput() async throws {
         let runner = BatteryCommandRunner()
+        let startedAt = DispatchTime.now().uptimeNanoseconds
         _ = try await runner.launchLongRunning(
             .init(
                 executable: "/bin/sh",
@@ -558,14 +559,54 @@ final class ProcessLifecycleTests: XCTestCase {
                 timeout: 1
             )
         )
-        try await Task.sleep(nanoseconds: 50_000_000)
 
+        let capturedResult = await runner.waitForLongRunningResult()
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
         let isActive = await runner.isLongRunningActive()
-        let capturedResult = await runner.longRunningResult()
         XCTAssertFalse(isActive)
         let result = try XCTUnwrap(capturedResult)
         XCTAssertEqual(result.exitCode, 9)
         XCTAssertEqual(result.stderr, "long-failure")
         XCTAssertEqual(result.termination, .exited)
+        XCTAssertLessThan(elapsed, 0.2)
+    }
+
+    func testCancellationCannotStrandExitWaiterRegistration() async throws {
+        let runner = BatteryCommandRunner()
+        _ = try await runner.launchLongRunning(
+            .init(
+                executable: "/bin/sh",
+                arguments: termIgnoringShell,
+                label: "waiter cancellation fixture",
+                timeout: 5
+            )
+        )
+        let counter = ProcessLifecycleLockedCounter()
+        let waiters = (0..<200).map { _ in
+            Task {
+                _ = await runner.waitForLongRunningResult()
+                counter.increment()
+            }
+        }
+        waiters.forEach { $0.cancel() }
+
+        let allCancelledWaitersReturned = await eventually(timeout: 0.5) {
+            counter.value == waiters.count
+        }
+
+        XCTAssertTrue(allCancelledWaitersReturned)
+        _ = try await runner.cancelLongRunning()
+        for waiter in waiters { await waiter.value }
+    }
+}
+
+private final class ProcessLifecycleLockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int { lock.withLock { count } }
+
+    func increment() {
+        lock.withLock { count += 1 }
     }
 }

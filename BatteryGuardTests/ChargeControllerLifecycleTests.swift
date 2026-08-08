@@ -412,4 +412,131 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(backend.operations.contains("read-status"))
     }
 
+    func testLongRunningExitObservationDetectsExitWithoutPollingOrBatteryChange() async {
+        let batteryInfo = makeBatteryInfo(charge: 70)
+        let (controller, backend, monitor, _) = makeSUT(
+            charge: 70,
+            batteryInfoOnRead: batteryInfo,
+            longRunningHeartbeatInterval: 10
+        )
+        let originalSnapshot = monitor.batteryInfo
+        controller.startTopUp()
+        let started = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(started)
+
+        backend.setOwnedLongRunningOperation(false)
+        let exitDetected = await eventually {
+            controller.hasExternalControlDrift
+        }
+
+        XCTAssertTrue(exitDetected)
+        XCTAssertEqual(monitor.batteryInfo, originalSnapshot)
+        XCTAssertFalse(backend.operations.contains("check-long-running"))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
+    func testCleanTopUpExitWaitsForTheFinalBatteryMeasurement() async {
+        let staleInfo = makeBatteryInfo(charge: 99)
+        let infoSource = TestBatteryInfoSource(staleInfo)
+        let (controller, backend, _, _) = makeSUT(
+            charge: 99,
+            batteryInfoProvider: { infoSource.read() },
+            longRunningHeartbeatInterval: 10
+        )
+        controller.startTopUp()
+        let topUpStarted = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(topUpStarted)
+
+        backend.setOwnedLongRunningOperation(
+            false,
+            result: makeSuccessfulLongRunningResult()
+        )
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        infoSource.set(makeBatteryInfo(charge: 100))
+
+        let topUpSettled = await eventually { controller.mode == .maintaining(limit: 80) }
+        XCTAssertTrue(topUpSettled)
+        XCTAssertFalse(controller.hasExternalControlDrift)
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+    }
+
+    func testCleanDischargeExitWaitsForTheFinalBatteryMeasurement() async {
+        let staleInfo = makeBatteryInfo(charge: 81)
+        let infoSource = TestBatteryInfoSource(staleInfo)
+        let (controller, backend, monitor, settings) = makeSUT(
+            charge: 81,
+            batteryInfoProvider: { infoSource.read() },
+            longRunningHeartbeatInterval: 10
+        )
+        settings.chargeLimit = 80
+        controller.startDischarge()
+        let dischargeStarted = await eventually { controller.isDischarging }
+        XCTAssertTrue(dischargeStarted)
+        XCTAssertTrue(monitor.isSleepPreventionActive)
+
+        backend.setOwnedLongRunningOperation(
+            false,
+            result: makeSuccessfulLongRunningResult()
+        )
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        infoSource.set(makeBatteryInfo(charge: 80))
+
+        let dischargeSettled = await eventually { controller.mode == .maintaining(limit: 80) }
+        XCTAssertTrue(dischargeSettled)
+        XCTAssertFalse(controller.hasExternalControlDrift)
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+    }
+
+    func testCleanTopUpExitSettlementExhaustionUsesUnexpectedExitRecovery() async {
+        let staleInfo = makeBatteryInfo(charge: 99)
+        let (controller, backend, _, _) = makeSUT(
+            charge: 99,
+            batteryInfoOnRead: staleInfo,
+            longRunningHeartbeatInterval: 10
+        )
+        controller.startTopUp()
+        let started = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(started)
+        let startTime = DispatchTime.now().uptimeNanoseconds
+
+        backend.setOwnedLongRunningOperation(
+            false,
+            result: makeSuccessfulLongRunningResult()
+        )
+        let drifted = await eventually(timeout: 1.5) { controller.hasExternalControlDrift }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startTime) / 1_000_000_000
+
+        XCTAssertTrue(drifted)
+        XCTAssertGreaterThanOrEqual(elapsed, 0.75)
+        XCTAssertLessThan(elapsed, 1.5)
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("read-status"))
+    }
+
+    func testCancellingTopUpDuringExitSettlementInvalidatesTheOldObserver() async {
+        let staleInfo = makeBatteryInfo(charge: 99)
+        let (controller, backend, _, _) = makeSUT(
+            charge: 99,
+            batteryInfoOnRead: staleInfo,
+            longRunningHeartbeatInterval: 10
+        )
+        controller.startTopUp()
+        let started = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(started)
+        backend.setOwnedLongRunningOperation(
+            false,
+            result: makeSuccessfulLongRunningResult()
+        )
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        controller.cancelTopUp()
+        let cancelled = await eventually { controller.mode == .maintaining(limit: 80) }
+        try? await Task.sleep(nanoseconds: 900_000_000)
+
+        XCTAssertTrue(cancelled)
+        XCTAssertFalse(controller.hasExternalControlDrift)
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+    }
+
 }

@@ -92,6 +92,7 @@ struct DashboardView: View {
                         step: 5
                     )
                     .disabled(!controller.chargeLimitAvailability.isAllowed)
+                    .help(controller.chargeLimitAvailability.helpText(fallback: "충전 한도 변경"))
                 }
 
                 Divider()
@@ -112,6 +113,7 @@ struct DashboardView: View {
                     }
                     .controlSize(.large)
                     .disabled(!controller.topUpAvailability.isAllowed)
+                    .help(controller.topUpAvailability.helpText(fallback: "Top Up 시작 또는 취소"))
 
                     Button(action: {
                         if controller.isDischarging {
@@ -128,6 +130,7 @@ struct DashboardView: View {
                     }
                     .controlSize(.large)
                     .disabled(!controller.dischargeAvailability.isAllowed)
+                    .help(controller.dischargeAvailability.helpText(fallback: "Discharge 시작 또는 중지"))
                 }
 
                 ExternalDriftStatusView(controller: controller)
@@ -154,7 +157,10 @@ struct DashboardView: View {
                             Circle()
                                 .stroke(Color.secondary.opacity(0.2), lineWidth: 8)
                             Circle()
-                                .trim(from: 0, to: CGFloat(healthPercent / 100.0))
+                                .trim(
+                                    from: 0,
+                                    to: CGFloat(min(max(healthPercent / 100.0, 0), 1))
+                                )
                                 .stroke(healthColor(healthPercent), style: StrokeStyle(lineWidth: 8, lineCap: .round))
                                 .rotationEffect(.degrees(-90))
                             VStack {

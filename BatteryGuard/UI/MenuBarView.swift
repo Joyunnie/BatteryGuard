@@ -76,6 +76,7 @@ struct MenuBarView: View {
                 step: 5
             )
             .disabled(!controller.chargeLimitAvailability.isAllowed)
+            .help(controller.chargeLimitAvailability.helpText(fallback: "충전 한도 변경"))
         }
     }
 
@@ -87,6 +88,7 @@ struct MenuBarView: View {
                 icon: "arrow.up.to.line",
                 isActive: controller.isTopUpActive,
                 isDisabled: !controller.topUpAvailability.isAllowed,
+                helpText: controller.topUpAvailability.helpText(fallback: "Top Up 시작 또는 취소"),
                 action: {
                     if controller.isTopUpActive {
                         controller.cancelTopUp()
@@ -101,6 +103,7 @@ struct MenuBarView: View {
                 icon: "arrow.down.to.line",
                 isActive: controller.isDischarging,
                 isDisabled: !controller.dischargeAvailability.isAllowed,
+                helpText: controller.dischargeAvailability.helpText(fallback: "Discharge 시작 또는 중지"),
                 action: {
                     if controller.isDischarging {
                         controller.stopDischarge()
@@ -121,13 +124,13 @@ struct MenuBarView: View {
                 StatusRow(label: "사이클", value: BatteryDisplay.measurement(info.cycleCount))
                 StatusRow(label: "전류", value: BatteryDisplay.amperage(info.amperage))
 
-                if controller.heatProtectionPhase == .blocked {
+                if controller.heatProtectionPhase != .disabled {
                     HStack {
                         Image(systemName: "thermometer.sun.fill")
-                            .foregroundColor(.red)
-                        Text("열 보호 작동 중")
+                            .foregroundColor(controller.heatProtectionPhase == .blocked ? .red : .secondary)
+                        Text(controller.heatProtectionPhase.userDescription)
                             .font(.system(size: 11))
-                            .foregroundColor(.red)
+                            .foregroundColor(controller.heatProtectionPhase == .blocked ? .red : .secondary)
                     }
                     .padding(.top, 4)
                 }
@@ -219,6 +222,7 @@ struct ActionButton: View {
     let icon: String
     let isActive: Bool
     var isDisabled: Bool = false
+    var helpText: String
     let action: () -> Void
 
     var body: some View {
@@ -237,6 +241,7 @@ struct ActionButton: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        .help(helpText)
     }
 }
 

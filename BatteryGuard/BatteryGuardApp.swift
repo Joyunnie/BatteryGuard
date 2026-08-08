@@ -66,17 +66,14 @@ final class AppActivationController {
 
     private func apply(_ policy: NSApplication.ActivationPolicy, operation: String) -> Bool {
         guard setPolicy(policy) else {
-            let diagnostics = diagnostics
-            Task {
-                await diagnostics.record(
-                    DiagnosticEvent(
-                        category: .lifecycle,
-                        operation: operation,
-                        outcome: .failed,
-                        message: "NSApplication rejected activation policy \(policy.rawValue)"
-                    )
+            diagnostics.submit(
+                DiagnosticEvent(
+                    category: .lifecycle,
+                    operation: operation,
+                    outcome: .failed,
+                    message: "NSApplication rejected activation policy \(policy.rawValue)"
                 )
-            }
+            )
             return false
         }
         return true
@@ -166,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch error {
         case BatteryError.binaryNotFound, BatteryError.preflightFailed:
             recovery = "battery CLI/SMC 설치 경로, 소유자, 권한 및 지원 버전(v1.3.4)을 확인하세요."
-        case let BatteryError.unsupported(message) where message.contains("소유권"):
+        case BatteryError.ownershipPersistenceFailed:
             recovery = "BatteryControlOwnership 기록을 복구하거나 BatteryGuard 제어를 명시적으로 다시 설정하세요."
         case BatteryError.commandTimedOut, BatteryError.commandCancelled, BatteryError.commandFailed:
             recovery = "다른 battery 프로세스가 실행 중인지 확인하고 실제 CLI 상태를 점검한 뒤 다시 실행하세요."
@@ -187,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, let sender else { return }
             do {
                 try await ChargeController.shared.shutdown()
+                await DiagnosticLog.shared.flushPendingEvents()
                 self.terminationApproved = true
                 self.terminationTask = nil
                 sender.reply(toApplicationShouldTerminate: true)

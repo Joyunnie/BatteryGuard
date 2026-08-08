@@ -11,12 +11,16 @@ final class ChargeControllerSafetyTests: XCTestCase {
         isCharging: Bool = false,
         isPluggedIn: Bool = true,
         batteryInfoOnRead: BatteryInfo? = nil,
+        batteryInfoProvider: (() -> BatteryInfo?)? = nil,
         initialReadiness: ChargeControllerReadiness = .ready,
         initialMode: ChargeMode? = nil,
         sleepChargingStrategy: SleepChargingStrategy = .pauseOnSleep,
         systemPowerObserver: SystemPowerObserving = FakeSystemPowerObserver(),
         runsSystemPowerObservation: Bool = false,
         history: BatteryHistory? = nil,
+        smcTemperatureSamplingInterval: TimeInterval = ChargeController.smcTemperatureSamplingInterval,
+        longRunningHeartbeatInterval: TimeInterval = 30,
+        historyHeartbeatInterval: TimeInterval = 15 * 60,
         diagnostics: DiagnosticLog = .disabled,
         preventSleepHandler: @escaping (String) -> Bool = { _ in true },
         allowSleepHandler: @escaping () -> Void = {},
@@ -25,7 +29,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         let backend = FakeChargeBackend()
         backend.temperature = temperature.map(Float.init)
         let monitor = BatteryMonitor(
-            batteryInfoProvider: { batteryInfoOnRead },
+            batteryInfoProvider: batteryInfoProvider ?? { batteryInfoOnRead },
             runsMonitoringInfrastructure: false,
             preventSleepHandler: preventSleepHandler,
             allowSleepHandler: allowSleepHandler
@@ -50,6 +54,9 @@ final class ChargeControllerSafetyTests: XCTestCase {
                 initialReadiness: initialReadiness,
                 initialMode: initialMode,
                 history: history,
+                smcTemperatureSamplingInterval: smcTemperatureSamplingInterval,
+                longRunningHeartbeatInterval: longRunningHeartbeatInterval,
+                historyHeartbeatInterval: historyHeartbeatInterval,
                 diagnostics: diagnostics,
                 systemPowerObserver: systemPowerObserver,
                 runsSystemPowerObservation: runsSystemPowerObservation,

@@ -179,14 +179,15 @@ final class BatteryHistory {
         return fetchLast24Hours()
     }
 
-    func record(chargePercent: Int, chargeLimit: Int) {
+    @discardableResult
+    func record(chargePercent: Int, chargeLimit: Int) -> Bool {
         guard (0...100).contains(chargePercent),
               UserSettings.chargeLimitRange.contains(chargeLimit) else {
             reportError(
                 "History rejected invalid values: charge=\(chargePercent), limit=\(chargeLimit)",
                 operation: "validate history sample"
             )
-            return
+            return false
         }
         guard readiness == .ready else {
             if readiness == .loading {
@@ -194,14 +195,15 @@ final class BatteryHistory {
                 if pendingRecords.count > 256 {
                     pendingRecords.removeFirst(pendingRecords.count - 256)
                 }
+                return true
             }
-            return
+            return false
         }
 
         let timestamp = now()
         let valuesChanged = chargePercent != lastChargePercent || chargeLimit != lastChargeLimit
         let heartbeatDue = lastRecordDate.map { timestamp.timeIntervalSince($0) >= heartbeatInterval } ?? true
-        guard valuesChanged || heartbeatDue else { return }
+        guard valuesChanged || heartbeatDue else { return false }
 
         let context = container.viewContext
         let needsCleanup = lastCleanupDate.map { timestamp.timeIntervalSince($0) >= 3600 } ?? true
@@ -224,9 +226,11 @@ final class BatteryHistory {
             lastChargeLimit = chargeLimit
             lastRecordDate = timestamp
             saveError = nil
+            return true
         } catch {
             context.rollback()
             reportError("Core Data save failed: \(error.localizedDescription)", operation: "save history")
+            return false
         }
     }
 
@@ -410,17 +414,14 @@ final class BatteryHistory {
 
     private func reportDiagnostic(_ message: String, operation: String) {
         logger.error("\(message, privacy: .public)")
-        let diagnostics = diagnostics
-        Task {
-            await diagnostics.record(
-                DiagnosticEvent(
-                    category: .history,
-                    operation: operation,
-                    outcome: .failed,
-                    message: message
-                )
+        diagnostics.submit(
+            DiagnosticEvent(
+                category: .history,
+                operation: operation,
+                outcome: .failed,
+                message: message
             )
-        }
+        )
     }
 
     private nonisolated static func productionStoreURL() -> URL {

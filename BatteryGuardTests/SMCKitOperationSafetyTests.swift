@@ -18,6 +18,119 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         return predicate()
     }
 
+    func testBatteryTemperatureUsesOneBatchedSMCInvocation() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-smc-temperature-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "-t" ]]; then
+              echo "TB0T  [sp78]  31.5 (bytes 1f 80)"
+              echo "TB1T  [sp78]  42.25 (bytes 2a 40)"
+              echo "TB2T  [sp78]  39.0 (bytes 27 00)"
+              echo "TC0P  [sp78]  99.0 (bytes 63 00)"
+            fi
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let temperature = try await backend.readBatteryTemperature()
+
+        XCTAssertEqual(temperature, 42.25)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["-t"])
+    }
+
+    func testBatteryTemperatureListIgnoresUnrelatedAndInvalidSensors() {
+        XCTAssertEqual(
+            SMCKit.parseBatteryTemperatureList(
+                """
+                TC0P  [sp78]  99.0 (bytes 63 00)
+                TB0T  [sp78]  invalid (bytes 00 00)
+                TB2T  [sp78]  37.75 (bytes 25 c0)
+                """
+            ),
+            37.75
+        )
+        XCTAssertNil(SMCKit.parseBatteryTemperatureList("TC0P [sp78] 40.0 (bytes 28 00)"))
+    }
+
+    func testBatteryTemperatureFallsBackForPartialBatchAndCachesThatContract() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-smc-temperature-fallback-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            case "$*" in
+              "-t") echo "TB0T [sp78] 31.5 (bytes 1f 80)" ;;
+              "-k TB0T -r") echo "TB0T [sp78] 31.5 (bytes 1f 80)" ;;
+              "-k TB1T -r") echo "TB1T [sp78] 42.25 (bytes 2a 40)" ;;
+              "-k TB2T -r") echo "TB2T [sp78] 39.0 (bytes 27 00)" ;;
+            esac
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let firstTemperature = try await backend.readBatteryTemperature()
+        let secondTemperature = try await backend.readBatteryTemperature()
+
+        XCTAssertEqual(firstTemperature, 42.25)
+        XCTAssertEqual(secondTemperature, 42.25)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(
+            commands,
+            [
+                "-t",
+                "-k TB0T -r", "-k TB1T -r", "-k TB2T -r",
+                "-k TB0T -r", "-k TB1T -r", "-k TB2T -r"
+            ]
+        )
+    }
+
     func testFailedLongRunningVerificationCleansUpTheStartedProcess() async throws {
         let pidFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-verification-\(UUID().uuidString).pid")

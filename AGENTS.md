@@ -38,13 +38,14 @@ IOKit readings ---+                    result + verified CLI status
 - Serialize one-shot commands and long-running launches through one FIFO runner; keep each semantic control operation atomic through its status verification.
 - A spawned process is not success: await termination and capture exit code, stdout, and stderr.
 - Apply monotonic timeouts, bounded output capture, cancellation, and process-group cleanup; never use broad `pkill -f` matching.
+- Observe normal process exit and pipe closure with events; reserve short-interval polling for bounded teardown or actor-coordination paths where no event contract exists.
 - Long-running timeouts must fire autonomously; status polling is not the timeout mechanism.
 - Reject truncated command/status output instead of parsing an incomplete result.
 - Treat cleanup failure as a terminal runner failure and reject later commands instead of continuing in an unknown state.
 - Verify control-changing commands with a subsequent status read before updating UI state.
 - Verify the complete expected control tuple: charging, discharging, maintain level, and exact worker state; a matching subset is not success.
 - For battery CLI v1.3.4 force discharge, the verified tuple is charging enabled, discharging true, and the Maintain worker stopped. Do not require charging disabled: `CHTE=00` permits the forced `CHIE=08` discharge path.
-- Treat maintain as valid only when exactly one worker with the expected target exists and the PID file points to it; stale, mismatched, or duplicate workers are failures.
+- Treat maintain as valid only when exactly one worker with the expected target exists and the PID file points to it; bind argv to a stable process identity by checking the start identity before and after inspection. Stale, mismatched, reused, or duplicate workers are failures.
 - Bind every worker selected for termination to its process start identity and revalidate that identity immediately before each signal; a reused PID must never be signaled.
 - Never trust the CLI's “killing old maintain process” log by itself. Re-read the PID file and exact command line; the script can leave an orphaned stale worker after external commands.
 - Read PID files without following links or blocking on special files; accept only bounded, current-user-owned regular files.
@@ -58,6 +59,12 @@ IOKit readings ---+                    result + verified CLI status
 - Do not report missing temperature/health/current values as plausible measurements such as `0` or `100%`; model them as unavailable.
 - Do not dump raw IOKit dictionaries or battery identifiers to stdout or diagnostics.
 - Reject nonfinite or physically implausible sensor values before any safety decision.
+- Keep battery measurement delivery notification-driven, suppress identical snapshots, and use only a low-frequency watchdog for missed notifications.
+- While Heat Protection owns battery control, sample the independent SMC source at most every five seconds regardless of the IOKit reading. Prefer one validated `smc -t` invocation for the supported battery-temperature keys; if that output contract is unavailable, use a bounded per-key compatibility fallback and surface total sensor failure. Never allow one sensor to slow another.
+- Restore from Heat Protection only after fresh preflight and postflight readings succeed without an independent-sensor failure; a surviving value from the other sensor is not sufficient to resume charging.
+- Batch only routine diagnostics. Safety, failure, control, and lifecycle events must flush immediately, including any pending routine context.
+- Submit synchronous diagnostic producers through the ordered submission queue. Its flush is the shutdown barrier for every event accepted before the call.
+- Flush pending diagnostics after verified shutdown cleanup and before approving app termination.
 
 ## State and Lifecycle Invariants
 
@@ -72,6 +79,7 @@ IOKit readings ---+                    result + verified CLI status
 - For Top Up and Discharge, require both the expected CLI tuple and a live BatteryGuard-owned process; a matching external command is drift, not success.
 - Revalidate the operation generation and expected mode after an async status read so stale reconciliation cannot overwrite wake or newer safety intent.
 - Own long-running liveness probes as cancellable tasks and validate both probe and operation generations after every await; a stale probe must not mutate shutdown or a later Top Up/Discharge session.
+- Drive Top Up/Discharge completion and failure from the owned process-exit event, with a low-frequency active-mode watchdog as a missed-event safety net; never rely solely on changing battery measurements. Drive history heartbeat independently from UI snapshot equality.
 - Show drift as expected versus observed state with an explicit read-only retry path; never hide the recovery target behind a disabled control.
 - Define crash recovery from observed state, never from stale in-memory assumptions.
 - Normal app quit should not stop persistent maintain mode. Provide a separate explicit action to disable BatteryGuard control.
@@ -111,7 +119,7 @@ IOKit readings ---+                    result + verified CLI status
 - Keep real-hardware checks manual or opt-in and never run them without explicit user approval.
 - Assert outcomes and state; “does not crash” is not a sufficient test.
 - Keep persisted diagnostic fields stable and typed, give every event a unique ID, and test migration of the previous local schema.
-- Record history from the verified effective control state, not directly from the stored preference.
+- Record history from the verified effective control state, not directly from the stored preference, and record verified stable limit transitions immediately.
 - Prefer safety-path completeness over superficial coverage percentages or trivial view tests.
 
 ## Verification

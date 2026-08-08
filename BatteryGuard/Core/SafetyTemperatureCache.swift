@@ -32,4 +32,17 @@ struct SafetyTemperatureCache: Equatable, Sendable {
         guard age >= 0, age <= maxAge else { return nil }
         return value
     }
+
+    func isSamplingDue(at date: Date, interval: TimeInterval) -> Bool {
+        guard interval.isFinite,
+              interval >= 0,
+              date.timeIntervalSinceReferenceDate.isFinite,
+              let recordedAt,
+              recordedAt.timeIntervalSinceReferenceDate.isFinite else {
+            return true
+        }
+        let age = date.timeIntervalSince(recordedAt)
+        guard age >= 0 else { return true }
+        return age >= interval
+    }
 }

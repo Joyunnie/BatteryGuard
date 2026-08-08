@@ -16,6 +16,72 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(record.chargeLimit, 80)
     }
 
+    func testVerifiedChargeLimitTransitionRecordsHistoryWithoutBatteryChange() async throws {
+        let history = BatteryHistory(inMemory: true)
+        let readiness = await history.waitUntilReady()
+        XCTAssertEqual(readiness, .ready)
+        let (controller, _, _, _) = makeSUT(charge: 75, history: history)
+        controller.processBatteryInfo(makeBatteryInfo(charge: 75))
+
+        controller.setChargeLimit(60)
+        let applied = await eventually { controller.mode == .maintaining(limit: 60) }
+
+        XCTAssertTrue(applied)
+        XCTAssertEqual(history.fetchLast24Hours().last?.chargeLimit, 60)
+    }
+
+    func testInitializationProcessesCurrentSnapshotAndKeepsHistoryHeartbeat() async throws {
+        let heartbeatInterval: TimeInterval = 0.05
+        let history = BatteryHistory(
+            inMemory: true,
+            heartbeatInterval: heartbeatInterval
+        )
+        let historyReadiness = await history.waitUntilReady()
+        XCTAssertEqual(historyReadiness, .ready)
+        let info = makeBatteryInfo(charge: 75)
+        let (controller, _, monitor, _) = makeSUT(
+            charge: 75,
+            batteryInfoOnRead: info,
+            initialReadiness: .initializing,
+            history: history,
+            historyHeartbeatInterval: heartbeatInterval
+        )
+
+        try await controller.initialize()
+        let heartbeatRecorded = await eventually {
+            history.fetchLast24Hours().count >= 2
+        }
+
+        XCTAssertTrue(heartbeatRecorded)
+        XCTAssertEqual(monitor.batteryInfo, info)
+        XCTAssertEqual(history.fetchLast24Hours().map(\.chargeLimit), [80, 80])
+        try await controller.shutdown()
+    }
+
+    func testHistoryHeartbeatIsNotPostponedByUnstoredTemperatureUpdates() async throws {
+        let heartbeatInterval: TimeInterval = 0.05
+        let history = BatteryHistory(
+            inMemory: true,
+            heartbeatInterval: heartbeatInterval
+        )
+        let historyReadiness = await history.waitUntilReady()
+        XCTAssertEqual(historyReadiness, .ready)
+        let (controller, _, _, _) = makeSUT(
+            history: history,
+            historyHeartbeatInterval: heartbeatInterval
+        )
+
+        controller.processBatteryInfo(makeBatteryInfo(charge: 75, temperature: 30))
+        for offset in 1...6 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            controller.processBatteryInfo(
+                makeBatteryInfo(charge: 75, temperature: 30 + Double(offset) / 10)
+            )
+        }
+
+        XCTAssertGreaterThanOrEqual(history.fetchLast24Hours().count, 2)
+    }
+
     func testExternalMaintainDriftIsDisplayedLoggedAndClearsWhenCorrected() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-drift-log-\(UUID().uuidString)", isDirectory: true)

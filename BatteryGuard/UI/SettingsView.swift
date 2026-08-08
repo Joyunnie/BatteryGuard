@@ -41,15 +41,8 @@ struct SettingsView: View {
                         in: 20...100,
                         step: 5
                     )
-                    .disabled(
-                        !controller.isReady ||
-                        controller.isCommandPending ||
-                        controller.isDischarging ||
-                        controller.isTopUpActive ||
-                        controller.isBatteryControlDisabled ||
-                        controller.hasExternalControlDrift ||
-                        controller.isHeatProtectionBlockingControls
-                    )
+                    .disabled(!controller.chargeLimitAvailability.isAllowed)
+                    .help(controller.chargeLimitAvailability.helpText(fallback: "충전 한도 변경"))
                     Text("\(controller.displayedChargeLimit)%")
                         .font(.system(.body, design: .monospaced))
                         .frame(width: 45)

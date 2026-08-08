@@ -6,6 +6,7 @@ import Darwin
 
 private let defaultBatteryPath = "/usr/local/co.palokaj.battery/battery"
 private let defaultSMCBinaryPath = "/usr/local/co.palokaj.battery/smc"
+private let smcTemperatureReadTimeout: TimeInterval = 2
 
 private actor AsyncOperationGate {
     private var isLocked = false
@@ -37,6 +38,7 @@ enum BatteryError: Error, LocalizedError, CustomStringConvertible {
     case binaryNotFound(String)
     case invalidChargeLevel(Int)
     case unsupported(String)
+    case ownershipPersistenceFailed(String)
     case preflightFailed(String)
     case commandCancelled(String)
     case commandTimedOut(String)
@@ -49,6 +51,8 @@ enum BatteryError: Error, LocalizedError, CustomStringConvertible {
         case .invalidChargeLevel(let level):
             return "Charge level must be between 20 and 100, received \(level)"
         case .unsupported(let message):
+            return message
+        case .ownershipPersistenceFailed(let message):
             return message
         case .preflightFailed(let message):
             return "Battery CLI preflight failed: \(message)"
@@ -180,6 +184,7 @@ protocol ChargeControlBackend: AnyObject, Sendable {
     func startTopUp(to level: Int) async throws
     func isLongRunningOperationActive() async -> Bool
     func longRunningOperationResult() async -> BatteryCommandResult?
+    func waitForLongRunningOperationExit() async -> BatteryCommandResult?
     func cancelLongRunningOperation() async throws
     func requestCancellation() async throws
 }
@@ -228,6 +233,15 @@ actor SMCKit: ChargeBackend {
     private var savedMagSafeLEDValue: UInt8?
     private var batteryExecutableIdentity: ExecutableIdentity?
     private var smcExecutableIdentity: ExecutableIdentity?
+    private var supportsBatchedTemperatureRead: Bool?
+
+    private struct BatteryTemperatureReadings {
+        let valuesByKey: [String: Float]
+        var maximum: Float? { valuesByKey.values.max() }
+        var hasCompleteCoverage: Bool {
+            Set(valuesByKey.keys) == Set(["TB0T", "TB1T", "TB2T"])
+        }
+    }
 
     private struct ExecutableIdentity: Equatable, Sendable {
         let device: dev_t
@@ -244,7 +258,7 @@ actor SMCKit: ChargeBackend {
         let identity: ProcessIdentity?
     }
 
-    private struct ProcessIdentity: Equatable, Sendable {
+    struct ProcessIdentity: Equatable, Sendable {
         let startSeconds: UInt64
         let startMicroseconds: UInt64
     }
@@ -585,6 +599,10 @@ actor SMCKit: ChargeBackend {
         await runner.longRunningResult()
     }
 
+    func waitForLongRunningOperationExit() async -> BatteryCommandResult? {
+        await runner.waitForLongRunningResult()
+    }
+
     func cancelLongRunningOperation() async throws {
         try await withGate(controlGate) {
             _ = try await runner.cancelLongRunning()
@@ -646,11 +664,34 @@ actor SMCKit: ChargeBackend {
 
     static func classifyMaintainWorkers(
         pidFilePID: Int32?,
-        processTable: String,
+        pgrepOutput: String,
         batteryPath: String
     ) -> MaintainWorkerStatus {
-        let workers = parseMaintainWorkerProcesses(processTable: processTable, batteryPath: batteryPath)
+        let workers = parsePgrepMaintainWorkerProcesses(
+            pgrepOutput: pgrepOutput,
+            batteryPath: batteryPath
+        )
         return classifyMaintainWorkers(pidFilePID: pidFilePID, workers: workers)
+    }
+
+    static func classifyMaintainWorkers(
+        pidFilePID: Int32?,
+        pgrepOutput: String,
+        processTable: String,
+        batteryPath: String,
+        identitiesBefore: [Int32: ProcessIdentity],
+        identitiesAfter: [Int32: ProcessIdentity]
+    ) -> MaintainWorkerStatus {
+        classifyMaintainWorkers(
+            pidFilePID: pidFilePID,
+            workers: stableMaintainWorkers(
+                pgrepOutput: pgrepOutput,
+                processTable: processTable,
+                batteryPath: batteryPath,
+                identitiesBefore: identitiesBefore,
+                identitiesAfter: identitiesAfter
+            )
+        )
     }
 
     private static func classifyMaintainWorkers(
@@ -665,7 +706,31 @@ actor SMCKit: ChargeBackend {
         return .running(pid: worker.pid, target: worker.target)
     }
 
-    private static func parseMaintainWorkerProcesses(
+    private static func parsePgrepMaintainWorkerProcesses(
+        pgrepOutput: String,
+        batteryPath: String
+    ) -> [MaintainWorkerProcess] {
+        pgrepOutput.split(whereSeparator: \Character.isNewline).compactMap { line in
+            let fields = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 2,
+                  let pid = Int32(fields[0]),
+                  pid > 1,
+                  let parsed = Self.parseExactMaintainCommand(
+                    String(fields[1]),
+                    batteryPath: batteryPath
+                  ) else {
+                return nil
+            }
+            return MaintainWorkerProcess(
+                pid: pid,
+                command: String(fields[1]),
+                target: parsed.target,
+                identity: nil
+            )
+        }
+    }
+
+    private static func parsePSMaintainWorkerProcesses(
         processTable: String,
         batteryPath: String
     ) -> [MaintainWorkerProcess] {
@@ -685,6 +750,45 @@ actor SMCKit: ChargeBackend {
                 command: String(fields[2]),
                 target: parsed.target,
                 identity: nil
+            )
+        }
+    }
+
+    private static func stableMaintainWorkers(
+        pgrepOutput: String,
+        processTable: String,
+        batteryPath: String,
+        identitiesBefore: [Int32: ProcessIdentity],
+        identitiesAfter: [Int32: ProcessIdentity]
+    ) -> [MaintainWorkerProcess] {
+        let parsedCandidates = parsePgrepMaintainWorkerProcesses(
+            pgrepOutput: pgrepOutput,
+            batteryPath: batteryPath
+        )
+        var candidates: [Int32: MaintainWorkerProcess] = [:]
+        var duplicatePIDs = Set<Int32>()
+        for candidate in parsedCandidates {
+            if candidates.updateValue(candidate, forKey: candidate.pid) != nil {
+                duplicatePIDs.insert(candidate.pid)
+            }
+        }
+        return parsePSMaintainWorkerProcesses(
+            processTable: processTable,
+            batteryPath: batteryPath
+        ).compactMap { inspected in
+            guard !duplicatePIDs.contains(inspected.pid),
+                  let candidate = candidates[inspected.pid],
+                  candidate.command == inspected.command,
+                  candidate.target == inspected.target,
+                  let identityBefore = identitiesBefore[inspected.pid],
+                  identitiesAfter[inspected.pid] == identityBefore else {
+                return nil
+            }
+            return MaintainWorkerProcess(
+                pid: inspected.pid,
+                command: inspected.command,
+                target: inspected.target,
+                identity: identityBefore
             )
         }
     }
@@ -802,8 +906,8 @@ actor SMCKit: ChargeBackend {
         let escapedPath = NSRegularExpression.escapedPattern(for: batteryPath)
         let candidates = try await runProcess(
             executable: "/usr/bin/pgrep",
-            arguments: ["-f", escapedPath],
-            label: "locate battery CLI processes",
+            arguments: ["-fl", escapedPath],
+            label: "inspect battery CLI processes",
             timeout: try boundedSleepPreparationTimeout(
                 maximum: statusCommandTimeout,
                 deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
@@ -812,28 +916,37 @@ actor SMCKit: ChargeBackend {
         )
         guard candidates.exitCode == 0 else { return [] }
 
-        let candidatePIDs = candidates.stdout
-            .split(whereSeparator: \Character.isNewline)
-            .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            .filter { $0 > 1 && $0 != getpid() }
-        guard candidatePIDs.count <= 32 else {
+        let candidateLines = candidates.stdout.split(whereSeparator: \Character.isNewline)
+        guard candidateLines.count <= 32 else {
             throw BatteryError.commandFailed(
                 "inspect battery CLI processes",
                 -1,
-                "refusing unbounded process inspection: \(candidatePIDs.count) candidates"
+                "refusing unbounded process inspection: \(candidateLines.count) candidates"
             )
         }
-        guard !candidatePIDs.isEmpty else { return [] }
+        let parsedCandidates = Self.parsePgrepMaintainWorkerProcesses(
+            pgrepOutput: candidates.stdout,
+            batteryPath: batteryPath
+        ).filter { $0.pid != getpid() }
+        guard !parsedCandidates.isEmpty else { return [] }
+
+        var identitiesBefore: [Int32: ProcessIdentity] = [:]
+        for candidate in parsedCandidates {
+            if let identity = try currentIdentity(for: candidate.pid) {
+                identitiesBefore[candidate.pid] = identity
+            }
+        }
+        guard !identitiesBefore.isEmpty else { return [] }
 
         let inspection = try await runProcess(
             executable: "/bin/ps",
             arguments: [
                 "-p",
-                candidatePIDs.map(String.init).joined(separator: ","),
+                identitiesBefore.keys.sorted().map(String.init).joined(separator: ","),
                 "-o",
                 "pid=,pgid=,command="
             ],
-            label: "inspect battery CLI processes",
+            label: "verify battery CLI process identities",
             timeout: try boundedSleepPreparationTimeout(
                 maximum: statusCommandTimeout,
                 deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
@@ -841,18 +954,20 @@ actor SMCKit: ChargeBackend {
             allowedExitCodes: [0, 1]
         )
         guard inspection.exitCode == 0 else { return [] }
-        return try Self.parseMaintainWorkerProcesses(
-            processTable: inspection.stdout,
-            batteryPath: batteryPath
-        ).compactMap { worker in
-            guard let identity = try currentIdentity(for: worker.pid) else { return nil }
-            return MaintainWorkerProcess(
-                pid: worker.pid,
-                command: worker.command,
-                target: worker.target,
-                identity: identity
-            )
+
+        var identitiesAfter: [Int32: ProcessIdentity] = [:]
+        for pid in identitiesBefore.keys {
+            if let identity = try currentIdentity(for: pid) {
+                identitiesAfter[pid] = identity
+            }
         }
+        return Self.stableMaintainWorkers(
+            pgrepOutput: candidates.stdout,
+            processTable: inspection.stdout,
+            batteryPath: batteryPath,
+            identitiesBefore: identitiesBefore,
+            identitiesAfter: identitiesAfter
+        )
     }
 
     private func currentIdentity(for pid: Int32) throws -> ProcessIdentity? {
@@ -964,10 +1079,6 @@ actor SMCKit: ChargeBackend {
         )
     }
 
-    static func parseChargingStatus(csv: String) -> BatteryChargingStatus {
-        parseControlStatus(csv: csv)?.charging ?? .unknown
-    }
-
     // MARK: - Battery temperature
 
     func readBatteryTemperature() async throws -> Float {
@@ -980,38 +1091,99 @@ actor SMCKit: ChargeBackend {
             displayName: "SMC binary"
         )
 
-        var maximum = -Float.greatestFiniteMagnitude
-        var foundValue = false
-        var lastReadError: Error?
+        if supportsBatchedTemperatureRead != false {
+            do {
+                let result = try await runProcess(
+                    executable: smcBinaryPath,
+                    arguments: ["-t"],
+                    label: "smc -t",
+                    timeout: smcTemperatureReadTimeout
+                )
+                let readings = Self.parseBatteryTemperatureReadings(result.stdout)
+                if readings.hasCompleteCoverage, let maximum = readings.maximum {
+                    supportsBatchedTemperatureRead = true
+                    return maximum
+                }
+                supportsBatchedTemperatureRead = false
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as BatteryError {
+                switch error {
+                case .commandCancelled, .commandTimedOut:
+                    throw error
+                default:
+                    supportsBatchedTemperatureRead = false
+                }
+                // Older or variant SMC binaries do not all expose the same `-t`
+                // listing. Fall through to the proven per-key read contract.
+            } catch {
+                supportsBatchedTemperatureRead = false
+            }
+        }
+
+        var temperatures: [Float] = []
+        var failures: [String] = []
         for key in ["TB0T", "TB1T", "TB2T"] {
             do {
                 let result = try await runProcess(
                     executable: smcBinaryPath,
                     arguments: ["-k", key, "-r"],
-                    label: "smc -k \(key) -r"
+                    label: "smc -k \(key) -r",
+                    timeout: smcTemperatureReadTimeout
                 )
-                for line in result.stdout.components(separatedBy: "\n") where !line.isEmpty {
-                    if let bracketEnd = line.range(of: "]"),
-                       let bytesStart = line.range(of: "(bytes") {
-                        let text = line[bracketEnd.upperBound..<bytesStart.lowerBound]
-                            .trimmingCharacters(in: .whitespaces)
-                        if let rawValue = Float(text),
-                           let value = BatteryMonitor.validatedTemperature(Double(rawValue)) {
-                            maximum = max(maximum, Float(value))
-                            foundValue = true
-                        }
-                    }
+                guard let value = Self.parseBatteryTemperatureReadings(result.stdout)
+                    .valuesByKey[key] else {
+                    failures.append("\(key): unrecognized output")
+                    continue
                 }
+                temperatures.append(value)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as BatteryError {
+                if case .commandCancelled = error { throw error }
+                failures.append("\(key): \(error.localizedDescription)")
             } catch {
-                lastReadError = error
+                failures.append("\(key): \(error.localizedDescription)")
             }
         }
-
-        guard foundValue else {
-            throw lastReadError
-                ?? BatteryError.commandFailed("smc temperature read", -1, "no temperature sensors found")
+        guard let maximum = temperatures.max() else {
+            throw BatteryError.commandFailed(
+                "smc temperature read",
+                -1,
+                failures.joined(separator: "; ")
+            )
         }
         return maximum
+    }
+
+    static func parseBatteryTemperatureList(_ output: String) -> Float? {
+        parseBatteryTemperatureReadings(output).maximum
+    }
+
+    private static func parseBatteryTemperatureReadings(
+        _ output: String
+    ) -> BatteryTemperatureReadings {
+        let supportedKeys = Set(["TB0T", "TB1T", "TB2T"])
+        var valuesByKey: [String: Float] = [:]
+        for line in output.split(whereSeparator: \Character.isNewline) {
+            let fields = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard let rawKey = fields.first else { continue }
+            let key = String(rawKey)
+            guard supportedKeys.contains(key),
+                  let bracketEnd = line.range(of: "]"),
+                  let bytesStart = line.range(of: "(bytes"),
+                  bracketEnd.upperBound <= bytesStart.lowerBound else {
+                continue
+            }
+            let text = line[bracketEnd.upperBound..<bytesStart.lowerBound]
+                .trimmingCharacters(in: .whitespaces)
+            guard let rawValue = Float(text),
+                  let value = BatteryMonitor.validatedTemperature(Double(rawValue)) else {
+                continue
+            }
+            valuesByKey[key] = Float(value)
+        }
+        return BatteryTemperatureReadings(valuesByKey: valuesByKey)
     }
 
     // MARK: - MagSafe LED
