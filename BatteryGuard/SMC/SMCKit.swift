@@ -6,6 +6,7 @@ import Darwin
 
 private let defaultBatteryPath = "/usr/local/co.palokaj.battery/battery"
 private let defaultSMCBinaryPath = "/usr/local/co.palokaj.battery/smc"
+private let smcTemperatureReadTimeout: TimeInterval = 2
 
 private actor AsyncOperationGate {
     private var isLocked = false
@@ -37,6 +38,7 @@ enum BatteryError: Error, LocalizedError, CustomStringConvertible {
     case binaryNotFound(String)
     case invalidChargeLevel(Int)
     case unsupported(String)
+    case ownershipPersistenceFailed(String)
     case preflightFailed(String)
     case commandCancelled(String)
     case commandTimedOut(String)
@@ -49,6 +51,8 @@ enum BatteryError: Error, LocalizedError, CustomStringConvertible {
         case .invalidChargeLevel(let level):
             return "Charge level must be between 20 and 100, received \(level)"
         case .unsupported(let message):
+            return message
+        case .ownershipPersistenceFailed(let message):
             return message
         case .preflightFailed(let message):
             return "Battery CLI preflight failed: \(message)"
@@ -180,6 +184,7 @@ protocol ChargeControlBackend: AnyObject, Sendable {
     func startTopUp(to level: Int) async throws
     func isLongRunningOperationActive() async -> Bool
     func longRunningOperationResult() async -> BatteryCommandResult?
+    func waitForLongRunningOperationExit() async -> BatteryCommandResult?
     func cancelLongRunningOperation() async throws
     func requestCancellation() async throws
 }
@@ -228,6 +233,15 @@ actor SMCKit: ChargeBackend {
     private var savedMagSafeLEDValue: UInt8?
     private var batteryExecutableIdentity: ExecutableIdentity?
     private var smcExecutableIdentity: ExecutableIdentity?
+    private var supportsBatchedTemperatureRead: Bool?
+
+    private struct BatteryTemperatureReadings {
+        let valuesByKey: [String: Float]
+        var maximum: Float? { valuesByKey.values.max() }
+        var hasCompleteCoverage: Bool {
+            Set(valuesByKey.keys) == Set(["TB0T", "TB1T", "TB2T"])
+        }
+    }
 
     private struct ExecutableIdentity: Equatable, Sendable {
         let device: dev_t
@@ -583,6 +597,10 @@ actor SMCKit: ChargeBackend {
 
     func longRunningOperationResult() async -> BatteryCommandResult? {
         await runner.longRunningResult()
+    }
+
+    func waitForLongRunningOperationExit() async -> BatteryCommandResult? {
+        await runner.waitForLongRunningResult()
     }
 
     func cancelLongRunningOperation() async throws {
@@ -1061,10 +1079,6 @@ actor SMCKit: ChargeBackend {
         )
     }
 
-    static func parseChargingStatus(csv: String) -> BatteryChargingStatus {
-        parseControlStatus(csv: csv)?.charging ?? .unknown
-    }
-
     // MARK: - Battery temperature
 
     func readBatteryTemperature() async throws -> Float {
@@ -1077,38 +1091,99 @@ actor SMCKit: ChargeBackend {
             displayName: "SMC binary"
         )
 
-        var maximum = -Float.greatestFiniteMagnitude
-        var foundValue = false
-        var lastReadError: Error?
+        if supportsBatchedTemperatureRead != false {
+            do {
+                let result = try await runProcess(
+                    executable: smcBinaryPath,
+                    arguments: ["-t"],
+                    label: "smc -t",
+                    timeout: smcTemperatureReadTimeout
+                )
+                let readings = Self.parseBatteryTemperatureReadings(result.stdout)
+                if readings.hasCompleteCoverage, let maximum = readings.maximum {
+                    supportsBatchedTemperatureRead = true
+                    return maximum
+                }
+                supportsBatchedTemperatureRead = false
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as BatteryError {
+                switch error {
+                case .commandCancelled, .commandTimedOut:
+                    throw error
+                default:
+                    supportsBatchedTemperatureRead = false
+                }
+                // Older or variant SMC binaries do not all expose the same `-t`
+                // listing. Fall through to the proven per-key read contract.
+            } catch {
+                supportsBatchedTemperatureRead = false
+            }
+        }
+
+        var temperatures: [Float] = []
+        var failures: [String] = []
         for key in ["TB0T", "TB1T", "TB2T"] {
             do {
                 let result = try await runProcess(
                     executable: smcBinaryPath,
                     arguments: ["-k", key, "-r"],
-                    label: "smc -k \(key) -r"
+                    label: "smc -k \(key) -r",
+                    timeout: smcTemperatureReadTimeout
                 )
-                for line in result.stdout.components(separatedBy: "\n") where !line.isEmpty {
-                    if let bracketEnd = line.range(of: "]"),
-                       let bytesStart = line.range(of: "(bytes") {
-                        let text = line[bracketEnd.upperBound..<bytesStart.lowerBound]
-                            .trimmingCharacters(in: .whitespaces)
-                        if let rawValue = Float(text),
-                           let value = BatteryMonitor.validatedTemperature(Double(rawValue)) {
-                            maximum = max(maximum, Float(value))
-                            foundValue = true
-                        }
-                    }
+                guard let value = Self.parseBatteryTemperatureReadings(result.stdout)
+                    .valuesByKey[key] else {
+                    failures.append("\(key): unrecognized output")
+                    continue
                 }
+                temperatures.append(value)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as BatteryError {
+                if case .commandCancelled = error { throw error }
+                failures.append("\(key): \(error.localizedDescription)")
             } catch {
-                lastReadError = error
+                failures.append("\(key): \(error.localizedDescription)")
             }
         }
-
-        guard foundValue else {
-            throw lastReadError
-                ?? BatteryError.commandFailed("smc temperature read", -1, "no temperature sensors found")
+        guard let maximum = temperatures.max() else {
+            throw BatteryError.commandFailed(
+                "smc temperature read",
+                -1,
+                failures.joined(separator: "; ")
+            )
         }
         return maximum
+    }
+
+    static func parseBatteryTemperatureList(_ output: String) -> Float? {
+        parseBatteryTemperatureReadings(output).maximum
+    }
+
+    private static func parseBatteryTemperatureReadings(
+        _ output: String
+    ) -> BatteryTemperatureReadings {
+        let supportedKeys = Set(["TB0T", "TB1T", "TB2T"])
+        var valuesByKey: [String: Float] = [:]
+        for line in output.split(whereSeparator: \Character.isNewline) {
+            let fields = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard let rawKey = fields.first else { continue }
+            let key = String(rawKey)
+            guard supportedKeys.contains(key),
+                  let bracketEnd = line.range(of: "]"),
+                  let bytesStart = line.range(of: "(bytes"),
+                  bracketEnd.upperBound <= bytesStart.lowerBound else {
+                continue
+            }
+            let text = line[bracketEnd.upperBound..<bytesStart.lowerBound]
+                .trimmingCharacters(in: .whitespaces)
+            guard let rawValue = Float(text),
+                  let value = BatteryMonitor.validatedTemperature(Double(rawValue)) else {
+                continue
+            }
+            valuesByKey[key] = Float(value)
+        }
+        return BatteryTemperatureReadings(valuesByKey: valuesByKey)
     }
 
     // MARK: - MagSafe LED

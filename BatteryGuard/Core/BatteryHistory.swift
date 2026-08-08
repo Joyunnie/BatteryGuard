@@ -414,17 +414,14 @@ final class BatteryHistory {
 
     private func reportDiagnostic(_ message: String, operation: String) {
         logger.error("\(message, privacy: .public)")
-        let diagnostics = diagnostics
-        Task {
-            await diagnostics.record(
-                DiagnosticEvent(
-                    category: .history,
-                    operation: operation,
-                    outcome: .failed,
-                    message: message
-                )
+        diagnostics.submit(
+            DiagnosticEvent(
+                category: .history,
+                operation: operation,
+                outcome: .failed,
+                message: message
             )
-        }
+        )
     }
 
     private nonisolated static func productionStoreURL() -> URL {

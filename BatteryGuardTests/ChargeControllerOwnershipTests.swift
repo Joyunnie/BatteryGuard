@@ -278,8 +278,13 @@ extension ChargeControllerSafetyTests {
         do {
             try await controller.initialize()
             XCTFail("Expected corrupt ownership journal to block initialization")
+        } catch let error as BatteryError {
+            guard case .ownershipPersistenceFailed(let message) = error else {
+                return XCTFail("Expected typed ownership persistence failure, got \(error)")
+            }
+            XCTAssertTrue(message.contains("소유권 기록"))
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains("소유권 기록"))
+            XCTFail("Expected BatteryError, got \(error)")
         }
         XCTAssertFalse(backend.operations.contains("open"))
         XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("maintain:") }))

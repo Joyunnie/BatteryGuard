@@ -17,7 +17,7 @@ final class StatusParsingTests: XCTestCase {
     func testRejectsMalformedStatusInsteadOfGuessing() {
         XCTAssertNil(SMCKit.parseControlStatus(csv: ""))
         XCTAssertNil(SMCKit.parseControlStatus(csv: "80,00:10,disabled"))
-        XCTAssertEqual(SMCKit.parseChargingStatus(csv: "bad"), .unknown)
+        XCTAssertNil(SMCKit.parseControlStatus(csv: "bad"))
     }
 
     func testMaintainWorkerClassificationRejectsDuplicatesAndStalePIDFiles() {

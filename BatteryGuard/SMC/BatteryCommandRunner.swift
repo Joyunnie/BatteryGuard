@@ -3,6 +3,7 @@
 
 import Foundation
 import Darwin
+import Dispatch
 
 enum BatteryCommandTermination: Equatable, Sendable {
     case exited
@@ -48,11 +49,147 @@ enum BatteryCommandRunnerError: Error, LocalizedError, Sendable {
 }
 
 actor BatteryCommandRunner {
+    private enum ProcessWaitOutcome: Sendable {
+        case exited
+        case interrupted
+        case deadlineReached
+    }
+
+    private final class ProcessExitWatcher: @unchecked Sendable {
+        private struct Waiter {
+            let continuation: CheckedContinuation<ProcessWaitOutcome, Never>
+            let deadlineWork: DispatchWorkItem?
+        }
+
+        private let lock = NSLock()
+        private let source: any DispatchSourceProcess
+        private var didExit = false
+        private var didInterrupt = false
+        private var waiters: [UUID: Waiter] = [:]
+        private var interruptedBeforeRegistration: Set<UUID> = []
+
+        init(pid: pid_t) {
+            let source = DispatchSource.makeProcessSource(
+                identifier: pid,
+                eventMask: .exit,
+                queue: .global(qos: .utility)
+            )
+            self.source = source
+            source.setEventHandler { [weak self] in self?.signalExit() }
+            source.resume()
+        }
+
+        deinit {
+            source.cancel()
+            interruptWaiters()
+        }
+
+        func wait(until deadline: UInt64?) async -> ProcessWaitOutcome {
+            let id = UUID()
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    register(continuation, id: id, deadline: deadline)
+                }
+            } onCancel: {
+                self.resolve(id: id, outcome: .interrupted)
+            }
+        }
+
+        func interruptWaiters() {
+            resolveAll(outcome: .interrupted, markExited: false, markInterrupted: true)
+        }
+
+        func invalidate() {
+            source.cancel()
+            interruptWaiters()
+        }
+
+        private func register(
+            _ continuation: CheckedContinuation<ProcessWaitOutcome, Never>,
+            id: UUID,
+            deadline: UInt64?
+        ) {
+            let deadlineWork: DispatchWorkItem?
+            if let deadline, deadline != UInt64.max {
+                deadlineWork = DispatchWorkItem { [weak self] in
+                    self?.resolve(id: id, outcome: .deadlineReached)
+                }
+            } else {
+                deadlineWork = nil
+            }
+
+            lock.lock()
+            if didExit {
+                lock.unlock()
+                continuation.resume(returning: .exited)
+                return
+            }
+            if didInterrupt {
+                lock.unlock()
+                continuation.resume(returning: .interrupted)
+                return
+            }
+            if interruptedBeforeRegistration.remove(id) != nil {
+                lock.unlock()
+                continuation.resume(returning: .interrupted)
+                return
+            }
+            waiters[id] = Waiter(continuation: continuation, deadlineWork: deadlineWork)
+            lock.unlock()
+
+            if let deadline, let deadlineWork {
+                DispatchQueue.global(qos: .utility).asyncAfter(
+                    deadline: DispatchTime(uptimeNanoseconds: deadline),
+                    execute: deadlineWork
+                )
+            }
+        }
+
+        private func signalExit() {
+            resolveAll(outcome: .exited, markExited: true, markInterrupted: false)
+        }
+
+        private func resolve(id: UUID, outcome: ProcessWaitOutcome) {
+            lock.lock()
+            let waiter = waiters.removeValue(forKey: id)
+            if waiter == nil, outcome == .interrupted, !didExit {
+                interruptedBeforeRegistration.insert(id)
+            }
+            lock.unlock()
+            waiter?.deadlineWork?.cancel()
+            waiter?.continuation.resume(returning: outcome)
+        }
+
+        private func resolveAll(
+            outcome: ProcessWaitOutcome,
+            markExited: Bool,
+            markInterrupted: Bool
+        ) {
+            lock.lock()
+            if markExited { didExit = true }
+            if markInterrupted { didInterrupt = true }
+            let pending = Array(waiters.values)
+            waiters.removeAll()
+            lock.unlock()
+            for waiter in pending {
+                waiter.deadlineWork?.cancel()
+                waiter.continuation.resume(returning: outcome)
+            }
+        }
+    }
+
     private final class BoundedOutputBuffer: @unchecked Sendable {
+        private struct CloseWaiter {
+            let continuation: CheckedContinuation<Bool, Never>
+            let deadlineWork: DispatchWorkItem?
+        }
+
         private let lock = NSLock()
         private var data = Data()
         private var isClosed = false
         private var wasTruncated = false
+        private var closeWaiters: [UUID: CloseWaiter] = [:]
+        private var cancelledBeforeCloseRegistration: Set<UUID> = []
 
         func append(_ chunk: Data) {
             lock.lock()
@@ -81,13 +218,73 @@ actor BatteryCommandRunner {
         func markClosed() {
             lock.lock()
             isClosed = true
+            let pending = Array(closeWaiters.values)
+            closeWaiters.removeAll()
             lock.unlock()
+            for waiter in pending {
+                waiter.deadlineWork?.cancel()
+                waiter.continuation.resume(returning: true)
+            }
         }
 
         func hasFinishedDraining() -> Bool {
             lock.lock()
             defer { lock.unlock() }
             return isClosed
+        }
+
+        func waitUntilClosed(deadline: UInt64) async -> Bool {
+            let id = UUID()
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    let deadlineWork = deadline == UInt64.max ? nil : DispatchWorkItem { [weak self] in
+                        self?.resolveCloseWaiter(id: id, didClose: false)
+                    }
+                    lock.lock()
+                    if isClosed {
+                        lock.unlock()
+                        continuation.resume(returning: true)
+                        return
+                    }
+                    if cancelledBeforeCloseRegistration.remove(id) != nil {
+                        lock.unlock()
+                        continuation.resume(returning: false)
+                        return
+                    }
+                    closeWaiters[id] = CloseWaiter(
+                        continuation: continuation,
+                        deadlineWork: deadlineWork
+                    )
+                    lock.unlock()
+                    if let deadlineWork {
+                        DispatchQueue.global(qos: .utility).asyncAfter(
+                            deadline: DispatchTime(uptimeNanoseconds: deadline),
+                            execute: deadlineWork
+                        )
+                    }
+                }
+            } onCancel: {
+                self.cancelCloseWaiter(id: id)
+            }
+        }
+
+        private func cancelCloseWaiter(id: UUID) {
+            lock.lock()
+            let waiter = closeWaiters.removeValue(forKey: id)
+            if waiter == nil, !isClosed {
+                cancelledBeforeCloseRegistration.insert(id)
+            }
+            lock.unlock()
+            waiter?.deadlineWork?.cancel()
+            waiter?.continuation.resume(returning: false)
+        }
+
+        private func resolveCloseWaiter(id: UUID, didClose: Bool) {
+            lock.lock()
+            let waiter = closeWaiters.removeValue(forKey: id)
+            lock.unlock()
+            waiter?.deadlineWork?.cancel()
+            waiter?.continuation.resume(returning: didClose)
         }
     }
 
@@ -155,6 +352,7 @@ actor BatteryCommandRunner {
         let id: UUID
         let command: Command
         let pid: pid_t
+        let exitWatcher: ProcessExitWatcher
         let stdoutBuffer: BoundedOutputBuffer?
         let stderrBuffer: BoundedOutputBuffer?
         let stdoutReadHandle: FileHandle?
@@ -170,6 +368,7 @@ actor BatteryCommandRunner {
 
     private struct LongRunningCommand {
         let child: SpawnedChild
+        let launchTimestamp: Date
         let terminationStartDeadline: UInt64
         let totalDeadline: UInt64
         var requestedTermination: BatteryCommandTermination?
@@ -262,6 +461,35 @@ actor BatteryCommandRunner {
         return lastLongRunningResult
     }
 
+    func waitForLongRunningResult() async -> BatteryCommandResult? {
+        guard let command = longRunningCommand else { return lastLongRunningResult }
+        let commandID = command.child.id
+        let outcome = await command.child.exitWatcher.wait(until: nil)
+        guard outcome == .exited, !Task.isCancelled else { return nil }
+        guard let current = longRunningCommand, current.child.id == commandID else {
+            return lastLongRunningResult?.commandID == commandID ? lastLongRunningResult : nil
+        }
+        guard let waitStatus = waitForExitedProcess(pid: current.child.pid) else {
+            recordTerminalFailure(
+                BatteryCommandRunnerError.cancellationFailed(
+                    command: current.child.command.label,
+                    message: "process exit was reported but the child could not be reaped"
+                )
+            )
+            return nil
+        }
+        do {
+            return try await finalizeLongRunning(
+                current,
+                terminateRemainingGroup: true,
+                knownWaitStatus: waitStatus
+            )
+        } catch {
+            recordTerminalFailure(error)
+            return nil
+        }
+    }
+
     @discardableResult
     func cancelLongRunning() async throws -> BatteryCommandResult? {
         if let finalizationID = longRunningFinalizationID {
@@ -295,6 +523,7 @@ actor BatteryCommandRunner {
         if var active = activeCommand {
             active.requestedTermination = .cancelled
             activeCommand = active
+            active.child.exitWatcher.interruptWaiters()
             let id = active.child.id
             let deadline = monotonicDeadline(after: cancellationAcknowledgementTimeout)
             while activeCommand?.child.id == id, DispatchTime.now().uptimeNanoseconds < deadline {
@@ -361,9 +590,11 @@ actor BatteryCommandRunner {
                     }
                     let child = try spawn(command, id: item.id)
                     let deadlines = terminationDeadlines(after: command.timeout)
+                    let launchTimestamp = Date()
                     lastLongRunningResult = nil
                     longRunningCommand = LongRunningCommand(
                         child: child,
+                        launchTimestamp: launchTimestamp,
                         terminationStartDeadline: deadlines.start,
                         totalDeadline: deadlines.total,
                         requestedTermination: nil
@@ -376,6 +607,7 @@ actor BatteryCommandRunner {
                     }
                     recordDiagnostic(
                         DiagnosticEvent(
+                            timestamp: launchTimestamp,
                             category: .command,
                             operationID: command.operationID ?? item.id,
                             commandID: item.id,
@@ -397,6 +629,7 @@ actor BatteryCommandRunner {
     private func execute(_ command: Command, id: UUID) async throws -> BatteryCommandResult {
         let deadlines = terminationDeadlines(after: command.timeout)
         let child = try spawn(command, id: id)
+        defer { child.exitWatcher.invalidate() }
         activeCommand = ActiveCommand(child: child, requestedTermination: nil)
         var waitStatus: Int32?
 
@@ -425,8 +658,18 @@ actor BatteryCommandRunner {
                     )
                     break
                 }
-                waitStatus = pollWaitStatus(pid: child.pid)
-                if waitStatus == nil { await Self.pollDelay() }
+                switch await child.exitWatcher.wait(until: deadlines.start) {
+                case .exited:
+                    waitStatus = waitForExitedProcess(pid: child.pid)
+                    if waitStatus == nil {
+                        throw BatteryCommandRunnerError.cancellationFailed(
+                            command: child.command.label,
+                            message: "process exit was reported but the child could not be reaped"
+                        )
+                    }
+                case .interrupted, .deadlineReached:
+                    continue
+                }
             }
 
             let requestedTermination = activeCommand?.child.id == id
@@ -470,6 +713,7 @@ actor BatteryCommandRunner {
         if var active = activeCommand, active.child.id == commandID {
             active.requestedTermination = .cancelled
             activeCommand = active
+            active.child.exitWatcher.interruptWaiters()
             return
         }
 
@@ -621,6 +865,7 @@ actor BatteryCommandRunner {
             id: id,
             command: command,
             pid: pid,
+            exitWatcher: ProcessExitWatcher(pid: pid),
             stdoutBuffer: stdoutBuffer,
             stderrBuffer: stderrBuffer,
             stdoutReadHandle: outputPipe?.fileHandleForReading,
@@ -761,7 +1006,13 @@ actor BatteryCommandRunner {
             longRunningTimeoutTask = nil
         }
         lastLongRunningResult = result
-        recordDiagnostic(DiagnosticEvent(commandResult: result))
+        command.child.exitWatcher.invalidate()
+        recordDiagnostic(
+            DiagnosticEvent(
+                commandResult: result,
+                timestamp: max(Date(), command.launchTimestamp.addingTimeInterval(0.001))
+            )
+        )
         return result
     }
 
@@ -823,8 +1074,7 @@ actor BatteryCommandRunner {
     }
 
     private func recordDiagnostic(_ event: DiagnosticEvent) {
-        let diagnostics = diagnostics
-        Task { await diagnostics.record(event) }
+        diagnostics.submit(event)
     }
 
     private func makeResult(
@@ -833,8 +1083,11 @@ actor BatteryCommandRunner {
         requestedTermination: BatteryCommandTermination?,
         drainDeadline: UInt64
     ) async -> BatteryCommandResult {
-        while !capturesFinished(child), DispatchTime.now().uptimeNanoseconds < drainDeadline {
-            await Self.pollDelay()
+        if let stdoutBuffer = child.stdoutBuffer {
+            _ = await stdoutBuffer.waitUntilClosed(deadline: drainDeadline)
+        }
+        if let stderrBuffer = child.stderrBuffer {
+            _ = await stderrBuffer.waitUntilClosed(deadline: drainDeadline)
         }
 
         if child.stdoutBuffer?.hasFinishedDraining() == false {
@@ -862,16 +1115,20 @@ actor BatteryCommandRunner {
         )
     }
 
-    private func capturesFinished(_ child: SpawnedChild) -> Bool {
-        let stdoutFinished = child.stdoutBuffer?.hasFinishedDraining() ?? true
-        let stderrFinished = child.stderrBuffer?.hasFinishedDraining() ?? true
-        return stdoutFinished && stderrFinished
-    }
-
     private func pollWaitStatus(pid: pid_t) -> Int32? {
         var status: Int32 = 0
         let result = Darwin.waitpid(pid, &status, WNOHANG)
         return result == pid ? status : nil
+    }
+
+    private func waitForExitedProcess(pid: pid_t) -> Int32? {
+        var status: Int32 = 0
+        while true {
+            let result = Darwin.waitpid(pid, &status, 0)
+            if result == pid { return status }
+            if result == -1, errno == EINTR { continue }
+            return nil
+        }
     }
 
     private func processGroupExists(_ pid: pid_t) -> Bool {

@@ -12,8 +12,13 @@ final class ChargeController: ObservableObject {
     private static let defaultReconciliationInterval: TimeInterval = 60
     private static let minimumReconciliationInterval: TimeInterval = 1
     nonisolated static let smcTemperatureSamplingInterval: TimeInterval = 5
-    private static let defaultLongRunningHeartbeatInterval: TimeInterval = 2
+    private static let defaultLongRunningHeartbeatInterval: TimeInterval = 30
     private static let minimumLongRunningHeartbeatInterval: TimeInterval = 0.05
+    private static let longRunningExitSettlementDelays: [UInt64] = [
+        100_000_000,
+        250_000_000,
+        500_000_000
+    ]
     private static let defaultHistoryHeartbeatInterval: TimeInterval = 15 * 60
     private static let minimumHistoryHeartbeatInterval: TimeInterval = 0.05
 
@@ -59,12 +64,16 @@ final class ChargeController: ObservableObject {
     private let systemPowerObserver: SystemPowerObserving
     private let runsSystemPowerObservation: Bool
     private let reconciliationInterval: TimeInterval
+    private let smcTemperatureSamplingInterval: TimeInterval
     private let longRunningHeartbeatInterval: TimeInterval
     private let historyHeartbeatInterval: TimeInterval
     private let now: @Sendable () -> Date
 
     @Published private(set) var mode: ChargeMode = .idle {
-        didSet { synchronizeLongRunningHeartbeat() }
+        didSet {
+            synchronizeLongRunningMonitoring()
+            recordHistoryAfterStableModeTransition(from: oldValue)
+        }
     }
     @Published private(set) var lastError: String?
     @Published private(set) var pendingChargeLimit: Int?
@@ -104,7 +113,8 @@ final class ChargeController: ObservableObject {
         case .heatBlocked: return .blocked
         case .failed(_, _, .heatProtection): return .failed
         default:
-            return safetyTemperatureSnapshot.freshness == .fresh ? .monitoring : .degraded
+            return safetyTemperatureSnapshot.freshness == .fresh &&
+                safetyTemperatureSnapshot.failures.isEmpty ? .monitoring : .degraded
         }
     }
     var isBatteryControlDisabled: Bool {
@@ -226,6 +236,7 @@ final class ChargeController: ObservableObject {
     private var batteryInfoObservation: AnyCancellable?
     private var smcTemperatureTimer: Timer?
     private var longRunningHeartbeatTimer: Timer?
+    private var longRunningExitObservationTask: Task<Void, Never>?
     private var historyHeartbeatTimer: Timer?
     private var reconciliationTimer: Timer?
     private var activationObserver: NSObjectProtocol?
@@ -240,9 +251,11 @@ final class ChargeController: ObservableObject {
     private var longRunningCheckGeneration: UInt64 = 0
     private var longRunningCheckTask: Task<Void, Never>?
     private var safetyTemperatureCache = SafetyTemperatureCache()
+    private var smcTemperatureFailure: String?
     private var lastTemperature: Double?
     private var smcTemperatureSampleGeneration: UInt64 = 0
     private var smcTemperatureSampleTask: Task<Void, Never>?
+    private var lastSMCTemperatureSampleStartedAt: Date?
     private var sampleAfterHeatEnableGeneration: UInt64?
     private var heatProtectionRetryAfter: Date?
     private var ledIntent: MagSafeLEDIntent?
@@ -261,7 +274,8 @@ final class ChargeController: ObservableObject {
         initialMode: ChargeMode? = nil,
         history: BatteryHistory? = nil,
         reconciliationInterval: TimeInterval = 60,
-        longRunningHeartbeatInterval: TimeInterval = 2,
+        smcTemperatureSamplingInterval: TimeInterval = ChargeController.smcTemperatureSamplingInterval,
+        longRunningHeartbeatInterval: TimeInterval = 30,
         historyHeartbeatInterval: TimeInterval = 15 * 60,
         diagnostics: DiagnosticLog = .disabled,
         systemPowerObserver: SystemPowerObserving = SystemPowerObserver(),
@@ -281,6 +295,9 @@ final class ChargeController: ObservableObject {
         self.reconciliationInterval = reconciliationInterval.isFinite
             ? max(Self.minimumReconciliationInterval, reconciliationInterval)
             : Self.defaultReconciliationInterval
+        self.smcTemperatureSamplingInterval = smcTemperatureSamplingInterval.isFinite
+            ? max(0.05, smcTemperatureSamplingInterval)
+            : Self.smcTemperatureSamplingInterval
         self.longRunningHeartbeatInterval = longRunningHeartbeatInterval.isFinite
             ? max(Self.minimumLongRunningHeartbeatInterval, longRunningHeartbeatInterval)
             : Self.defaultLongRunningHeartbeatInterval
@@ -386,6 +403,7 @@ final class ChargeController: ObservableObject {
             guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
             startBatteryInfoObservation()
             readiness = .ready
+            synchronizeLongRunningMonitoring()
             updateDisplayState()
             do {
                 try setupSleepWakeObservers()
@@ -431,7 +449,7 @@ final class ChargeController: ObservableObject {
         batteryInfoObservation = nil
         smcTemperatureTimer?.invalidate()
         smcTemperatureTimer = nil
-        stopLongRunningHeartbeat()
+        stopLongRunningMonitoring()
         stopHistoryHeartbeat()
         monitor.stopMonitoring()
         removeSleepWakeObservers()
@@ -576,7 +594,7 @@ final class ChargeController: ObservableObject {
     private func prepareLocalShutdown() {
         cancelSMCTemperatureSample(clearCache: true)
         cancelLongRunningOperationCheck()
-        stopLongRunningHeartbeat()
+        stopLongRunningMonitoring()
         stopHistoryHeartbeat()
         activeOperationTask?.cancel()
         activeOperationTask = nil
@@ -640,7 +658,7 @@ final class ChargeController: ObservableObject {
         batteryInfoObservation = nil
         smcTemperatureTimer?.invalidate()
         smcTemperatureTimer = nil
-        stopLongRunningHeartbeat()
+        stopLongRunningMonitoring()
         stopHistoryHeartbeat()
         monitor.stopMonitoring()
         removeSleepWakeObservers()
@@ -826,10 +844,13 @@ final class ChargeController: ObservableObject {
     private func startSMCTemperatureLoop() {
         smcTemperatureTimer?.invalidate()
         cancelSMCTemperatureSample(clearCache: false)
-        smcTemperatureTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        smcTemperatureTimer = Timer.scheduledTimer(
+            withTimeInterval: smcTemperatureSamplingInterval,
+            repeats: true
+        ) { [weak self] _ in
             Task { @MainActor in self?.sampleSMCTemperature() }
         }
-        smcTemperatureTimer?.tolerance = 1
+        smcTemperatureTimer?.tolerance = min(0.5, smcTemperatureSamplingInterval * 0.1)
         sampleSMCTemperature(force: true)
     }
 
@@ -839,12 +860,12 @@ final class ChargeController: ObservableObject {
               settings.heatProtectionEnabled,
               case .batteryGuard = settings.batteryControlOwnership,
               smcTemperatureSampleTask == nil else { return }
-        guard force || safetyTemperatureCache.isSamplingDue(
-            at: now(),
-            interval: Self.smcTemperatureSamplingInterval
-        ) else {
-            return
-        }
+        let sampleStartedAt = now()
+        if !force,
+           let lastSMCTemperatureSampleStartedAt,
+           sampleStartedAt.timeIntervalSince(lastSMCTemperatureSampleStartedAt)
+            < smcTemperatureSamplingInterval { return }
+        lastSMCTemperatureSampleStartedAt = sampleStartedAt
         smcTemperatureSampleGeneration &+= 1
         let generation = smcTemperatureSampleGeneration
         let backend = self.backend
@@ -868,24 +889,35 @@ final class ChargeController: ObservableObject {
                   case .batteryGuard = self.settings.batteryControlOwnership else { return }
             switch result {
             case .success(let temperature):
+                self.smcTemperatureFailure = nil
                 self.safetyTemperatureCache.record(temperature, at: self.now())
-                self.publishSafetyTemperature(
+                let measured = self.publishSafetyTemperature(
                     smc: temperature,
                     ioKit: self.monitor.batteryInfo?.temperature
                 )
-                if self.monitor.batteryInfo == nil {
-                    self.evaluateHeatProtectionWithoutBatteryInfo(temperature: temperature)
-                }
+                self.applyHeatProtectionEvaluation(
+                    temperature: measured,
+                    measurementContext: self.monitor.batteryInfo == nil
+                        ? .batteryInfoUnavailable
+                        : .batteryInfoAvailable,
+                    sensorFailures: []
+                )
             case .failure(let error):
                 self.safetyTemperatureCache.clear()
-                self.publishSafetyTemperature(
+                let failure = "SMC: \(error.localizedDescription)"
+                self.smcTemperatureFailure = failure
+                let measured = self.publishSafetyTemperature(
                     smc: nil,
                     ioKit: self.monitor.batteryInfo?.temperature,
-                    failures: ["SMC: \(error.localizedDescription)"]
+                    failures: [failure]
                 )
-                if self.monitor.batteryInfo == nil {
-                    self.evaluateHeatProtectionWithoutBatteryInfo(temperature: nil)
-                }
+                self.applyHeatProtectionEvaluation(
+                    temperature: measured,
+                    measurementContext: self.monitor.batteryInfo == nil
+                        ? .batteryInfoUnavailable
+                        : .batteryInfoAvailable,
+                    sensorFailures: [failure]
+                )
             }
         }
     }
@@ -897,6 +929,7 @@ final class ChargeController: ObservableObject {
         sampleAfterHeatEnableGeneration = nil
         if clearCache {
             safetyTemperatureCache.clear()
+            smcTemperatureFailure = nil
             lastTemperature = nil
         }
     }
@@ -917,29 +950,109 @@ final class ChargeController: ObservableObject {
         processBatteryInfo(info)
     }
 
-    private func synchronizeLongRunningHeartbeat() {
+    private func synchronizeLongRunningMonitoring() {
         guard readiness == .ready,
               !isShuttingDown,
-              LongRunningChargePolicy.session(from: mode) != nil else {
-            stopLongRunningHeartbeat()
+              let session = LongRunningChargePolicy.session(from: mode) else {
+            stopLongRunningMonitoring()
             return
         }
-        guard longRunningHeartbeatTimer == nil else { return }
-        let timer = Timer.scheduledTimer(
-            withTimeInterval: longRunningHeartbeatInterval,
-            repeats: true
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.runLongRunningHeartbeat()
+        if longRunningHeartbeatTimer == nil {
+            let timer = Timer.scheduledTimer(
+                withTimeInterval: longRunningHeartbeatInterval,
+                repeats: true
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.runLongRunningHeartbeat()
+                }
             }
+            timer.tolerance = min(5, longRunningHeartbeatInterval * 0.1)
+            longRunningHeartbeatTimer = timer
         }
-        timer.tolerance = min(0.25, longRunningHeartbeatInterval * 0.1)
-        longRunningHeartbeatTimer = timer
+        guard longRunningExitObservationTask == nil else { return }
+        let operationGeneration = operationGeneration
+        let backend = self.backend
+        longRunningExitObservationTask = Task { [weak self] in
+            let result = await backend.waitForLongRunningOperationExit()
+            guard let self, !Task.isCancelled else { return }
+            guard self.readiness == .ready,
+                  !self.isShuttingDown,
+                  self.operationGeneration == operationGeneration,
+                  LongRunningChargePolicy.session(from: self.mode) == session else { return }
+            self.longRunningExitObservationTask = nil
+            let decision = await self.settledLongRunningExitDecision(
+                session: session,
+                operationGeneration: operationGeneration,
+                result: result
+            )
+            guard self.readiness == .ready,
+                  !self.isShuttingDown,
+                  self.operationGeneration == operationGeneration,
+                  LongRunningChargePolicy.session(from: self.mode) == session else { return }
+            if case .finishAndRestoreMaintain = decision {
+                self.applyLongRunningProgressDecision(
+                    decision,
+                    batteryMeasurementAvailable: self.monitor.batteryInfo != nil
+                )
+                return
+            }
+            let fallbackMessage: String
+            switch session {
+            case .topUp:
+                fallbackMessage = "Top Up 프로세스가 목표 도달 전에 종료되었습니다."
+            case .discharge:
+                fallbackMessage = "Discharge 프로세스가 목표 도달 전에 종료되었습니다."
+            }
+            let detail = result?.combinedOutput ?? ""
+            await self.handleUnexpectedLongRunningExit(
+                session: session,
+                operationGeneration: operationGeneration,
+                message: detail.isEmpty ? fallbackMessage : "\(fallbackMessage) \(detail)"
+            )
+        }
+    }
+
+    private func settledLongRunningExitDecision(
+        session: LongRunningChargeSession,
+        operationGeneration: UInt64,
+        result: BatteryCommandResult?
+    ) async -> LongRunningProgressDecision {
+        monitor.refreshBatteryInfo()
+        var decision = LongRunningChargePolicy.progress(
+            mode: mode,
+            currentCharge: monitor.batteryInfo?.currentCharge
+        )
+        guard result?.termination == .exited,
+              result?.exitCode == 0,
+              decision != .finishAndRestoreMaintain(session) else {
+            return decision
+        }
+
+        for delay in Self.longRunningExitSettlementDelays {
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return decision
+            }
+            guard readiness == .ready,
+                  !isShuttingDown,
+                  self.operationGeneration == operationGeneration,
+                  LongRunningChargePolicy.session(from: mode) == session else {
+                return decision
+            }
+            monitor.refreshBatteryInfo()
+            decision = LongRunningChargePolicy.progress(
+                mode: mode,
+                currentCharge: monitor.batteryInfo?.currentCharge
+            )
+            if decision == .finishAndRestoreMaintain(session) { return decision }
+        }
+        return decision
     }
 
     private func runLongRunningHeartbeat() {
         guard readiness == .ready, !isShuttingDown else {
-            stopLongRunningHeartbeat()
+            stopLongRunningMonitoring()
             return
         }
         let charge = monitor.batteryInfo?.currentCharge
@@ -949,9 +1062,11 @@ final class ChargeController: ObservableObject {
         )
     }
 
-    private func stopLongRunningHeartbeat() {
+    private func stopLongRunningMonitoring() {
         longRunningHeartbeatTimer?.invalidate()
         longRunningHeartbeatTimer = nil
+        longRunningExitObservationTask?.cancel()
+        longRunningExitObservationTask = nil
     }
 
     private func historyLimitForRecording() -> Int? {
@@ -960,6 +1075,21 @@ final class ChargeController: ObservableObject {
         }
         if case .externalDrift = mode { return nil }
         return mode.restorableMode?.maintainLimit
+    }
+
+    private func recordHistoryAfterStableModeTransition(from previousMode: ChargeMode) {
+        guard mode != previousMode,
+              readiness == .ready,
+              !isShuttingDown,
+              let info = monitor.batteryInfo else { return }
+        switch mode {
+        case .maintaining, .toppingUp, .discharging, .heatBlocked, .sleepProtected:
+            recordHistorySample(info)
+        case .externalDrift(_, .maintaining):
+            recordHistorySample(info)
+        case .idle, .transitioning, .controlDisabled, .failed, .externalDrift:
+            break
+        }
     }
 
     private func recordHistorySample(_ info: BatteryInfo) {
@@ -1002,14 +1132,15 @@ final class ChargeController: ObservableObject {
     }
 
     func processBatteryInfo(_ info: BatteryInfo) {
-        publishSafetyTemperature(
-            smc: recentSMCTemperature(),
-            ioKit: info.temperature
-        )
         recordHistorySample(info)
         if settings.heatProtectionEnabled {
             evaluateHeatProtection(using: info)
         } else {
+            publishSafetyTemperature(
+                smc: recentSMCTemperature(),
+                ioKit: info.temperature,
+                failures: smcTemperatureFailure.map { [$0] } ?? []
+            )
             clearSensorError()
             if case .heatBlocked(let previous) = mode {
                 restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
@@ -1042,7 +1173,11 @@ final class ChargeController: ObservableObject {
     private func measuredTemperature(using info: BatteryInfo) -> Double? {
         let recentSMC = recentSMCTemperature()
         let ioKit = info.temperature.flatMap(BatteryMonitor.validatedTemperature)
-        return publishSafetyTemperature(smc: recentSMC, ioKit: ioKit)
+        return publishSafetyTemperature(
+            smc: recentSMC,
+            ioKit: ioKit,
+            failures: smcTemperatureFailure.map { [$0] } ?? []
+        )
     }
 
     private func readFreshSafetyTemperature(fallbackInfo: BatteryInfo? = nil) async -> Double? {
@@ -1054,10 +1189,13 @@ final class ChargeController: ObservableObject {
                 throw BatteryError.unsupported("SMC가 유효하지 않은 배터리 온도 \(rawValue)°C를 반환했습니다.")
             }
             safetyTemperatureCache.record(value, at: now())
+            smcTemperatureFailure = nil
             smc = value
         } catch {
             safetyTemperatureCache.clear()
-            failures.append("SMC: \(error.localizedDescription)")
+            let failure = "SMC: \(error.localizedDescription)"
+            smcTemperatureFailure = failure
+            failures.append(failure)
         }
         let freshInfo = monitor.readBatteryInfo() ?? fallbackInfo
         var ioKit: Double?
@@ -1118,24 +1256,35 @@ final class ChargeController: ObservableObject {
     private func evaluateHeatProtection(using info: BatteryInfo) {
         applyHeatProtectionEvaluation(
             temperature: measuredTemperature(using: info),
-            measurementContext: .batteryInfoAvailable
+            measurementContext: .batteryInfoAvailable,
+            sensorFailures: safetyTemperatureSnapshot.failures
         )
     }
 
     private func evaluateHeatProtectionWithoutBatteryInfo(temperature: Double?) {
         applyHeatProtectionEvaluation(
             temperature: temperature,
-            measurementContext: .batteryInfoUnavailable
+            measurementContext: .batteryInfoUnavailable,
+            sensorFailures: safetyTemperatureSnapshot.failures
         )
     }
 
     private func applyHeatProtectionEvaluation(
         temperature: Double?,
-        measurementContext: HeatMeasurementContext
+        measurementContext: HeatMeasurementContext,
+        sensorFailures: [String]
     ) {
+        let policyTemperature: Double?
+        if case .heatBlocked = mode, !sensorFailures.isEmpty {
+            // Never resume charging from a blocked state while an independent
+            // temperature source is still degraded.
+            policyTemperature = nil
+        } else {
+            policyTemperature = temperature
+        }
         let evaluation = HeatProtectionPolicy.evaluate(
             HeatProtectionInput(
-                temperature: temperature,
+                temperature: policyTemperature,
                 threshold: settings.heatProtectionThreshold,
                 measurementContext: measurementContext,
                 mode: mode,
@@ -1146,7 +1295,9 @@ final class ChargeController: ObservableObject {
             )
         )
         lastTemperature = evaluation.temperature
-        if evaluation.temperature == nil {
+        if !sensorFailures.isEmpty {
+            setSensorError("Heat Protection 센서 degraded: \(sensorFailures.joined(separator: "; "))")
+        } else if evaluation.temperature == nil {
             let message = measurementContext == .batteryInfoAvailable
                 ? "온도를 읽을 수 없어 Heat Protection이 degraded 상태입니다."
                 : "배터리 측정값과 SMC 온도를 읽을 수 없어 Heat Protection이 충전을 차단합니다."
@@ -1232,7 +1383,9 @@ final class ChargeController: ObservableObject {
                         let restoreThreshold = self.settings.heatProtectionThreshold
                         let preflight = await self.readFreshSafetyTemperature()
                         try Task.checkCancellation()
-                        guard let preflight, preflight <= restoreThreshold - 2 else {
+                        guard self.safetyTemperatureSnapshot.failures.isEmpty,
+                              let preflight,
+                              preflight <= restoreThreshold - 2 else {
                             throw BatteryError.commandFailed("Heat Protection restore", -1, "fresh temperature is unavailable or above the restore threshold")
                         }
                     }
@@ -1247,7 +1400,9 @@ final class ChargeController: ObservableObject {
                         let postflightThreshold = self.settings.heatProtectionThreshold
                         let postflight = await self.readFreshSafetyTemperature()
                         try Task.checkCancellation()
-                        guard let postflight, postflight <= postflightThreshold else {
+                        guard self.safetyTemperatureSnapshot.failures.isEmpty,
+                              let postflight,
+                              postflight <= postflightThreshold else {
                             throw BatteryError.commandFailed("Heat Protection restore", -1, "post-restore temperature is unavailable or unsafe")
                         }
                     }
@@ -1613,15 +1768,6 @@ final class ChargeController: ObservableObject {
             },
             onSuccess: { [weak self] in self?.mode = .maintaining(limit: limit) }
         )
-    }
-
-    func toggleCharging() {
-        guard let info = monitor.batteryInfo else {
-            commandError = "배터리 상태를 확인할 수 없습니다."
-            refreshDisplayedError()
-            return
-        }
-        setChargeLimit(currentState == .chargingPaused ? 100 : info.currentCharge)
     }
 
     private func canStartExclusiveAction(named action: String) -> Bool {
@@ -2399,7 +2545,6 @@ final class ChargeController: ObservableObject {
         stateBefore: String? = nil,
         stateAfter: String? = nil
     ) {
-        let diagnostics = diagnostics
         let event = DiagnosticEvent(
             category: category,
             operationID: operationID,
@@ -2409,7 +2554,7 @@ final class ChargeController: ObservableObject {
             stateBefore: stateBefore,
             stateAfter: stateAfter
         )
-        Task { await diagnostics.record(event) }
+        diagnostics.submit(event)
     }
 
     private func refreshDisplayedError() {

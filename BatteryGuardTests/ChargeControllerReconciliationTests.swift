@@ -16,6 +16,20 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(record.chargeLimit, 80)
     }
 
+    func testVerifiedChargeLimitTransitionRecordsHistoryWithoutBatteryChange() async throws {
+        let history = BatteryHistory(inMemory: true)
+        let readiness = await history.waitUntilReady()
+        XCTAssertEqual(readiness, .ready)
+        let (controller, _, _, _) = makeSUT(charge: 75, history: history)
+        controller.processBatteryInfo(makeBatteryInfo(charge: 75))
+
+        controller.setChargeLimit(60)
+        let applied = await eventually { controller.mode == .maintaining(limit: 60) }
+
+        XCTAssertTrue(applied)
+        XCTAssertEqual(history.fetchLast24Hours().last?.chargeLimit, 60)
+    }
+
     func testInitializationProcessesCurrentSnapshotAndKeepsHistoryHeartbeat() async throws {
         let heartbeatInterval: TimeInterval = 0.05
         let history = BatteryHistory(

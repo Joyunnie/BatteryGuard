@@ -93,6 +93,7 @@ final class DiagnosticLogTests: XCTestCase {
         for index in 0..<10 {
             await log.record(
                 DiagnosticEvent(
+                    timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
                     category: .command,
                     operation: "routine-\(index)",
                     exitCode: 0,
@@ -106,6 +107,48 @@ final class DiagnosticLogTests: XCTestCase {
 
         let reloaded = await DiagnosticLog(fileURL: fileURL, capacity: 100).recentEvents()
         XCTAssertEqual(reloaded.count, 10)
+    }
+
+    func testFlushDrainsAllSynchronouslySubmittedEvents() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-diagnostic-submit-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 100, routineFlushInterval: 60)
+
+        for index in 0..<50 {
+            log.submit(
+                DiagnosticEvent(
+                    timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                    category: .command,
+                    operation: "submitted-\(index)",
+                    exitCode: 0,
+                    outcome: .exited
+                )
+            )
+        }
+        await log.flushPendingEvents()
+
+        let reloaded = await DiagnosticLog(fileURL: fileURL, capacity: 100).recentEvents()
+        XCTAssertEqual(reloaded.map(\.operation), (0..<50).map { "submitted-\($0)" })
+    }
+
+    func testIncrementalInsertionPreservesChronologicalOrdering() async {
+        let log = DiagnosticLog(fileURL: nil, capacity: 4)
+        for timestamp in [3.0, 1.0, 4.0, 2.0] {
+            await log.record(
+                DiagnosticEvent(
+                    timestamp: Date(timeIntervalSince1970: timestamp),
+                    category: .command,
+                    operation: "event-\(Int(timestamp))",
+                    exitCode: 0,
+                    outcome: .exited
+                )
+            )
+        }
+
+        let events = await log.recentEvents()
+        XCTAssertEqual(events.map(\.operation), ["event-1", "event-2", "event-3", "event-4"])
     }
 
     func testRoutineEventsArePersistedByTheScheduledFlush() async throws {
@@ -223,6 +266,39 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertEqual(Set(events.compactMap(\.commandID)).count, 1)
         XCTAssertEqual(Set(events.compactMap(\.operationID)), Set([operationID]))
         XCTAssertEqual(events.map(\.outcome), [.launched, .cancelled])
+    }
+
+    func testNaturalLongRunningExitIsPersistedExactlyOnce() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-natural-exit-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 10, routineFlushInterval: 60)
+        let runner = BatteryCommandRunner(diagnostics: log)
+        let operationID = UUID()
+
+        _ = try await runner.launchLongRunning(
+            .init(
+                executable: "/bin/sh",
+                arguments: ["-c", "printf natural-output; exit 0"],
+                label: "natural exit fixture",
+                operationID: operationID,
+                timeout: 1
+            )
+        )
+        let result = await runner.waitForLongRunningResult()
+        _ = await runner.isLongRunningActive()
+        _ = await runner.longRunningResult()
+        await log.flushPendingEvents()
+
+        let events = await DiagnosticLog(fileURL: fileURL, capacity: 10)
+            .recentEvents()
+            .filter { $0.operation == "natural exit fixture" }
+        XCTAssertEqual(result?.stdout, "natural-output")
+        XCTAssertEqual(events.map(\.outcome), [.launched, .exited])
+        XCTAssertEqual(Set(events.map(\.id)).count, 2)
+        XCTAssertEqual(Set(events.compactMap(\.commandID)).count, 1)
+        XCTAssertEqual(Set(events.compactMap(\.operationID)), Set([operationID]))
     }
 
     func testPrepareForViewingThrowsWhenTheLogCannotBePersisted() async throws {

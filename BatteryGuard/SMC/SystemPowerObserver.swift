@@ -271,10 +271,10 @@ final class SleepAcknowledgedOperation: @unchecked Sendable {
             guard !completed else { return false }
             completed = true
             operationTask = nil
-            completion(decision)
             return true
         }
         guard shouldComplete else { return }
+        completion(decision)
         timeoutTask?.cancel()
         timeoutTask = nil
     }
@@ -284,10 +284,10 @@ final class SleepAcknowledgedOperation: @unchecked Sendable {
             guard !completed else { return false }
             completed = true
             operationTask = nil
-            completion(decision)
             return true
         }
         guard didInvalidate else { return }
+        completion(decision)
         timeoutTask?.cancel()
         timeoutTask = nil
     }

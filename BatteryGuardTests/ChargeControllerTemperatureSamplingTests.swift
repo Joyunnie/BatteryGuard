@@ -8,6 +8,26 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(ChargeController.smcTemperatureSamplingInterval, 5)
     }
 
+    func testPeriodicSMCSamplesUseStartToStartCadence() async throws {
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            batteryInfoOnRead: info,
+            smcTemperatureSamplingInterval: 0.05
+        )
+        backend.enqueueTemperatureReadDelays([0, 0.02, 0.02])
+
+        try await controller.initialize()
+        let sampledThreeTimes = await eventually(timeout: 0.25) {
+            backend.operations.filter { $0 == "read-temperature" }.count >= 3
+        }
+
+        XCTAssertTrue(sampledThreeTimes)
+        try await controller.shutdown()
+    }
+
     func testSafetyTemperatureUsesIOKitWhileHeatProtectionIsDisabled() {
         let (controller, _, _, _) = makeSUT(heatProtectionEnabled: false, temperature: 31.5)
 
@@ -46,6 +66,98 @@ extension ChargeControllerSafetyTests {
 
         XCTAssertTrue(sampled)
         XCTAssertEqual(controller.safetyTemperatureSnapshot.sources, [.smc])
+        try await controller.shutdown()
+    }
+
+    func testSMCTemperatureRiseTriggersHeatProtectionWhenIOKitValueDoesNotChange() async throws {
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            batteryInfoOnRead: info
+        )
+        backend.enqueueTemperatures([30, 45])
+
+        try await controller.initialize()
+        let blocked = await eventually {
+            if case .heatBlocked = controller.mode { return true }
+            return false
+        }
+
+        XCTAssertTrue(blocked)
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.value, 45)
+        try await controller.shutdown()
+    }
+
+    func testSMCFailureRemainsVisibleWhenIOKitTemperatureIsValid() async throws {
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            batteryInfoOnRead: info
+        )
+        backend.enqueueTemperatures([30, nil])
+
+        try await controller.initialize()
+        let degraded = await eventually {
+            controller.heatProtectionPhase == .degraded &&
+                !controller.safetyTemperatureSnapshot.failures.isEmpty
+        }
+        controller.processBatteryInfo(info)
+
+        XCTAssertTrue(degraded)
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.value, 30)
+        XCTAssertTrue(controller.lastError?.contains("SMC") == true)
+        XCTAssertEqual(controller.heatProtectionPhase, .degraded)
+        XCTAssertEqual(monitor.batteryInfo, info)
+        try await controller.shutdown()
+    }
+
+    func testBlockedHeatProtectionDoesNotRestoreWhileSMCSensorIsDegraded() async throws {
+        let coolIOKitInfo = makeBatteryInfo(charge: 70, temperature: 30)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            batteryInfoOnRead: coolIOKitInfo
+        )
+        backend.enqueueTemperatures([45, nil])
+
+        try await controller.initialize()
+        let degradedWhileBlocked = await eventually {
+            controller.heatProtectionPhase == .blocked &&
+                !controller.safetyTemperatureSnapshot.failures.isEmpty
+        }
+
+        XCTAssertTrue(degradedWhileBlocked)
+        XCTAssertEqual(controller.mode, .heatBlocked(previous: .maintaining(limit: 80)))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        try await controller.shutdown()
+    }
+
+    func testFreshSMCSampleClearsDegradedStateAndRestoresHeatProtectionOnce() async throws {
+        let coolIOKitInfo = makeBatteryInfo(charge: 70, temperature: 30)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            batteryInfoOnRead: coolIOKitInfo,
+            smcTemperatureSamplingInterval: 0.05
+        )
+        backend.enqueueTemperatures([45, nil, 37])
+
+        try await controller.initialize()
+        let restored = await eventually(timeout: 1) {
+            controller.mode == .maintaining(limit: 80) &&
+                controller.safetyTemperatureSnapshot.failures.isEmpty
+        }
+
+        XCTAssertTrue(restored)
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+        XCTAssertNil(controller.lastError)
         try await controller.shutdown()
     }
 
@@ -128,7 +240,7 @@ extension ChargeControllerSafetyTests {
     func testHeatToggleIgnoresDelayedSampleFromPreviousEnableGeneration() async throws {
         let backend = FakeChargeBackend()
         backend.enqueueTemperatures([30, 45, 30])
-        backend.enqueueTemperatureReadDelays([0, 0.3, 0], ignoringCancellation: true)
+        backend.enqueueTemperatureReadDelays([0, 0.3, 0.1], ignoringCancellation: true)
         let info = makeBatteryInfo(charge: 70, temperature: nil)
         let infoSource = TestBatteryInfoSource(info)
         let monitor = BatteryMonitor(
@@ -157,6 +269,9 @@ extension ChargeControllerSafetyTests {
 
         controller.setHeatProtectionEnabled(false)
         controller.setHeatProtectionEnabled(true)
+        let coolInfo = makeBatteryInfo(charge: 70, temperature: 30)
+        infoSource.set(coolInfo)
+        monitor.batteryInfo = coolInfo
         let replacementSampleCompleted = await eventually {
             backend.operations.filter { $0 == "read-temperature" }.count >= 3
                 && controller.mode == .maintaining(limit: 80)

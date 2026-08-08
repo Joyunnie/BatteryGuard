@@ -67,6 +67,21 @@ func shellQuote(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
 }
 
+func makeSuccessfulLongRunningResult() -> BatteryCommandResult {
+    let id = UUID()
+    return BatteryCommandResult(
+        commandID: id,
+        operationID: id,
+        command: "fake long-running command",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        stdoutWasTruncated: false,
+        stderrWasTruncated: false,
+        termination: .exited
+    )
+}
+
 func makeExecutableFixture(_ contents: String) throws -> URL {
     let url = FileManager.default.temporaryDirectory
         .appendingPathComponent("batteryguard-fixture-\(UUID().uuidString)")
@@ -168,6 +183,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var recordedOperations: [String] = []
     private var failures: [String: Error] = [:]
     private var longRunning = false
+    private var longRunningResult: BatteryCommandResult?
     private var discharging = false
     private var temperatureValue: Float? = 30
     private var maintainLevel = 80
@@ -290,7 +306,11 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         lock.withLock { controlStatusDelayValue = delay }
     }
 
-    func setOwnedLongRunningOperation(_ isActive: Bool) {
+    func setOwnedLongRunningOperation(
+        _ isActive: Bool,
+        result: BatteryCommandResult? = nil
+    ) {
+        lock.withLock { longRunningResult = result }
         setLongRunning(isActive)
     }
 
@@ -387,6 +407,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
             chargingStatus = .enabled
             discharging = true
             longRunning = true
+            longRunningResult = nil
         }
     }
 
@@ -401,6 +422,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
             chargingStatus = .enabled
             discharging = false
             longRunning = true
+            longRunningResult = nil
         }
     }
 
@@ -415,7 +437,20 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         return probe.0
     }
 
-    func longRunningOperationResult() async -> BatteryCommandResult? { nil }
+    func longRunningOperationResult() async -> BatteryCommandResult? {
+        lock.withLock { longRunningResult }
+    }
+
+    func waitForLongRunningOperationExit() async -> BatteryCommandResult? {
+        while lock.withLock({ longRunning }) {
+            do {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            } catch {
+                return nil
+            }
+        }
+        return lock.withLock { longRunningResult }
+    }
 
     func cancelLongRunningOperation() async throws {
         try record("cancel-long")

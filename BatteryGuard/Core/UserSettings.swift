@@ -241,7 +241,7 @@ final class UserSettings: ObservableObject {
 
     func requireDurableBatteryControlOwnership() throws {
         if let batteryControlOwnershipPersistenceError {
-            throw BatteryError.unsupported(
+            throw BatteryError.ownershipPersistenceFailed(
                 "충전 제어 소유권 기록을 읽거나 저장할 수 없습니다: \(batteryControlOwnershipPersistenceError)"
             )
         }
@@ -272,7 +272,7 @@ final class UserSettings: ObservableObject {
                 batteryControlOwnershipPersistenceError = nil
             } catch {
                 batteryControlOwnershipPersistenceError = error.localizedDescription
-                throw BatteryError.unsupported(
+                throw BatteryError.ownershipPersistenceFailed(
                     "충전 제어 소유권을 안전하게 저장할 수 없습니다: \(error.localizedDescription)"
                 )
             }

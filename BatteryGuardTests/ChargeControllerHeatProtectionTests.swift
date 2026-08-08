@@ -84,10 +84,12 @@ extension ChargeControllerSafetyTests {
     }
 
     func testHeatProtectionRestoresRecordedModeOnlyAfterSafeTemperature() async {
+        let infoSource = TestBatteryInfoSource(makeBatteryInfo(temperature: 45))
         let (controller, backend, monitor, _) = makeSUT(
             heatProtectionEnabled: true,
             temperature: 45,
-            charge: 80
+            charge: 80,
+            batteryInfoProvider: { infoSource.read() }
         )
         let hotInfo = makeBatteryInfo(temperature: 45)
         controller.processBatteryInfo(hotInfo)
@@ -96,6 +98,7 @@ extension ChargeControllerSafetyTests {
 
         backend.temperature = 37
         let coolInfo = makeBatteryInfo(temperature: 37)
+        infoSource.set(coolInfo)
         monitor.batteryInfo = coolInfo
         controller.processBatteryInfo(coolInfo)
 
@@ -142,10 +145,12 @@ extension ChargeControllerSafetyTests {
     }
 
     func testHeatProtectionRestoresDischargeWithSleepAssertion() async {
+        let infoSource = TestBatteryInfoSource(makeBatteryInfo(charge: 90, temperature: 30))
         let (controller, backend, monitor, settings) = makeSUT(
             heatProtectionEnabled: true,
             temperature: 30,
-            charge: 90
+            charge: 90,
+            batteryInfoProvider: { infoSource.read() }
         )
         settings.chargeLimit = 80
         controller.processBatteryInfo(makeBatteryInfo(charge: 90, temperature: 30))
@@ -155,6 +160,7 @@ extension ChargeControllerSafetyTests {
 
         backend.temperature = 45
         let hotInfo = makeBatteryInfo(charge: 90, temperature: 45)
+        infoSource.set(hotInfo)
         monitor.batteryInfo = hotInfo
         controller.processBatteryInfo(hotInfo)
         let protectionTriggered = await eventually { controller.heatProtectionTriggered }
@@ -162,6 +168,7 @@ extension ChargeControllerSafetyTests {
 
         backend.temperature = 37
         let coolInfo = makeBatteryInfo(charge: 90, temperature: 37)
+        infoSource.set(coolInfo)
         monitor.batteryInfo = coolInfo
         controller.processBatteryInfo(coolInfo)
 
@@ -244,6 +251,63 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(controller.isHeatProtectionBlockingControls)
     }
 
+    func testHeatRestorePreflightRejectsCoolIOKitWhenFreshSMCReadFails() async {
+        let hotInfo = makeBatteryInfo(charge: 70, temperature: 45)
+        let infoSource = TestBatteryInfoSource(hotInfo)
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 45,
+            charge: 70,
+            batteryInfoProvider: { infoSource.read() }
+        )
+        controller.processBatteryInfo(hotInfo)
+        let preflightProtectionTriggered = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(preflightProtectionTriggered)
+        backend.clearOperations()
+
+        let coolInfo = makeBatteryInfo(charge: 70, temperature: 37)
+        infoSource.set(coolInfo)
+        backend.enqueueTemperatures([nil])
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+
+        let preflightReblocked = await eventually {
+            controller.heatProtectionTriggered && !controller.isCommandPending
+        }
+        XCTAssertTrue(preflightReblocked)
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(controller.safetyTemperatureSnapshot.failures.contains { $0.contains("SMC") })
+    }
+
+    func testHeatRestorePostflightReblocksWhenFreshSMCReadFails() async {
+        let hotInfo = makeBatteryInfo(charge: 70, temperature: 45)
+        let infoSource = TestBatteryInfoSource(hotInfo)
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 45,
+            charge: 70,
+            batteryInfoProvider: { infoSource.read() }
+        )
+        controller.processBatteryInfo(hotInfo)
+        let postflightProtectionTriggered = await eventually { controller.heatProtectionTriggered }
+        XCTAssertTrue(postflightProtectionTriggered)
+        backend.clearOperations()
+
+        let coolInfo = makeBatteryInfo(charge: 70, temperature: 37)
+        infoSource.set(coolInfo)
+        backend.enqueueTemperatures([37, nil])
+        monitor.batteryInfo = coolInfo
+        controller.processBatteryInfo(coolInfo)
+
+        let postflightReblocked = await eventually {
+            controller.heatProtectionTriggered && !controller.isCommandPending
+        }
+        XCTAssertTrue(postflightReblocked)
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        XCTAssertTrue(controller.safetyTemperatureSnapshot.failures.contains { $0.contains("SMC") })
+    }
+
     func testPreemptedTemperaturePreflightCannotRestoreMaintainAfterReblock() async {
         let (controller, backend, monitor, _) = makeSUT(
             heatProtectionEnabled: true,
@@ -281,10 +345,12 @@ extension ChargeControllerSafetyTests {
     }
 
     func testRisingTemperatureInvalidatesAnInFlightRestore() async {
+        let infoSource = TestBatteryInfoSource(makeBatteryInfo(temperature: 45))
         let (controller, backend, monitor, _) = makeSUT(
             heatProtectionEnabled: true,
             temperature: 45,
-            charge: 80
+            charge: 80,
+            batteryInfoProvider: { infoSource.read() }
         )
         controller.processBatteryInfo(makeBatteryInfo(temperature: 45))
         let initiallyProtected = await eventually { controller.heatProtectionTriggered }
@@ -293,6 +359,7 @@ extension ChargeControllerSafetyTests {
         backend.maintainDelay = 0.25
         backend.temperature = 37
         let coolInfo = makeBatteryInfo(temperature: 37)
+        infoSource.set(coolInfo)
         monitor.batteryInfo = coolInfo
         controller.processBatteryInfo(coolInfo)
         let restoreStarted = await eventually { backend.operations.contains("maintain:80") }
@@ -300,6 +367,7 @@ extension ChargeControllerSafetyTests {
 
         backend.temperature = 45
         let hotAgain = makeBatteryInfo(temperature: 45)
+        infoSource.set(hotAgain)
         monitor.batteryInfo = hotAgain
         controller.processBatteryInfo(hotAgain)
 
@@ -486,10 +554,12 @@ extension ChargeControllerSafetyTests {
     }
 
     func testChangingThresholdDuringRestoreUsesTheLatestValue() async {
+        let infoSource = TestBatteryInfoSource(makeBatteryInfo(temperature: 45))
         let (controller, backend, monitor, settings) = makeSUT(
             heatProtectionEnabled: true,
             temperature: 45,
-            charge: 80
+            charge: 80,
+            batteryInfoProvider: { infoSource.read() }
         )
         controller.processBatteryInfo(makeBatteryInfo(temperature: 45))
         let protectionTriggered = await eventually { controller.heatProtectionTriggered }
@@ -498,6 +568,7 @@ extension ChargeControllerSafetyTests {
         backend.maintainDelay = 0.25
         backend.temperature = 37
         let coolInfo = makeBatteryInfo(temperature: 37)
+        infoSource.set(coolInfo)
         monitor.batteryInfo = coolInfo
         controller.processBatteryInfo(coolInfo)
         let restoreStarted = await eventually { backend.operations.contains("maintain:80") }

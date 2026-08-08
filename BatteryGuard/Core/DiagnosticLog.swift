@@ -176,7 +176,7 @@ private extension DiagnosticEvent {
 }
 
 extension DiagnosticEvent {
-    init(commandResult result: BatteryCommandResult) {
+    init(commandResult result: BatteryCommandResult, timestamp: Date = Date()) {
         let outcome: DiagnosticOutcome
         switch result.termination {
         case .exited: outcome = .exited
@@ -185,6 +185,7 @@ extension DiagnosticEvent {
         case .cancelled: outcome = .cancelled
         }
         self.init(
+            timestamp: timestamp,
             category: .command,
             operationID: result.operationID,
             commandID: result.commandID,
@@ -199,6 +200,38 @@ extension DiagnosticEvent {
     }
 }
 
+private final class DiagnosticSubmissionQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var log: DiagnosticLog?
+    private var tail: Task<Void, Never>?
+    private var generation: UInt64 = 0
+
+    func bind(to log: DiagnosticLog) {
+        lock.withLock { self.log = log }
+    }
+
+    func submit(_ event: DiagnosticEvent) {
+        lock.withLock {
+            generation &+= 1
+            let previous = tail
+            let log = self.log
+            tail = Task {
+                await previous?.value
+                await log?.record(event)
+            }
+        }
+    }
+
+    func drain() async {
+        while true {
+            let snapshot = lock.withLock { (generation, tail) }
+            await snapshot.1?.value
+            let isCurrent = lock.withLock { generation == snapshot.0 }
+            if isCurrent { return }
+        }
+    }
+}
+
 actor DiagnosticLog {
     private static let maximumFileBytes = 1_048_576
     static let disabled = DiagnosticLog(fileURL: nil, capacity: 0)
@@ -207,6 +240,7 @@ actor DiagnosticLog {
         : DiagnosticLog(fileURL: productionFileURL(), capacity: 100)
 
     nonisolated let fileURL: URL?
+    nonisolated private let submissionQueue: DiagnosticSubmissionQueue
 
     private let capacity: Int
     private let routineFlushInterval: TimeInterval
@@ -222,18 +256,23 @@ actor DiagnosticLog {
         routineFlushInterval: TimeInterval = 30
     ) {
         self.fileURL = fileURL
+        self.submissionQueue = DiagnosticSubmissionQueue()
         self.capacity = max(0, capacity)
         self.routineFlushInterval = routineFlushInterval.isFinite
             ? max(0, routineFlushInterval)
             : 30
         self.events = []
+        submissionQueue.bind(to: self)
+    }
+
+    nonisolated func submit(_ event: DiagnosticEvent) {
+        submissionQueue.submit(event)
     }
 
     func record(_ event: DiagnosticEvent) {
         guard capacity > 0 else { return }
         loadFromDiskIfNeeded()
-        events.append(event)
-        events = Self.retainedEvents(events, capacity: capacity)
+        insertRetainingPriority(event)
         if event.retentionPriority == .routine, routineFlushInterval > 0 {
             scheduleRoutineFlushIfNeeded()
         } else {
@@ -270,7 +309,8 @@ actor DiagnosticLog {
         }
     }
 
-    func flushPendingEvents() {
+    func flushPendingEvents() async {
+        await submissionQueue.drain()
         routineFlushTask?.cancel()
         routineFlushTask = nil
         persistImmediately(operation: "Flush")
@@ -313,12 +353,48 @@ actor DiagnosticLog {
         do {
             guard let data = try Self.readBoundedRegularFile(fileURL) else { return }
             let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
+            decoder.dateDecodingStrategy = .custom { decoder in
+                let container = try decoder.singleValueContainer()
+                let value = try container.decode(String.self)
+                let precise = ISO8601DateFormatter()
+                precise.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let date = precise.date(from: value) { return date }
+                let legacy = ISO8601DateFormatter()
+                legacy.formatOptions = [.withInternetDateTime]
+                guard let date = legacy.date(from: value) else {
+                    throw DecodingError.dataCorruptedError(
+                        in: container,
+                        debugDescription: "Invalid ISO-8601 diagnostic timestamp"
+                    )
+                }
+                return date
+            }
             let decoded = try decoder.decode([DiagnosticEvent].self, from: data)
             events = Self.retainedEvents(decoded, capacity: capacity)
         } catch {
             persistenceError = error.localizedDescription
             logger.error("Read failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func insertRetainingPriority(_ event: DiagnosticEvent) {
+        if let last = events.last, Self.isOrdered(last, before: event) {
+            events.append(event)
+        } else {
+            var lowerBound = 0
+            var upperBound = events.count
+            while lowerBound < upperBound {
+                let midpoint = lowerBound + (upperBound - lowerBound) / 2
+                if Self.isOrdered(events[midpoint], before: event) {
+                    lowerBound = midpoint + 1
+                } else {
+                    upperBound = midpoint
+                }
+            }
+            events.insert(event, at: lowerBound)
+        }
+        if events.count > capacity {
+            events.remove(at: Self.evictionIndex(in: events))
         }
     }
 
@@ -358,14 +434,19 @@ actor DiagnosticLog {
         capacity: Int
     ) -> [DiagnosticEvent] {
         guard capacity > 0 else { return [] }
-        var retained = events.sorted {
-            if $0.timestamp == $1.timestamp { return $0.id.uuidString < $1.id.uuidString }
-            return $0.timestamp < $1.timestamp
-        }
+        var retained = events.sorted(by: isOrdered)
         while retained.count > capacity {
             retained.remove(at: evictionIndex(in: retained))
         }
         return retained
+    }
+
+    private nonisolated static func isOrdered(
+        _ lhs: DiagnosticEvent,
+        before rhs: DiagnosticEvent
+    ) -> Bool {
+        if lhs.timestamp == rhs.timestamp { return lhs.id.uuidString < rhs.id.uuidString }
+        return lhs.timestamp < rhs.timestamp
     }
 
     private nonisolated static func evictionIndex(in events: [DiagnosticEvent]) -> Int {
@@ -380,7 +461,12 @@ actor DiagnosticLog {
         to fileURL: URL
     ) throws -> [DiagnosticEvent] {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            var container = encoder.singleValueContainer()
+            try container.encode(formatter.string(from: date))
+        }
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         var retained = events
         var data = try encoder.encode(retained)
