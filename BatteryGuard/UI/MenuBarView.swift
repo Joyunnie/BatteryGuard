@@ -158,16 +158,18 @@ struct MenuBarView: View {
     private var bottomActions: some View {
         HStack {
             Button("대시보드") {
-                openWindow(id: "dashboard")
-                AppActivationController.shared.showAppWindow()
+                AppActivationController.shared.showAppWindow {
+                    openWindow(id: "dashboard")
+                }
             }
             .font(.system(size: 11))
 
             Spacer()
 
             Button("설정") {
-                openWindow(id: "settings")
-                AppActivationController.shared.showAppWindow()
+                AppActivationController.shared.showAppWindow {
+                    openWindow(id: "settings")
+                }
             }
             .font(.system(size: 11))
 

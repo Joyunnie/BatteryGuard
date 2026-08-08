@@ -20,13 +20,17 @@ final class AppActivationControllerTests: XCTestCase {
             diagnostics: .disabled
         )
 
-        XCTAssertTrue(controller.showAppWindow())
-        XCTAssertEqual(calls, ["policy:\(NSApplication.ActivationPolicy.regular.rawValue)", "activate"])
+        XCTAssertTrue(controller.showAppWindow { calls.append("openWindow") })
+        XCTAssertEqual(
+            calls,
+            ["policy:\(NSApplication.ActivationPolicy.regular.rawValue)", "openWindow", "activate"]
+        )
     }
 
     func testRejectedRegularPolicyDoesNotPretendToActivate() async {
         let log = DiagnosticLog(fileURL: nil, capacity: 10)
         var didActivate = false
+        var didOpenWindow = false
         let controller = AppActivationController(
             currentPolicy: { .accessory },
             setPolicy: { _ in false },
@@ -35,7 +39,8 @@ final class AppActivationControllerTests: XCTestCase {
             diagnostics: log
         )
 
-        XCTAssertFalse(controller.showAppWindow())
+        XCTAssertFalse(controller.showAppWindow { didOpenWindow = true })
+        XCTAssertFalse(didOpenWindow)
         XCTAssertFalse(didActivate)
         await log.flushPendingEvents()
         let events = await log.recentEvents()
@@ -91,6 +96,7 @@ final class AppActivationControllerTests: XCTestCase {
     func testAcceptedPolicyTransitionRequiresVerifiedPostcondition() async {
         let log = DiagnosticLog(fileURL: nil, capacity: 10)
         var didActivate = false
+        var didOpenWindow = false
         let controller = AppActivationController(
             currentPolicy: { .accessory },
             setPolicy: { _ in true },
@@ -99,7 +105,8 @@ final class AppActivationControllerTests: XCTestCase {
             diagnostics: log
         )
 
-        XCTAssertFalse(controller.showAppWindow())
+        XCTAssertFalse(controller.showAppWindow { didOpenWindow = true })
+        XCTAssertFalse(didOpenWindow)
         XCTAssertFalse(didActivate)
         await log.flushPendingEvents()
         let events = await log.recentEvents()

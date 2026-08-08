@@ -57,8 +57,9 @@ final class AppActivationController {
     }
 
     @discardableResult
-    func showAppWindow() -> Bool {
+    func showAppWindow(openWindow: () -> Void) -> Bool {
         guard apply(.regular, operation: "set regular activation policy") else { return false }
+        openWindow()
         activate()
         return true
     }

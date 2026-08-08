@@ -414,6 +414,7 @@ PR #18 병합 뒤 설치한 Release 앱을 battery CLI 경로를 포함하는 �
 - 적용 전 현재 정책이 요청과 같으면 setter와 진단 기록을 모두 생략한다. 실제 정책 전환은 setter가 true를 반환하고 전환 후 current policy가 요청값과 정확히 같을 때만 성공이다.
 - 이미 accessory인 launch가 setter를 호출하거나 진단을 남기지 않는 경로, setter가 true여도 postcondition이 바뀌지 않으면 window activation을 거부하고 실패를 남기는 경로를 회귀 테스트로 고정한다.
 - setter가 false인 실제 거부도 window activation을 진행하지 않고 requested/previous/current/accepted 상태를 진단에 남기는 경로를 검증한다.
+- hostile review에서 UI가 `openWindow`를 정책 전환보다 먼저 호출해 거부 뒤에도 창 요청이 남는 계약 위반을 발견했다. controller가 정책 검증, 창 요청, 앱 활성화를 순서대로 소유하고, 실패 시 창 요청과 activation을 모두 생략하도록 수정했다.
 
 strict-concurrency complete와 warnings-as-errors에서 전체 283개 테스트, Release build와 Debug analyze가 통과했다.
 
