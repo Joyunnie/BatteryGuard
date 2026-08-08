@@ -73,7 +73,7 @@ IOKit readings ---+                    result + verified CLI status
 - Enter a state only after its command succeeds and the resulting state is verified.
 - Keep charge controls disabled until initialization, initial reconciliation, and the initial maintain operation finish.
 - On failure, preserve an actionable error instead of silently falling back to a misleading state.
-- Treat persistence and `NSApplication` policy return failures as observable failures; never open a missing diagnostic file or report a rejected policy as applied.
+- Treat an already-matching `NSApplication` activation policy as an idempotent no-op. For real transitions, require both an accepted setter result and the exact postcondition; keep either failure observable and never report a rejected or unapplied transition as success.
 - Reconcile actual CLI and battery state on launch, wake, and after command completion; tolerate changes made from Terminal.
 - Run low-frequency and app-activation reconciliation as read-only observation. Never silently overwrite a Terminal change.
 - Compare the complete expected tuple after every reconciliation read. Surface mismatch as external drift, show the observed state, and lock conflicting controls; a failed or inconsistent status read is unknown, not stale success.
