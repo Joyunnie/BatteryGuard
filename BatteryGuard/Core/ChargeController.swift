@@ -870,13 +870,14 @@ final class ChargeController: ObservableObject {
         let generation = smcTemperatureSampleGeneration
         let backend = self.backend
         smcTemperatureSampleTask = Task { [weak self] in
-            let result: Result<Double, Error>
+            let result: Result<BatteryTemperatureSample, Error>
             do {
-                let rawValue = Double(try await backend.readBatteryTemperature())
-                guard let temperature = BatteryMonitor.validatedTemperature(rawValue) else {
+                let sample = try await backend.readBatteryTemperature()
+                let rawValue = Double(sample.maximum)
+                guard BatteryMonitor.validatedTemperature(rawValue) != nil else {
                     throw BatteryError.unsupported("SMC가 유효하지 않은 배터리 온도 \(rawValue)°C를 반환했습니다.")
                 }
-                result = .success(temperature)
+                result = .success(sample)
             }
             catch { result = .failure(error) }
             guard let self else { return }
@@ -888,19 +889,24 @@ final class ChargeController: ObservableObject {
                   self.settings.heatProtectionEnabled,
                   case .batteryGuard = self.settings.batteryControlOwnership else { return }
             switch result {
-            case .success(let temperature):
-                self.smcTemperatureFailure = nil
+            case .success(let sample):
+                let temperature = Double(sample.maximum)
+                let failures = sample.failures.map { "SMC: \($0)" }
+                self.smcTemperatureFailure = failures.isEmpty
+                    ? nil
+                    : failures.joined(separator: "; ")
                 self.safetyTemperatureCache.record(temperature, at: self.now())
                 let measured = self.publishSafetyTemperature(
                     smc: temperature,
-                    ioKit: self.monitor.batteryInfo?.temperature
+                    ioKit: self.monitor.batteryInfo?.temperature,
+                    failures: failures
                 )
                 self.applyHeatProtectionEvaluation(
                     temperature: measured,
                     measurementContext: self.monitor.batteryInfo == nil
                         ? .batteryInfoUnavailable
                         : .batteryInfoAvailable,
-                    sensorFailures: []
+                    sensorFailures: failures
                 )
             case .failure(let error):
                 self.safetyTemperatureCache.clear()
@@ -1184,12 +1190,17 @@ final class ChargeController: ObservableObject {
         var smc: Double?
         var failures: [String] = []
         do {
-            let rawValue = Double(try await backend.readBatteryTemperature())
+            let sample = try await backend.readBatteryTemperature()
+            let rawValue = Double(sample.maximum)
             guard let value = BatteryMonitor.validatedTemperature(rawValue) else {
                 throw BatteryError.unsupported("SMC가 유효하지 않은 배터리 온도 \(rawValue)°C를 반환했습니다.")
             }
             safetyTemperatureCache.record(value, at: now())
-            smcTemperatureFailure = nil
+            let sampleFailures = sample.failures.map { "SMC: \($0)" }
+            smcTemperatureFailure = sampleFailures.isEmpty
+                ? nil
+                : sampleFailures.joined(separator: "; ")
+            failures.append(contentsOf: sampleFailures)
             smc = value
         } catch {
             safetyTemperatureCache.clear()

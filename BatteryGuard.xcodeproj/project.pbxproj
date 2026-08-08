@@ -54,6 +54,11 @@
 		BB000024 /* ChargeControllerTemperatureSamplingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100024 /* ChargeControllerTemperatureSamplingTests.swift */; };
 		BB000025 /* SleepChargingProtectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100025 /* SleepChargingProtectionTests.swift */; };
 		CC000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC100001 /* Assets.xcassets */; };
+		CC000002 /* SMCTemperatureReader-GPL-2.0.txt in Resources */ = {isa = PBXBuildFile; fileRef = DD100003 /* SMCTemperatureReader-GPL-2.0.txt */; };
+		DD000001 /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = DD100001 /* main.c */; };
+		DD000002 /* BatteryGuardSMCReader in Copy SMC Reader */ = {isa = PBXBuildFile; fileRef = DD100002 /* BatteryGuardSMCReader */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		EE000001 /* SMCTemperatureReaderTestBridge.c in Sources */ = {isa = PBXBuildFile; fileRef = EE100001 /* SMCTemperatureReaderTestBridge.c */; };
+		EE000002 /* SMCTemperatureReaderCoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE100003 /* SMCTemperatureReaderCoreTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,7 +69,28 @@
 			remoteGlobalIDString = AA400001;
 			remoteInfo = BatteryGuard;
 		};
+		DD300001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA700001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DD400001;
+			remoteInfo = BatteryGuardSMCReader;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		DD500002 /* Copy SMC Reader */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Helpers;
+			dstSubfolderSpec = 1;
+			files = (
+				DD000002 /* BatteryGuardSMCReader in Copy SMC Reader */,
+			);
+			name = "Copy SMC Reader";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		AA100001 /* BatteryGuardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardApp.swift; sourceTree = "<group>"; };
@@ -118,6 +144,13 @@
 		BB100024 /* ChargeControllerTemperatureSamplingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeControllerTemperatureSamplingTests.swift; sourceTree = "<group>"; };
 		BB100025 /* SleepChargingProtectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepChargingProtectionTests.swift; sourceTree = "<group>"; };
 		CC100001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		DD100001 /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
+		DD100002 /* BatteryGuardSMCReader */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = BatteryGuardSMCReader; sourceTree = BUILT_PRODUCTS_DIR; };
+		DD100003 /* SMCTemperatureReader-GPL-2.0.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "SMCTemperatureReader-GPL-2.0.txt"; sourceTree = "<group>"; };
+		DD100004 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		EE100001 /* SMCTemperatureReaderTestBridge.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = SMCTemperatureReaderTestBridge.c; sourceTree = "<group>"; };
+		EE100002 /* SMCTemperatureReaderTestBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SMCTemperatureReaderTestBridge.h; sourceTree = "<group>"; };
+		EE100003 /* SMCTemperatureReaderCoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMCTemperatureReaderCoreTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -135,6 +168,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DD200001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -143,6 +183,7 @@
 			children = (
 				AA300002 /* BatteryGuard */,
 				BB300002 /* BatteryGuardTests */,
+				DD300002 /* SMCTemperatureReader */,
 				AA300005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -198,6 +239,7 @@
 			children = (
 				AA100006 /* BatteryGuard.app */,
 				BB100002 /* BatteryGuardTests.xctest */,
+				DD100002 /* BatteryGuardSMCReader */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -234,6 +276,9 @@
 				BB100013 /* ProcessLifecycleTests.swift */,
 				BB100003 /* ChargeReconciliationPolicyTests.swift */,
 				BB100014 /* SMCKitOperationSafetyTests.swift */,
+				EE100003 /* SMCTemperatureReaderCoreTests.swift */,
+				EE100001 /* SMCTemperatureReaderTestBridge.c */,
+				EE100002 /* SMCTemperatureReaderTestBridge.h */,
 				BB100025 /* SleepChargingProtectionTests.swift */,
 				BB100006 /* TestSupport.swift */,
 				BB100012 /* StatusParsingTests.swift */,
@@ -241,6 +286,16 @@
 				BB100010 /* UserSettingsTests.swift */,
 			);
 			path = BatteryGuardTests;
+			sourceTree = "<group>";
+		};
+		DD300002 /* SMCTemperatureReader */ = {
+			isa = PBXGroup;
+			children = (
+				DD100001 /* main.c */,
+				DD100004 /* README.md */,
+				DD100003 /* SMCTemperatureReader-GPL-2.0.txt */,
+			);
+			path = SMCTemperatureReader;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -253,10 +308,12 @@
 				AA500001 /* Sources */,
 				AA200001 /* Frameworks */,
 				CC200001 /* Resources */,
+				DD500002 /* Copy SMC Reader */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				DD400002 /* PBXTargetDependency */,
 			);
 			name = BatteryGuard;
 			productName = BatteryGuard;
@@ -280,6 +337,22 @@
 			productReference = BB100002 /* BatteryGuardTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		DD400001 /* BatteryGuardSMCReader */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DD600001 /* Build configuration list for PBXNativeTarget "BatteryGuardSMCReader" */;
+			buildPhases = (
+				DD500001 /* Sources */,
+				DD200001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BatteryGuardSMCReader;
+			productName = BatteryGuardSMCReader;
+			productReference = DD100002 /* BatteryGuardSMCReader */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -289,6 +362,11 @@
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1500;
 				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					DD400001 = {
+						CreatedOnToolsVersion = 26.4;
+					};
+				};
 			};
 			buildConfigurationList = AA600003 /* Build configuration list for PBXProject "BatteryGuard" */;
 			compatibilityVersion = "Xcode 14.0";
@@ -305,6 +383,7 @@
 			targets = (
 				AA400001 /* BatteryGuard */,
 				BB400001 /* BatteryGuardTests */,
+				DD400001 /* BatteryGuardSMCReader */,
 			);
 		};
 /* End PBXProject section */
@@ -315,6 +394,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CC000001 /* Assets.xcassets in Resources */,
+				CC000002 /* SMCTemperatureReader-GPL-2.0.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -373,11 +453,21 @@
 				BB000013 /* ProcessLifecycleTests.swift in Sources */,
 				BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */,
 				BB000014 /* SMCKitOperationSafetyTests.swift in Sources */,
+				EE000002 /* SMCTemperatureReaderCoreTests.swift in Sources */,
+				EE000001 /* SMCTemperatureReaderTestBridge.c in Sources */,
 				BB000025 /* SleepChargingProtectionTests.swift in Sources */,
 				BB000006 /* TestSupport.swift in Sources */,
 				BB000012 /* StatusParsingTests.swift in Sources */,
 				BB000007 /* SafetyTemperatureCacheTests.swift in Sources */,
 				BB000010 /* UserSettingsTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DD500001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DD000001 /* main.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -388,6 +478,11 @@
 			isa = PBXTargetDependency;
 			target = AA400001 /* BatteryGuard */;
 			targetProxy = BB300001 /* PBXContainerItemProxy */;
+		};
+		DD400002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DD400001 /* BatteryGuardSMCReader */;
+			targetProxy = DD300001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -578,6 +673,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.jiwon.batteryguard.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = BatteryGuardTests/SMCTemperatureReaderTestBridge.h;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
 				SWIFT_VERSION = 5.0;
@@ -597,10 +693,60 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.jiwon.batteryguard.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = BatteryGuardTests/SMCTemperatureReaderTestBridge.h;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
 				SWIFT_VERSION = 5.0;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BatteryGuard.app/Contents/MacOS/BatteryGuard";
+			};
+			name = Release;
+		};
+		DD800001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_CODE_COVERAGE = NO;
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-fno-profile-instr-generate",
+					"-framework",
+					IOKit,
+				);
+				OTHER_CFLAGS = (
+					"$(inherited)",
+					"-fno-profile-instr-generate",
+					"-fno-coverage-mapping",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		DD800002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_CODE_COVERAGE = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-fno-profile-instr-generate",
+					"-framework",
+					IOKit,
+				);
+				OTHER_CFLAGS = (
+					"$(inherited)",
+					"-fno-profile-instr-generate",
+					"-fno-coverage-mapping",
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
 			};
 			name = Release;
 		};
@@ -630,6 +776,15 @@
 			buildConfigurations = (
 				BB800001 /* Debug */,
 				BB800002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DD600001 /* Build configuration list for PBXNativeTarget "BatteryGuardSMCReader" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DD800001 /* Debug */,
+				DD800002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

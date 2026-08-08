@@ -195,6 +195,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var releaseDelayValue: TimeInterval = 0
     private var restoreLEDDelayValue: TimeInterval = 0
     private var temperatureSequence: [Float?] = []
+    private var temperatureSampleSequence: [BatteryTemperatureSample] = []
     private var temperatureReadDelays: [TimeInterval] = []
     private var ignoresTemperatureReadCancellation = false
     private var ledDelayByRawValue: [UInt8: TimeInterval] = [:]
@@ -282,6 +283,10 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func enqueueTemperatures(_ values: [Float?]) {
         lock.withLock { temperatureSequence.append(contentsOf: values) }
+    }
+
+    func enqueueTemperatureSamples(_ values: [BatteryTemperatureSample]) {
+        lock.withLock { temperatureSampleSequence.append(contentsOf: values) }
     }
 
     func enqueueTemperatureReadDelays(
@@ -507,26 +512,30 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         setLongRunning(false)
     }
 
-    func readBatteryTemperature() async throws -> Float {
+    func readBatteryTemperature() async throws -> BatteryTemperatureSample {
         try record("read-temperature")
         let read = lock.withLock {
+            let sample = temperatureSampleSequence.isEmpty
+                ? nil
+                : temperatureSampleSequence.removeFirst()
             let temperature = temperatureSequence.isEmpty ? temperatureValue : temperatureSequence.removeFirst()
             let delay = temperatureReadDelays.isEmpty ? 0 : temperatureReadDelays.removeFirst()
-            return (temperature, delay, ignoresTemperatureReadCancellation)
+            return (sample, temperature, delay, ignoresTemperatureReadCancellation)
         }
-        if read.1 > 0 {
-            if read.2 {
+        if read.2 > 0 {
+            if read.3 {
                 await Task.detached {
-                    try? await Task.sleep(nanoseconds: UInt64(read.1 * 1_000_000_000))
+                    try? await Task.sleep(nanoseconds: UInt64(read.2 * 1_000_000_000))
                 }.value
             } else {
-                try await Task.sleep(nanoseconds: UInt64(read.1 * 1_000_000_000))
+                try await Task.sleep(nanoseconds: UInt64(read.2 * 1_000_000_000))
             }
         }
-        guard let nextTemperature = read.0 else {
+        if let sample = read.0 { return sample }
+        guard let nextTemperature = read.1 else {
             throw BatteryError.commandFailed("temperature", 1, "sensor unavailable")
         }
-        return nextTemperature
+        return .complete(nextTemperature)
     }
 
     func setMagSafeLED(_ state: MagSafeLEDState) async throws {

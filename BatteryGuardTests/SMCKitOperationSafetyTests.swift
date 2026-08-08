@@ -18,6 +18,606 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         return predicate()
     }
 
+    func testBatteryTemperatureUsesBundledExactKeyReaderWhenAvailable() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-bundled-smc-reader-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf 'smc %s\n' "$*" >> \(shellQuote(commandLog.path))
+            exit 9
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo helper >> \(shellQuote(commandLog.path))
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            echo "TB1T [flt ] 42.25 (bytes 00 00 29 42)"
+            echo "TB2T [flt ] 39.0 (bytes 00 00 1c 42)"
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let temperature = try await backend.readBatteryTemperature()
+
+        XCTAssertEqual(temperature.maximum, 42.25)
+        XCTAssertTrue(temperature.hasCompleteCoverage)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["helper"])
+    }
+
+    func testIncompleteBundledReaderFallsBackAndIsNotRetried() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-bundled-smc-reader-fallback-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf 'smc %s\n' "$*" >> \(shellQuote(commandLog.path))
+            case "$*" in
+              "-t") echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)" ;;
+              "-k TB0T -r") echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)" ;;
+              "-k TB1T -r") echo "TB1T [flt ] 42.25 (bytes 00 00 29 42)" ;;
+              "-k TB2T -r") echo "TB2T [flt ] 39.0 (bytes 00 00 1c 42)" ;;
+            esac
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo helper >> \(shellQuote(commandLog.path))
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let firstTemperature = try await backend.readBatteryTemperature()
+        let secondTemperature = try await backend.readBatteryTemperature()
+
+        XCTAssertEqual(firstTemperature.maximum, 42.25)
+        XCTAssertEqual(secondTemperature.maximum, 42.25)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(
+            commands,
+            [
+                "helper",
+                "smc -t",
+                "smc -k TB0T -r", "smc -k TB1T -r", "smc -k TB2T -r",
+                "smc -k TB0T -r", "smc -k TB1T -r", "smc -k TB2T -r"
+            ]
+        )
+    }
+
+    func testFailedBundledReaderFallsBackAndIsNotRetried() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-failed-smc-reader-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf 'smc %s\n' "$*" >> \(shellQuote(commandLog.path))
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            echo "TB1T [flt ] 42.25 (bytes 00 00 29 42)"
+            echo "TB2T [flt ] 39.0 (bytes 00 00 1c 42)"
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo helper >> \(shellQuote(commandLog.path))
+            exit 9
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let firstTemperature = try await backend.readBatteryTemperature()
+        let secondTemperature = try await backend.readBatteryTemperature()
+        XCTAssertEqual(firstTemperature.maximum, 42.25)
+        XCTAssertEqual(secondTemperature.maximum, 42.25)
+
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["helper", "smc -t", "smc -t"])
+    }
+
+    func testMissingBundledReaderDegradesToExternalSMC() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-missing-smc-reader-\(UUID().uuidString).log")
+        let missingReader = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-missing-reader-\(UUID().uuidString)")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf 'smc %s\n' "$*" >> \(shellQuote(commandLog.path))
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            echo "TB1T [flt ] 42.25 (bytes 00 00 29 42)"
+            echo "TB2T [flt ] 39.0 (bytes 00 00 1c 42)"
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: missingReader.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let temperature = try await backend.readBatteryTemperature()
+
+        XCTAssertEqual(temperature.maximum, 42.25)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["smc -t"])
+    }
+
+    func testBundledReaderTimeoutFailsClosedWithoutExternalFallback() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-timeout-smc-reader-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo smc >> \(shellQuote(commandLog.path))
+            exit 9
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo helper >> \(shellQuote(commandLog.path))
+            sleep 10
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        do {
+            _ = try await backend.readBatteryTemperature()
+            XCTFail("Expected the bundled reader timeout to fail closed")
+        } catch let error as BatteryError {
+            guard case .commandTimedOut = error else {
+                return XCTFail("Expected commandTimedOut, got \(error)")
+            }
+        }
+
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["helper"])
+    }
+
+    func testBundledReaderCancellationStopsWithoutExternalFallback() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-cancelled-smc-reader-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo smc >> \(shellQuote(commandLog.path))
+            exit 9
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo helper >> \(shellQuote(commandLog.path))
+            sleep 10
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let operation = Task { try await backend.readBatteryTemperature() }
+        let helperStarted = await eventually {
+            FileManager.default.fileExists(atPath: commandLog.path)
+        }
+        XCTAssertTrue(helperStarted)
+        operation.cancel()
+        do {
+            _ = try await operation.value
+            XCTFail("Expected the bundled reader cancellation to propagate")
+        } catch let error as BatteryError {
+            guard case .commandCancelled = error else {
+                return XCTFail("Expected commandCancelled, got \(error)")
+            }
+        }
+
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["helper"])
+    }
+
+    func testPerKeyFallbackRespectsAggregateSafetyDeadline() async throws {
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "-t" ]]; then
+              echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+              exit 0
+            fi
+            sleep 10
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            smcTemperatureReadTimeout: 0.4,
+            smcTemperatureTotalBudget: 1.0
+        )
+
+        try await backend.open()
+        let startedAt = Date()
+        do {
+            _ = try await backend.readBatteryTemperature()
+            XCTFail("Expected all per-key reads to time out")
+        } catch let error as BatteryError {
+            switch error {
+            case .commandFailed, .commandTimedOut:
+                break
+            default:
+                XCTFail("Expected a bounded temperature failure, got \(error)")
+            }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.8)
+    }
+
+    func testPerKeyFallbackSurfacesPartialCoverageWithoutDiscardingHighReading() async throws {
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            case "$*" in
+              "-t") echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)" ;;
+              "-k TB0T -r") echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)" ;;
+              "-k TB1T -r") echo "TB1T [flt ] 72.0 (bytes 00 00 90 42)" ;;
+              "-k TB2T -r") echo "TB2T: unavailable" ;;
+            esac
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let sample = try await backend.readBatteryTemperature()
+
+        XCTAssertEqual(sample.maximum, 72)
+        XCTAssertFalse(sample.hasCompleteCoverage)
+        XCTAssertTrue(sample.failures.contains { $0.hasPrefix("TB2T:") })
+    }
+
+    func testTemperaturePipelineSharesOneTotalDeadlineAcrossEverySource() async throws {
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            case "$*" in
+              "-t") sleep 0.2; echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)" ;;
+              "-k "*) sleep 10 ;;
+            esac
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            sleep 0.2
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            smcTemperatureReadTimeout: 1.0,
+            smcTemperatureTotalBudget: 2.2
+        )
+
+        try await backend.open()
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        do {
+            _ = try await backend.readBatteryTemperature()
+            XCTFail("Expected the shared temperature deadline to expire")
+        } catch let error as BatteryError {
+            switch error {
+            case .commandFailed, .commandTimedOut:
+                break
+            default:
+                XCTFail("Expected a bounded temperature failure, got \(error)")
+            }
+        }
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+
+        XCTAssertLessThan(elapsed, 3.0)
+    }
+
+    func testTransientBundledReaderFailureRetriesAfterCooldown() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-retry-smc-reader-\(UUID().uuidString).log")
+        let invocationCount = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-retry-smc-reader-\(UUID().uuidString).count")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo "smc $*" >> \(shellQuote(commandLog.path))
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            echo "TB1T [flt ] 42.25 (bytes 00 00 29 42)"
+            echo "TB2T [flt ] 39.0 (bytes 00 00 1c 42)"
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo helper >> \(shellQuote(commandLog.path))
+            count=$(cat \(shellQuote(invocationCount.path)) 2>/dev/null || echo 0)
+            count=$((count + 1))
+            echo "$count" > \(shellQuote(invocationCount.path))
+            if [[ "$count" == "1" ]]; then exit 9; fi
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            echo "TB1T [flt ] 52.25 (bytes 00 00 51 42)"
+            echo "TB2T [flt ] 39.0 (bytes 00 00 1c 42)"
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+            try? FileManager.default.removeItem(at: invocationCount)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            temperatureReaderRetryDelay: 0
+        )
+
+        try await backend.open()
+        let fallbackSample = try await backend.readBatteryTemperature()
+        let recoveredSample = try await backend.readBatteryTemperature()
+
+        XCTAssertEqual(fallbackSample.maximum, 42.25)
+        XCTAssertEqual(recoveredSample.maximum, 52.25)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["helper", "smc -t", "helper"])
+    }
+
+    func testBundledReaderPermissionChangeAfterPreflightUsesTrustedFallback() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-reader-mode-change-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo "smc $*" >> \(shellQuote(commandLog.path))
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            echo "TB1T [flt ] 42.25 (bytes 00 00 29 42)"
+            echo "TB2T [flt ] 39.0 (bytes 00 00 1c 42)"
+            """
+        )
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo helper >> \(shellQuote(commandLog.path))
+            echo "TB0T [flt ] 31.5 (bytes 00 00 fc 41)"
+            echo "TB1T [flt ] 42.25 (bytes 00 00 29 42)"
+            echo "TB2T [flt ] 39.0 (bytes 00 00 1c 42)"
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: readerFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        XCTAssertEqual(chmod(readerFixture.path, 0o777), 0)
+        let sample = try await backend.readBatteryTemperature()
+
+        XCTAssertEqual(sample.maximum, 42.25)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["smc -t"])
+    }
+
     func testBatteryTemperatureUsesOneBatchedSMCInvocation() async throws {
         let commandLog = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-smc-temperature-\(UUID().uuidString).log")
@@ -56,7 +656,7 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         try await backend.open()
         let temperature = try await backend.readBatteryTemperature()
 
-        XCTAssertEqual(temperature, 42.25)
+        XCTAssertEqual(temperature.maximum, 42.25)
         let commands = try String(contentsOf: commandLog, encoding: .utf8)
             .split(whereSeparator: \Character.isNewline)
             .map(String.init)
@@ -116,8 +716,8 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         let firstTemperature = try await backend.readBatteryTemperature()
         let secondTemperature = try await backend.readBatteryTemperature()
 
-        XCTAssertEqual(firstTemperature, 42.25)
-        XCTAssertEqual(secondTemperature, 42.25)
+        XCTAssertEqual(firstTemperature.maximum, 42.25)
+        XCTAssertEqual(secondTemperature.maximum, 42.25)
         let commands = try String(contentsOf: commandLog, encoding: .utf8)
             .split(whereSeparator: \Character.isNewline)
             .map(String.init)
