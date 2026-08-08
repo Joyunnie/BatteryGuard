@@ -399,7 +399,7 @@ PR #17 이후 성능 비교에서 일부 앱 실행이 초기화에 실패했는
 - Legacy 평균은 app CPU 7.254ms, child CPU 12.980ms, total CPU 20.234ms, app wakeup 132.25, child wakeup 39.00, total wakeup 171.25, app task energy proxy 0.1473J였다. Current 평균은 각각 6.997ms, 8.265ms, 15.262ms, 126.25, 41.25, 167.50, 0.1278J였다.
 - Current는 app CPU -3.5%, child CPU -36.3%, total CPU -24.6%, app wakeup -4.5%, total wakeup -2.2%, app task energy proxy -13.2%였다. total CPU와 app task energy는 네 개의 인접 A/B pair 모두 Current가 낮았다. child wakeup은 +5.8%였고 wakeup 표본은 pair별 방향이 섞여 있어 독립적인 wakeup 개선으로 단정하지 않는다.
 - `energy_nj`는 BatteryGuard 앱 task만의 proxy이며 helper/외부 CLI까지 합친 시스템 에너지 총량이 아니다. 따라서 이 결과는 앱 task energy 감소 근거로만 사용한다.
-- 성능 표본은 initialization/readiness 성공, 예상 background child activity, 동일 하드웨어 상태를 모두 검증한 trial만 채택하고 원시 trial을 보존한다.
+- 성능 표본은 initialization/readiness 성공, 예상 background child activity, 동일 하드웨어 상태를 모두 검증한 trial만 채택한다. 이번 4+4 비교의 집계값과 pair별 방향은 기록했지만 원시 trial artifact는 저장소에 보존하지 못했으므로 절대값을 독립적으로 재계산할 수 없다는 감사 한계가 있다. 다음 성능 비교부터는 원시 trial artifact 보존을 완료 조건으로 둔다.
 
 strict-concurrency complete와 warnings-as-errors에서 전체 281개 테스트, Release build와 Debug analyze가 통과했다. `NSApplication rejected activation policy 1` 반복 진단은 이 결함과 독립적인 후속 PR에서 조사한다.
 
