@@ -91,6 +91,39 @@ extension ChargeControllerSafetyTests {
         try await controller.shutdown()
     }
 
+    func testPartialSMCSampleBlocksOnHighValueAndRemainsDegraded() async throws {
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            batteryInfoOnRead: info,
+            smcTemperatureSamplingInterval: 0.05
+        )
+        backend.enqueueTemperatureSamples([
+            .complete(30),
+            BatteryTemperatureSample(
+                maximum: 45,
+                failures: ["TB2T: command timed out"]
+            )
+        ])
+
+        try await controller.initialize()
+        let blocked = await eventually {
+            if case .heatBlocked = controller.mode {
+                return !controller.safetyTemperatureSnapshot.failures.isEmpty
+            }
+            return false
+        }
+
+        XCTAssertTrue(blocked)
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.value, 45)
+        XCTAssertEqual(controller.safetyTemperatureSnapshot.sources, [.smc])
+        XCTAssertEqual(controller.heatProtectionPhase, .blocked)
+        XCTAssertTrue(controller.lastError?.contains("TB2T") == true)
+        try await controller.shutdown()
+    }
+
     func testSMCFailureRemainsVisibleWhenIOKitTemperatureIsValid() async throws {
         let info = makeBatteryInfo(charge: 70, temperature: 30)
         let (controller, backend, monitor, _) = makeSUT(

@@ -7,5 +7,7 @@ back to the separately installed `smc` compatibility path.
 
 The AppleSMC user-client ABI is derived from
 [`hholtmann/smcFanControl`](https://github.com/hholtmann/smcFanControl/tree/master/smc-command).
-This helper is distributed under GPL-2.0-or-later; the surrounding BatteryGuard
-application remains under its repository-level MIT license.
+The original devnull and Michael Wilber copyright notices are retained in the
+source. This helper is distributed under GPL-2.0-or-later. See the repository
+`LICENSES.md` for the intended boundary between this executable and the MIT
+BatteryGuard application.

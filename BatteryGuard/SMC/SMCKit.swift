@@ -7,8 +7,9 @@ import Darwin
 private let defaultBatteryPath = "/usr/local/co.palokaj.battery/battery"
 private let defaultSMCBinaryPath = "/usr/local/co.palokaj.battery/smc"
 private let bundledTemperatureReaderName = "BatteryGuardSMCReader"
-private let smcTemperatureReadTimeout: TimeInterval = 2
-private let smcTemperatureFallbackBudget: TimeInterval = 4.5
+private let defaultSMCTemperatureReadTimeout: TimeInterval = 2
+private let defaultSMCTemperatureTotalBudget: TimeInterval = 4.5
+private let defaultTemperatureReaderRetryDelay: TimeInterval = 60
 
 private func bundledTemperatureReaderPath() -> String {
     Bundle.main.bundleURL
@@ -157,6 +158,17 @@ struct BatteryControlStatus: Equatable, Sendable {
     }
 }
 
+struct BatteryTemperatureSample: Equatable, Sendable {
+    let maximum: Float
+    let failures: [String]
+
+    var hasCompleteCoverage: Bool { failures.isEmpty }
+
+    static func complete(_ maximum: Float) -> BatteryTemperatureSample {
+        BatteryTemperatureSample(maximum: maximum, failures: [])
+    }
+}
+
 private extension BatteryChargingStatus {
     var diagnosticLabel: String {
         switch self {
@@ -199,7 +211,7 @@ protocol ChargeControlBackend: AnyObject, Sendable {
 }
 
 protocol BatteryTemperatureBackend: AnyObject, Sendable {
-    func readBatteryTemperature() async throws -> Float
+    func readBatteryTemperature() async throws -> BatteryTemperatureSample
 }
 
 protocol MagSafeLEDBackend: AnyObject, Sendable {
@@ -236,6 +248,9 @@ actor SMCKit: ChargeBackend {
     private let maintainWorkerProbe: MaintainWorkerProbe?
     private let executableTrustPolicy: ExecutableTrustPolicy
     private let diagnostics: DiagnosticLog
+    private let smcTemperatureReadTimeout: TimeInterval
+    private let smcTemperatureTotalBudget: TimeInterval
+    private let temperatureReaderRetryDelay: TimeInterval
     private let statusCommandTimeout: TimeInterval = 2
     private let longRunningVerificationTimeoutNanoseconds: UInt64 = 3_000_000_000
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
@@ -245,8 +260,26 @@ actor SMCKit: ChargeBackend {
     private var batteryExecutableIdentity: ExecutableIdentity?
     private var smcExecutableIdentity: ExecutableIdentity?
     private var temperatureReaderExecutableIdentity: ExecutableIdentity?
-    private var supportsBundledTemperatureReader: Bool?
-    private var supportsBatchedTemperatureRead: Bool?
+    private var bundledTemperatureReaderState: TemperatureSourceState = .untested
+    private var batchedTemperatureReaderState: TemperatureSourceState = .untested
+
+    private enum TemperatureSourceState: Equatable, Sendable {
+        case untested
+        case available
+        case retryAfter(UInt64)
+        case incompatible(String)
+
+        func shouldAttempt(at uptimeNanoseconds: UInt64) -> Bool {
+            switch self {
+            case .untested, .available:
+                return true
+            case .retryAfter(let retryAt):
+                return uptimeNanoseconds >= retryAt
+            case .incompatible:
+                return false
+            }
+        }
+    }
 
     private struct BatteryTemperatureReadings {
         let valuesByKey: [String: Float]
@@ -260,8 +293,13 @@ actor SMCKit: ChargeBackend {
         let device: dev_t
         let inode: ino_t
         let size: off_t
+        let owner: uid_t
+        let group: gid_t
+        let mode: mode_t
         let modifiedSeconds: Int
         let modifiedNanoseconds: Int
+        let changedSeconds: Int
+        let changedNanoseconds: Int
     }
 
     private struct MaintainWorkerProcess: Equatable, Sendable {
@@ -289,6 +327,9 @@ actor SMCKit: ChargeBackend {
         maintainPIDFilePath: String? = nil,
         maintainWorkerProbe: MaintainWorkerProbe? = nil,
         executableTrustPolicy: ExecutableTrustPolicy = .production,
+        smcTemperatureReadTimeout: TimeInterval = defaultSMCTemperatureReadTimeout,
+        smcTemperatureTotalBudget: TimeInterval = defaultSMCTemperatureTotalBudget,
+        temperatureReaderRetryDelay: TimeInterval = defaultTemperatureReaderRetryDelay,
         diagnostics: DiagnosticLog = .disabled
     ) {
         self.runner = runner
@@ -309,6 +350,9 @@ actor SMCKit: ChargeBackend {
         }
         self.maintainWorkerProbe = maintainWorkerProbe
         self.executableTrustPolicy = executableTrustPolicy
+        self.smcTemperatureReadTimeout = max(0.05, smcTemperatureReadTimeout)
+        self.smcTemperatureTotalBudget = max(0.05, smcTemperatureTotalBudget)
+        self.temperatureReaderRetryDelay = max(0, temperatureReaderRetryDelay)
         self.diagnostics = diagnostics
     }
 
@@ -335,10 +379,10 @@ actor SMCKit: ChargeBackend {
                 temperatureReaderExecutableIdentity = try validateTemperatureReaderBeforeUse(
                     path: temperatureReaderPath
                 )
-                supportsBundledTemperatureReader = nil
+                bundledTemperatureReaderState = .untested
             } catch {
                 temperatureReaderExecutableIdentity = nil
-                supportsBundledTemperatureReader = false
+                bundledTemperatureReaderState = .incompatible(error.localizedDescription)
                 await diagnostics.record(
                     DiagnosticEvent(
                         category: .sensor,
@@ -391,13 +435,7 @@ actor SMCKit: ChargeBackend {
         guard lstat(path, &metadata) == 0 else {
             throw BatteryError.preflightFailed("could not capture \(displayName) identity")
         }
-        return ExecutableIdentity(
-            device: metadata.st_dev,
-            inode: metadata.st_ino,
-            size: metadata.st_size,
-            modifiedSeconds: metadata.st_mtimespec.tv_sec,
-            modifiedNanoseconds: metadata.st_mtimespec.tv_nsec
-        )
+        return executableIdentity(from: metadata)
     }
 
     private func validateRootOwnedPath(
@@ -461,13 +499,7 @@ actor SMCKit: ChargeBackend {
                 "SMC temperature reader is not a trusted executable regular file"
             )
         }
-        return ExecutableIdentity(
-            device: metadata.st_dev,
-            inode: metadata.st_ino,
-            size: metadata.st_size,
-            modifiedSeconds: metadata.st_mtimespec.tv_sec,
-            modifiedNanoseconds: metadata.st_mtimespec.tv_nsec
-        )
+        return executableIdentity(from: metadata)
     }
 
     private func validateBatteryCLIVersionUnlocked() async throws {
@@ -1162,17 +1194,19 @@ actor SMCKit: ChargeBackend {
 
     // MARK: - Battery temperature
 
-    func readBatteryTemperature() async throws -> Float {
+    func readBatteryTemperature() async throws -> BatteryTemperatureSample {
         guard rawSMCAvailable else {
             throw BatteryError.unsupported("Raw SMC binary is unavailable; battery temperature cannot be read")
         }
-        try revalidateExecutableIdentity(
-            path: smcBinaryPath,
-            expected: smcExecutableIdentity,
-            displayName: "SMC binary"
-        )
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let budgetNanoseconds = UInt64(smcTemperatureTotalBudget * 1_000_000_000)
+        let deadlineResult = startedAt.addingReportingOverflow(budgetNanoseconds)
+        guard !deadlineResult.overflow else {
+            throw BatteryError.commandTimedOut("SMC temperature read")
+        }
+        let deadline = deadlineResult.partialValue
 
-        if supportsBundledTemperatureReader != false,
+        if bundledTemperatureReaderState.shouldAttempt(at: startedAt),
            let temperatureReaderPath,
            temperatureReaderExecutableIdentity != nil {
             do {
@@ -1185,14 +1219,16 @@ actor SMCKit: ChargeBackend {
                     executable: temperatureReaderPath,
                     arguments: [],
                     label: "read battery temperatures",
-                    timeout: smcTemperatureReadTimeout
+                    timeout: try remainingTemperatureBudget(until: deadline)
                 )
                 let readings = Self.parseBatteryTemperatureReadings(result.stdout)
                 if readings.hasCompleteCoverage, let maximum = readings.maximum {
-                    supportsBundledTemperatureReader = true
-                    return maximum
+                    bundledTemperatureReaderState = .available
+                    return .complete(maximum)
                 }
-                supportsBundledTemperatureReader = false
+                bundledTemperatureReaderState = .incompatible(
+                    "output did not contain complete TB0T/TB1T/TB2T coverage"
+                )
                 await diagnostics.record(
                     DiagnosticEvent(
                         category: .sensor,
@@ -1208,7 +1244,9 @@ actor SMCKit: ChargeBackend {
                 case .commandCancelled, .commandTimedOut:
                     throw error
                 default:
-                    supportsBundledTemperatureReader = false
+                    bundledTemperatureReaderState = retryState(
+                        after: temperatureReaderRetryDelay
+                    )
                     await diagnostics.record(
                         DiagnosticEvent(
                             category: .sensor,
@@ -1219,7 +1257,9 @@ actor SMCKit: ChargeBackend {
                     )
                 }
             } catch {
-                supportsBundledTemperatureReader = false
+                bundledTemperatureReaderState = retryState(
+                    after: temperatureReaderRetryDelay
+                )
                 await diagnostics.record(
                     DiagnosticEvent(
                         category: .sensor,
@@ -1231,20 +1271,32 @@ actor SMCKit: ChargeBackend {
             }
         }
 
-        if supportsBatchedTemperatureRead != false {
+        try revalidateExecutableIdentity(
+            path: smcBinaryPath,
+            expected: smcExecutableIdentity,
+            displayName: "SMC binary"
+        )
+
+        let batchAttemptStartedAt = DispatchTime.now().uptimeNanoseconds
+        if batchedTemperatureReaderState.shouldAttempt(at: batchAttemptStartedAt) {
             do {
                 let result = try await runProcess(
                     executable: smcBinaryPath,
                     arguments: ["-t"],
                     label: "smc -t",
-                    timeout: smcTemperatureReadTimeout
+                    timeout: min(
+                        smcTemperatureReadTimeout,
+                        try remainingTemperatureBudget(until: deadline)
+                    )
                 )
                 let readings = Self.parseBatteryTemperatureReadings(result.stdout)
                 if readings.hasCompleteCoverage, let maximum = readings.maximum {
-                    supportsBatchedTemperatureRead = true
-                    return maximum
+                    batchedTemperatureReaderState = .available
+                    return .complete(maximum)
                 }
-                supportsBatchedTemperatureRead = false
+                batchedTemperatureReaderState = .incompatible(
+                    "output did not contain complete TB0T/TB1T/TB2T coverage"
+                )
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as BatteryError {
@@ -1252,26 +1304,29 @@ actor SMCKit: ChargeBackend {
                 case .commandCancelled, .commandTimedOut:
                     throw error
                 default:
-                    supportsBatchedTemperatureRead = false
+                    batchedTemperatureReaderState = retryState(
+                        after: temperatureReaderRetryDelay
+                    )
                 }
                 // Older or variant SMC binaries do not all expose the same `-t`
                 // listing. Fall through to the proven per-key read contract.
             } catch {
-                supportsBatchedTemperatureRead = false
+                batchedTemperatureReaderState = retryState(
+                    after: temperatureReaderRetryDelay
+                )
             }
         }
 
-        var temperatures: [Float] = []
+        var valuesByKey: [String: Float] = [:]
         var failures: [String] = []
-        let fallbackDeadline = DispatchTime.now().uptimeNanoseconds
-            + UInt64(smcTemperatureFallbackBudget * 1_000_000_000)
-        for key in ["TB0T", "TB1T", "TB2T"] {
+        let keys = ["TB0T", "TB1T", "TB2T"]
+        for (index, key) in keys.enumerated() {
             let now = DispatchTime.now().uptimeNanoseconds
-            guard now < fallbackDeadline else {
-                failures.append("fallback deadline expired")
+            guard now < deadline else {
+                failures.append(contentsOf: keys[index...].map { "\($0): total deadline expired" })
                 break
             }
-            let remaining = TimeInterval(fallbackDeadline - now) / 1_000_000_000
+            let remaining = TimeInterval(deadline - now) / 1_000_000_000
             do {
                 let result = try await runProcess(
                     executable: smcBinaryPath,
@@ -1284,7 +1339,7 @@ actor SMCKit: ChargeBackend {
                     failures.append("\(key): unrecognized output")
                     continue
                 }
-                temperatures.append(value)
+                valuesByKey[key] = value
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as BatteryError {
@@ -1294,14 +1349,37 @@ actor SMCKit: ChargeBackend {
                 failures.append("\(key): \(error.localizedDescription)")
             }
         }
-        guard let maximum = temperatures.max() else {
+        guard let maximum = valuesByKey.values.max() else {
             throw BatteryError.commandFailed(
                 "smc temperature read",
                 -1,
                 failures.joined(separator: "; ")
             )
         }
-        return maximum
+        if valuesByKey.count != keys.count {
+            for key in keys where valuesByKey[key] == nil && !failures.contains(where: { $0.hasPrefix("\(key):") }) {
+                failures.append("\(key): no reading")
+            }
+        }
+        return BatteryTemperatureSample(maximum: maximum, failures: failures)
+    }
+
+    private func remainingTemperatureBudget(until deadline: UInt64) throws -> TimeInterval {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline else {
+            throw BatteryError.commandTimedOut("SMC temperature read")
+        }
+        return min(
+            smcTemperatureReadTimeout,
+            TimeInterval(deadline - now) / 1_000_000_000
+        )
+    }
+
+    private func retryState(after delay: TimeInterval) -> TemperatureSourceState {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let delayNanoseconds = UInt64(delay * 1_000_000_000)
+        let retryAt = now.addingReportingOverflow(delayNanoseconds)
+        return .retryAfter(retryAt.overflow ? UInt64.max : retryAt.partialValue)
     }
 
     static func parseBatteryTemperatureList(_ output: String) -> Float? {
@@ -1500,7 +1578,7 @@ actor SMCKit: ChargeBackend {
         expected: ExecutableIdentity?,
         displayName: String
     ) throws {
-        guard executableTrustPolicy == .production else { return }
+        if executableTrustPolicy == .testFixture, expected == nil { return }
         guard let expected else {
             throw BatteryError.preflightFailed("\(displayName) was not validated during initialization")
         }
@@ -1509,16 +1587,25 @@ actor SMCKit: ChargeBackend {
               metadata.st_mode & S_IFMT == S_IFREG else {
             throw BatteryError.preflightFailed("\(displayName) identity can no longer be verified")
         }
-        let observed = ExecutableIdentity(
-            device: metadata.st_dev,
-            inode: metadata.st_ino,
-            size: metadata.st_size,
-            modifiedSeconds: metadata.st_mtimespec.tv_sec,
-            modifiedNanoseconds: metadata.st_mtimespec.tv_nsec
-        )
+        let observed = executableIdentity(from: metadata)
         guard observed == expected else {
             throw BatteryError.preflightFailed("\(displayName) changed after preflight; restart and verify the installation")
         }
+    }
+
+    private func executableIdentity(from metadata: stat) -> ExecutableIdentity {
+        ExecutableIdentity(
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+            size: metadata.st_size,
+            owner: metadata.st_uid,
+            group: metadata.st_gid,
+            mode: metadata.st_mode,
+            modifiedSeconds: metadata.st_mtimespec.tv_sec,
+            modifiedNanoseconds: metadata.st_mtimespec.tv_nsec,
+            changedSeconds: metadata.st_ctimespec.tv_sec,
+            changedNanoseconds: metadata.st_ctimespec.tv_nsec
+        )
     }
 
     private func verifyLongRunningStart(

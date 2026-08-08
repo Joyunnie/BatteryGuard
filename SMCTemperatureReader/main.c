@@ -1,14 +1,19 @@
 /*
  * BatteryGuardSMCReader
  * SPDX-License-Identifier: GPL-2.0-or-later
+ * Copyright (C) 2006 devnull
+ * Portions Copyright (C) 2013 Michael Wilber
+ * Modifications Copyright (C) 2026 Joyunnie
  *
  * This standalone read-only helper uses the AppleSMC user-client ABI derived
  * from hholtmann/smcFanControl's smc-command. It deliberately exposes no write
  * operation and returns data only when all expected battery sensors succeed.
+ * BatteryGuard's read-only, exact-key implementation was created on 2026-08-08.
  */
 
 #include <IOKit/IOKitLib.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -54,6 +59,10 @@ typedef struct {
 } SMCKeyData;
 
 _Static_assert(sizeof(SMCKeyData) == 80, "Unexpected SMCKeyData layout");
+_Static_assert(offsetof(SMCKeyData, keyInfo) == 28, "Unexpected SMCKeyData.keyInfo offset");
+_Static_assert(offsetof(SMCKeyData, result) == 40, "Unexpected SMCKeyData.result offset");
+_Static_assert(offsetof(SMCKeyData, status) == 41, "Unexpected SMCKeyData.status offset");
+_Static_assert(offsetof(SMCKeyData, bytes) == 48, "Unexpected SMCKeyData.bytes offset");
 
 typedef struct {
     char key[5];
@@ -84,7 +93,10 @@ static kern_return_t callSMC(
     SMCKeyData *output
 ) {
     size_t outputSize = sizeof(*output);
-    return IOConnectCallStructMethod(
+#ifndef BG_IO_CONNECT_CALL
+#define BG_IO_CONNECT_CALL IOConnectCallStructMethod
+#endif
+    kern_return_t result = BG_IO_CONNECT_CALL(
         connection,
         kSMCUserClientMethod,
         input,
@@ -92,6 +104,10 @@ static kern_return_t callSMC(
         output,
         &outputSize
     );
+    if (result == KERN_SUCCESS && outputSize != sizeof(*output)) {
+        return kIOReturnUnderrun;
+    }
+    return result;
 }
 
 static kern_return_t readTemperature(
