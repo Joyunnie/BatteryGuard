@@ -931,6 +931,7 @@ enum ChargeMode: Equatable {
 19. `[PR #17 구현·hostile review 보완·자동·실기 검증 완료]` 실제 Mac의 `flt` 온도 키를 누락하는 upstream `smc -t` 한계를 앱 번들 내부의 read-only `BatteryGuardSMCReader`로 제거했다. helper는 write API 없이 AppleSMC 연결 하나에서 `TB0T/TB1T/TB2T`만 직접 읽고, 세 키 전체가 유효할 때만 결과를 채택한다. 실행 파일 위치·형식·권한과 device/inode/size/owner/group/mode/mtime/ctime identity를 검증한다. incomplete output은 영구 호환성 실패로, fast process failure는 60초 뒤 재시도 가능한 일시 실패로 구분해 기존 external batch와 per-key 경로로 폴백하며 helper timeout/cancellation은 즉시 fail closed 한다. helper, external batch와 per-key 전체가 하나의 4.5초 monotonic deadline을 공유한다. per-key 일부만 성공하면 가장 높은 값은 차단 판단에 보존하되 누락 키를 degraded failure로 계속 표시하므로 Heat 복원에는 사용할 수 없다. 실제 C helper의 ABI layout, IOKit output size, SMC result, type/size, nonfinite/범위 오류를 fault-injection bridge로 검증한다. 전체 키를 읽는 `smc -l`은 한 번 실행에 약 0.63초가 걸려 기존 세 직접 조회 약 0.01초보다 느리므로 거절했다. 사전 실기 비교에서 Release helper 20회 단일 sample 평균은 약 8.30ms, 기존 세 subprocess는 약 22.57ms였고 process 수는 sample당 3개에서 1개로 줄었다. 이는 명령 지연과 process 수 비교이며 에너지 절감량 측정으로 해석하지 않는다. helper의 Xcode coverage instrumentation이 stderr와 diagnostics를 오염시키는 실기 결함을 발견해 target-local disable flag로 제거했다. GPL-2.0-or-later helper는 별도 실행 파일·소스·번들 license와 root license map으로 MIT 앱과 경계를 유지하고 upstream copyright notice를 보존한다. helper success/incomplete/fast-failure/retry/missing-preflight/permission·identity 변경/timeout/cancellation, 전체 pipeline deadline, partial sensor degradation과 C ABI 실패를 포함한 엄격 동시성·경고 오류화 조건의 279개 테스트, Release build와 Analyze가 통과했다. 사전 실기 검증 전후 실제 제어 상태는 80% Maintain, non-discharge로 동일했다.
 20. `[PR #18 구현·자동·실기 검증 완료]` Maintain worker 조회의 안전 상한을 raw `pgrep` 문자열 일치 수가 아니라 exact worker argv 파싱 뒤의 fan-out에 적용한다. 성능 측정은 readiness와 background activity gate를 통과한 trial만 채택하고, 실패 launch를 평균에서 제외한다. 통제된 4+4회 재측정에서 Current의 total CPU는 24.6%, app task energy proxy는 13.2% 낮았으며 total wakeup은 2.2% 낮았지만 pair별 변동 때문에 wakeup 개선은 확정하지 않는다. raw 후보 41개 상태의 설치본 재시작에서도 80% Maintain과 exact worker 1개를 검증했다.
 21. `[PR #19 구현·hostile review 보완·자동·설치본 검증 완료]` `LSUIElement`로 이미 accessory인 launch를 idempotent no-op으로 처리하고, 실제 activation policy 전환은 setter 승인과 exact postcondition을 모두 검증해 거짓 실패 진단을 제거한다. UI의 창 요청도 정책 검증 뒤에만 실행하며, 설치본 3회 launch에서 새 거짓 실패가 없음을 확인했다.
+22. `[구현·hostile review 보완·자동 검증 완료]` Dashboard, menu bar와 Settings를 공통 pastel surface/ink token 기반으로 재설계하고, 작은 상태 문구의 light/dark 대비를 분리된 semantic ink로 보장한다. 충전 이력은 7일을 보존하되 24시간 viewport를 유지하고 왼쪽 스크롤로 과거를 탐색한다. 7일 전체를 전역 200점으로 압축하지 않고 24시간 구간별 최대 120점을 보존해 기존 15분 heartbeat 해상도를 유지하며, live-edge 추적과 과거 위치 보존을 순수 `BatteryHistoryViewport` 상태로 분리해 회귀 테스트한다. 엄격 동시성·경고 오류화 조건의 289개 테스트, Release build와 Analyze를 모두 통과했다.
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -973,11 +974,11 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | not run | 개인용 앱 전제와 제품 범위는 기존 계획에서 이미 확정 |
-| Codex Review | `/codex review` | Independent 2nd opinion | 0 | not run | 이번 작업은 기존 hostile reviews의 결과를 계획에 반영 |
+| Codex Review | hostile whole-project review | Independent review | 1 | issues addressed | UI 대비, 이력 해상도와 viewport 테스트 결함을 Checkpoint 22에 반영; lifecycle 안전 결함은 독립 후속 PR로 분리 |
 | Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | clean | 2 issues: SMC sample task lifetime, test topology debt; both scheduled independently |
-| Design Review | `/plan-design-review` | UI/UX gaps | 0 | not needed | 새 UI 범위 없음 |
+| Design Review | hostile whole-project review | UI/UX gaps | 1 | issues addressed | pastel fill/ink 대비 분리와 24시간 단위 이력 해상도 보존 |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | not needed | 개인용 로컬 프로젝트이며 test topology만 후속 범위 |
 
-**VERDICT:** CHECKPOINT 19 CODE COMPLETE — 자동 검증과 통제된 read-only 하드웨어·성능 비교를 통과했으며 독립 PR로 제출한다.
+**VERDICT:** CHECKPOINT 22 COMPLETE — targeted history/viewport tests와 엄격 동시성·경고 오류화 조건의 전체 289개 테스트, Release build와 Analyze가 통과했다. Lifecycle 종료 경쟁, degraded 센서 자동 재개와 manual-intervention 복구는 이 PR에 섞지 않고 다음 안전 PR에서 처리한다.
 
 NO UNRESOLVED DECISIONS

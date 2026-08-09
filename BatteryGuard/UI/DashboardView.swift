@@ -6,9 +6,7 @@ struct DashboardView: View {
     @EnvironmentObject private var monitor: BatteryMonitor
     @State private var historyRecords: [BatteryHistory.ChartRecord] = []
     @State private var historyError: String?
-    @State private var historyDomainEnd = Date()
-    @State private var historyScrollPosition = Date().addingTimeInterval(-HistoryChart.visibleInterval)
-    @State private var hasInitializedHistoryViewport = false
+    @State private var historyViewport = BatteryHistoryViewport(now: Date())
 
     private enum Layout {
         static let cardSpacing: CGFloat = 18
@@ -17,11 +15,6 @@ struct DashboardView: View {
         static let regularMinimumWidth = primaryColumnMinimumWidth + secondaryColumnWidth + cardSpacing
         static let summaryRowMinimumHeight: CGFloat = 244
         static let detailRowMinimumHeight: CGFloat = 270
-    }
-
-    private enum HistoryChart {
-        static let visibleInterval: TimeInterval = 24 * 60 * 60
-        static let liveEdgeTolerance: TimeInterval = 2 * 60
     }
 
     var body: some View {
@@ -369,7 +362,12 @@ struct DashboardView: View {
     }
 
     private var historyChart: some View {
-        let sampled = BatteryHistory.downsample(historyRecords, maxPoints: 200)
+        let sampled = BatteryHistory.downsampleTimeline(
+            historyRecords,
+            domainEnd: historyViewport.domainEnd,
+            interval: historyViewport.visibleInterval,
+            maxPointsPerInterval: 120
+        )
         return VStack(alignment: .leading, spacing: 10) {
             Chart {
                 ForEach(sampled, id: \.timestamp) { record in
@@ -407,11 +405,11 @@ struct DashboardView: View {
                 }
             }
             .chartXScale(
-                domain: historyDomainEnd.addingTimeInterval(-BatteryHistory.visibleHistoryInterval)...historyDomainEnd
+                domain: historyViewport.domainEnd.addingTimeInterval(-BatteryHistory.retentionInterval)...historyViewport.domainEnd
             )
             .chartScrollableAxes(.horizontal)
-            .chartXVisibleDomain(length: HistoryChart.visibleInterval)
-            .chartScrollPosition(x: $historyScrollPosition)
+            .chartXVisibleDomain(length: historyViewport.visibleInterval)
+            .chartScrollPosition(x: $historyViewport.scrollPosition)
             .chartYScale(domain: 0...100)
             .chartYAxis {
                 AxisMarks(values: [0, 25, 50, 75, 100]) { value in
@@ -485,16 +483,7 @@ struct DashboardView: View {
     private func refreshHistory() async {
         let history = BatteryHistory.shared
         let records = await history.loadRecentHistory()
-        let newDomainEnd = Date()
-        let previousLatestPosition = historyDomainEnd.addingTimeInterval(-HistoryChart.visibleInterval)
-        let shouldFollowLatest = !hasInitializedHistoryViewport
-            || abs(historyScrollPosition.timeIntervalSince(previousLatestPosition)) <= HistoryChart.liveEdgeTolerance
-
-        historyDomainEnd = newDomainEnd
-        if shouldFollowLatest {
-            historyScrollPosition = newDomainEnd.addingTimeInterval(-HistoryChart.visibleInterval)
-        }
-        hasInitializedHistoryViewport = true
+        historyViewport.refresh(now: Date())
         historyRecords = records
         historyError = history.visibleError
     }

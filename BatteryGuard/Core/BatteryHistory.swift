@@ -28,6 +28,36 @@ enum BatteryHistoryReadiness: Equatable {
     case failed(String)
 }
 
+struct BatteryHistoryViewport: Equatable {
+    let visibleInterval: TimeInterval
+    let liveEdgeTolerance: TimeInterval
+    private(set) var domainEnd: Date
+    var scrollPosition: Date
+    private(set) var isInitialized = false
+
+    init(
+        now: Date,
+        visibleInterval: TimeInterval = 24 * 60 * 60,
+        liveEdgeTolerance: TimeInterval = 2 * 60
+    ) {
+        self.visibleInterval = visibleInterval
+        self.liveEdgeTolerance = liveEdgeTolerance
+        domainEnd = now
+        scrollPosition = now.addingTimeInterval(-visibleInterval)
+    }
+
+    mutating func refresh(now: Date) {
+        let previousLivePosition = domainEnd.addingTimeInterval(-visibleInterval)
+        let followsLiveEdge = !isInitialized
+            || abs(scrollPosition.timeIntervalSince(previousLivePosition)) <= liveEdgeTolerance
+        domainEnd = now
+        if followsLiveEdge {
+            scrollPosition = now.addingTimeInterval(-visibleInterval)
+        }
+        isInitialized = true
+    }
+}
+
 @MainActor
 struct BatteryHistoryStoreOperations {
     let save: (NSManagedObjectContext) throws -> Void
@@ -57,7 +87,7 @@ final class BatteryHistory {
         let chargeLimit: Int
     }
 
-    static let visibleHistoryInterval: TimeInterval = 7 * 24 * 60 * 60
+    static let retentionInterval: TimeInterval = 7 * 24 * 60 * 60
 
     private(set) var readiness: BatteryHistoryReadiness = .loading
     private(set) var saveError: String?
@@ -212,7 +242,7 @@ final class BatteryHistory {
         do {
             if needsCleanup {
                 try removeRecords(
-                    olderThan: timestamp.addingTimeInterval(-Self.visibleHistoryInterval),
+                    olderThan: timestamp.addingTimeInterval(-Self.retentionInterval),
                     from: context
                 )
                 lastCleanupDate = timestamp
@@ -244,7 +274,7 @@ final class BatteryHistory {
         let request = NSFetchRequest<BatteryRecord>(entityName: "BatteryRecord")
         request.predicate = NSPredicate(
             format: "timestamp >= %@",
-            now().addingTimeInterval(-Self.visibleHistoryInterval) as NSDate
+            now().addingTimeInterval(-Self.retentionInterval) as NSDate
         )
         request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
 
@@ -298,6 +328,22 @@ final class BatteryHistory {
         }
 
         return selectedIndices.sorted().map { records[$0] }
+    }
+
+    static func downsampleTimeline(
+        _ records: [ChartRecord],
+        domainEnd: Date,
+        interval: TimeInterval,
+        maxPointsPerInterval: Int
+    ) -> [ChartRecord] {
+        guard interval > 0, maxPointsPerInterval > 0, !records.isEmpty else { return [] }
+        let domainStart = domainEnd.addingTimeInterval(-retentionInterval)
+        let buckets = Dictionary(grouping: records) { record in
+            max(0, Int(record.timestamp.timeIntervalSince(domainStart) / interval))
+        }
+        return buckets.keys.sorted().flatMap { bucket in
+            downsample(buckets[bucket] ?? [], maxPoints: maxPointsPerInterval)
+        }
     }
 
     private static func extremaIndices(in records: [ChartRecord]) -> Set<Int> {

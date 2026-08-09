@@ -45,7 +45,7 @@ final class BatteryHistoryTests: XCTestCase {
         XCTAssertEqual(readiness, .ready)
 
         history.record(chargePercent: 40, chargeLimit: 80)
-        clock.advance(by: BatteryHistory.visibleHistoryInterval - 60)
+        clock.advance(by: BatteryHistory.retentionInterval - 60)
         history.record(chargePercent: 50, chargeLimit: 80)
         XCTAssertEqual(history.fetchRecentHistory().map(\.chargePercent), [40, 50])
 
@@ -157,6 +157,89 @@ final class BatteryHistoryTests: XCTestCase {
         let sampled = BatteryHistory.downsample(records, maxPoints: 3)
 
         XCTAssertEqual(sampled, [records[0], records[4], records[9]])
+    }
+
+    func testTimelineDownsamplingPreservesDailyResolution() {
+        let day: TimeInterval = 24 * 60 * 60
+        let domainEnd = Date(timeIntervalSince1970: 8 * day)
+        let records = (0..<(7 * 96)).map { index in
+            BatteryHistory.ChartRecord(
+                timestamp: domainEnd.addingTimeInterval(-7 * day + TimeInterval(index) * 15 * 60),
+                chargePercent: index % 101,
+                chargeLimit: 80
+            )
+        }
+
+        let sampled = BatteryHistory.downsampleTimeline(
+            records,
+            domainEnd: domainEnd,
+            interval: day,
+            maxPointsPerInterval: 120
+        )
+
+        XCTAssertEqual(sampled, records)
+    }
+
+    func testTimelineDownsamplingCapsEachDayIndependently() {
+        let day: TimeInterval = 24 * 60 * 60
+        let domainEnd = Date(timeIntervalSince1970: 8 * day)
+        let records = (0..<(2 * 240)).map { index in
+            BatteryHistory.ChartRecord(
+                timestamp: domainEnd.addingTimeInterval(-2 * day + TimeInterval(index) * 6 * 60),
+                chargePercent: index % 101,
+                chargeLimit: index % 2 == 0 ? 80 : 75
+            )
+        }
+
+        let sampled = BatteryHistory.downsampleTimeline(
+            records,
+            domainEnd: domainEnd,
+            interval: day,
+            maxPointsPerInterval: 120
+        )
+
+        XCTAssertEqual(sampled.count, 240)
+        XCTAssertEqual(sampled.first?.timestamp, records.first?.timestamp)
+        XCTAssertEqual(sampled.last?.timestamp, records.last?.timestamp)
+    }
+
+    func testHistoryViewportStartsAtAndFollowsTheLiveDay() {
+        let day: TimeInterval = 24 * 60 * 60
+        let start = Date(timeIntervalSince1970: 10 * day)
+        var viewport = BatteryHistoryViewport(now: start)
+
+        XCTAssertEqual(viewport.scrollPosition, start.addingTimeInterval(-day))
+        viewport.refresh(now: start.addingTimeInterval(60))
+
+        XCTAssertTrue(viewport.isInitialized)
+        XCTAssertEqual(viewport.domainEnd, start.addingTimeInterval(60))
+        XCTAssertEqual(viewport.scrollPosition, start.addingTimeInterval(-day + 60))
+    }
+
+    func testHistoryViewportPreservesAUserSelectedPastDayOnRefresh() {
+        let day: TimeInterval = 24 * 60 * 60
+        let start = Date(timeIntervalSince1970: 10 * day)
+        var viewport = BatteryHistoryViewport(now: start)
+        viewport.refresh(now: start)
+        let pastPosition = start.addingTimeInterval(-3 * day)
+        viewport.scrollPosition = pastPosition
+
+        viewport.refresh(now: start.addingTimeInterval(60))
+
+        XCTAssertEqual(viewport.domainEnd, start.addingTimeInterval(60))
+        XCTAssertEqual(viewport.scrollPosition, pastPosition)
+    }
+
+    func testHistoryViewportTreatsNearLivePositionAsFollowing() {
+        let day: TimeInterval = 24 * 60 * 60
+        let start = Date(timeIntervalSince1970: 10 * day)
+        var viewport = BatteryHistoryViewport(now: start)
+        viewport.refresh(now: start)
+        viewport.scrollPosition = start.addingTimeInterval(-day - 90)
+
+        viewport.refresh(now: start.addingTimeInterval(60))
+
+        XCTAssertEqual(viewport.scrollPosition, start.addingTimeInterval(-day + 60))
     }
 
     func testPersistentStoreLoadFailureIsExposed() async throws {

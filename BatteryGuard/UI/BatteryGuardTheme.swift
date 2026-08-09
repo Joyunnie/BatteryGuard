@@ -62,11 +62,11 @@ enum BatteryGuardPalette {
         dark: NSColor(red: 0.95, green: 0.50, blue: 0.53, alpha: 1)
     )
     static let warning = adaptive(
-        light: NSColor(red: 0.69, green: 0.43, blue: 0.16, alpha: 1),
+        light: NSColor(red: 0.58, green: 0.33, blue: 0.08, alpha: 1),
         dark: NSColor(red: 0.94, green: 0.68, blue: 0.35, alpha: 1)
     )
     static let success = adaptive(
-        light: NSColor(red: 0.25, green: 0.55, blue: 0.43, alpha: 1),
+        light: NSColor(red: 0.18, green: 0.44, blue: 0.33, alpha: 1),
         dark: NSColor(red: 0.47, green: 0.78, blue: 0.64, alpha: 1)
     )
 
@@ -295,7 +295,7 @@ extension ChargeState {
         switch self {
         case .charging, .topUp: return BatteryGuardPalette.success
         case .chargingPaused: return BatteryGuardPalette.warning
-        case .discharging: return BatteryGuardPalette.sky
+        case .discharging: return BatteryGuardPalette.skyInk
         case .notConnected: return .secondary
         case .unknown: return BatteryGuardPalette.danger
         }

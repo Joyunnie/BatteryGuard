@@ -263,7 +263,7 @@ struct SettingsView: View {
                     title: controller.isBatteryControlDisabled
                         ? "macOS 제어, BatteryGuard 모니터링 전용"
                         : "BatteryGuard가 충전 제어 중",
-                    tint: controller.isBatteryControlDisabled ? BatteryGuardPalette.sky : BatteryGuardPalette.success,
+                    tint: controller.isBatteryControlDisabled ? BatteryGuardPalette.skyInk : BatteryGuardPalette.success,
                     icon: controller.isBatteryControlDisabled ? "eye.fill" : "checkmark.shield.fill"
                 )
 
