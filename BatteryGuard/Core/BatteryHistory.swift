@@ -1,5 +1,5 @@
 // BatteryHistory.swift
-// Core Data-backed 24-hour battery history.
+// Core Data-backed seven-day battery history.
 
 import Foundation
 import CoreData
@@ -56,6 +56,8 @@ final class BatteryHistory {
         let chargePercent: Int
         let chargeLimit: Int
     }
+
+    static let visibleHistoryInterval: TimeInterval = 7 * 24 * 60 * 60
 
     private(set) var readiness: BatteryHistoryReadiness = .loading
     private(set) var saveError: String?
@@ -174,9 +176,9 @@ final class BatteryHistory {
         return await withCheckedContinuation { readinessWaiters.append($0) }
     }
 
-    func loadLast24Hours() async -> [ChartRecord] {
+    func loadRecentHistory() async -> [ChartRecord] {
         guard await waitUntilReady() == .ready else { return [] }
-        return fetchLast24Hours()
+        return fetchRecentHistory()
     }
 
     @discardableResult
@@ -209,7 +211,10 @@ final class BatteryHistory {
         let needsCleanup = lastCleanupDate.map { timestamp.timeIntervalSince($0) >= 3600 } ?? true
         do {
             if needsCleanup {
-                try removeRecords(olderThan: timestamp.addingTimeInterval(-86400), from: context)
+                try removeRecords(
+                    olderThan: timestamp.addingTimeInterval(-Self.visibleHistoryInterval),
+                    from: context
+                )
                 lastCleanupDate = timestamp
             }
 
@@ -234,12 +239,12 @@ final class BatteryHistory {
         }
     }
 
-    func fetchLast24Hours() -> [ChartRecord] {
+    func fetchRecentHistory() -> [ChartRecord] {
         guard readiness == .ready else { return [] }
         let request = NSFetchRequest<BatteryRecord>(entityName: "BatteryRecord")
         request.predicate = NSPredicate(
             format: "timestamp >= %@",
-            now().addingTimeInterval(-86400) as NSDate
+            now().addingTimeInterval(-Self.visibleHistoryInterval) as NSDate
         )
         request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
 

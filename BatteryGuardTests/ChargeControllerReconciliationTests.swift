@@ -12,7 +12,7 @@ extension ChargeControllerSafetyTests {
         settings.chargeLimit = 60
 
         controller.processBatteryInfo(makeBatteryInfo(charge: 75))
-        let record = try XCTUnwrap(history.fetchLast24Hours().last)
+        let record = try XCTUnwrap(history.fetchRecentHistory().last)
         XCTAssertEqual(record.chargeLimit, 80)
     }
 
@@ -27,7 +27,7 @@ extension ChargeControllerSafetyTests {
         let applied = await eventually { controller.mode == .maintaining(limit: 60) }
 
         XCTAssertTrue(applied)
-        XCTAssertEqual(history.fetchLast24Hours().last?.chargeLimit, 60)
+        XCTAssertEqual(history.fetchRecentHistory().last?.chargeLimit, 60)
     }
 
     func testInitializationProcessesCurrentSnapshotAndKeepsHistoryHeartbeat() async throws {
@@ -49,12 +49,12 @@ extension ChargeControllerSafetyTests {
 
         try await controller.initialize()
         let heartbeatRecorded = await eventually {
-            history.fetchLast24Hours().count >= 2
+            history.fetchRecentHistory().count >= 2
         }
 
         XCTAssertTrue(heartbeatRecorded)
         XCTAssertEqual(monitor.batteryInfo, info)
-        XCTAssertEqual(history.fetchLast24Hours().map(\.chargeLimit), [80, 80])
+        XCTAssertEqual(history.fetchRecentHistory().map(\.chargeLimit), [80, 80])
         try await controller.shutdown()
     }
 
@@ -79,7 +79,7 @@ extension ChargeControllerSafetyTests {
             )
         }
 
-        XCTAssertGreaterThanOrEqual(history.fetchLast24Hours().count, 2)
+        XCTAssertGreaterThanOrEqual(history.fetchRecentHistory().count, 2)
     }
 
     func testExternalMaintainDriftIsDisplayedLoggedAndClearsWhenCorrected() async throws {
@@ -186,7 +186,7 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(controller.currentState, .discharging)
         XCTAssertTrue(controller.hasExternalControlDrift)
         controller.processBatteryInfo(makeBatteryInfo(charge: 80))
-        XCTAssertTrue(history.fetchLast24Hours().isEmpty)
+        XCTAssertTrue(history.fetchRecentHistory().isEmpty)
 
         backend.setControlStatus(nil)
         backend.failNext("read-status")

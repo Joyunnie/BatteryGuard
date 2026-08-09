@@ -12,7 +12,7 @@ final class BatteryHistoryTests: XCTestCase {
         history.record(chargePercent: 80, chargeLimit: 80)
         history.record(chargePercent: 80, chargeLimit: 80)
 
-        let records = history.fetchLast24Hours()
+        let records = history.fetchRecentHistory()
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records.first?.chargePercent, 80)
         XCTAssertEqual(records.first?.chargeLimit, 80)
@@ -31,11 +31,27 @@ final class BatteryHistoryTests: XCTestCase {
         history.record(chargePercent: 80, chargeLimit: 80)
         clock.advance(by: 899)
         history.record(chargePercent: 80, chargeLimit: 80)
-        XCTAssertEqual(history.fetchLast24Hours().count, 1)
+        XCTAssertEqual(history.fetchRecentHistory().count, 1)
 
         clock.advance(by: 2)
         history.record(chargePercent: 80, chargeLimit: 80)
-        XCTAssertEqual(history.fetchLast24Hours().count, 2)
+        XCTAssertEqual(history.fetchRecentHistory().count, 2)
+    }
+
+    func testRecentHistoryIncludesSevenDaysAndExcludesOlderRecords() async {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_000_000))
+        let history = BatteryHistory(inMemory: true, now: { clock.now() })
+        let readiness = await history.waitUntilReady()
+        XCTAssertEqual(readiness, .ready)
+
+        history.record(chargePercent: 40, chargeLimit: 80)
+        clock.advance(by: BatteryHistory.visibleHistoryInterval - 60)
+        history.record(chargePercent: 50, chargeLimit: 80)
+        XCTAssertEqual(history.fetchRecentHistory().map(\.chargePercent), [40, 50])
+
+        clock.advance(by: 2 * 60)
+        history.record(chargePercent: 60, chargeLimit: 80)
+        XCTAssertEqual(history.fetchRecentHistory().map(\.chargePercent), [50, 60])
     }
 
     func testDownsamplingNeverExceedsTheConfiguredLimitAndKeepsEndpoints() {
@@ -156,7 +172,7 @@ final class BatteryHistoryTests: XCTestCase {
             return XCTFail("Expected failed readiness, received \(readiness)")
         }
         XCTAssertFalse(message.isEmpty)
-        XCTAssertTrue(history.fetchLast24Hours().isEmpty)
+        XCTAssertTrue(history.fetchRecentHistory().isEmpty)
     }
 
     func testSaveAndFetchFailuresAreExposedAndLogged() async throws {
@@ -186,7 +202,7 @@ final class BatteryHistoryTests: XCTestCase {
         )
         let fetchReadiness = await fetchFailure.waitUntilReady()
         XCTAssertEqual(fetchReadiness, .ready)
-        XCTAssertTrue(fetchFailure.fetchLast24Hours().isEmpty)
+        XCTAssertTrue(fetchFailure.fetchRecentHistory().isEmpty)
         XCTAssertTrue(fetchFailure.fetchError?.contains("injected fetch failure") == true)
 
         let deadline = Date().addingTimeInterval(1)
@@ -215,10 +231,10 @@ final class BatteryHistoryTests: XCTestCase {
         let readiness = await history.waitUntilReady()
         XCTAssertEqual(readiness, .ready)
 
-        XCTAssertTrue(history.fetchLast24Hours().isEmpty)
+        XCTAssertTrue(history.fetchRecentHistory().isEmpty)
         XCTAssertNotNil(history.fetchError)
         shouldFailFetch = false
-        XCTAssertTrue(history.fetchLast24Hours().isEmpty)
+        XCTAssertTrue(history.fetchRecentHistory().isEmpty)
         XCTAssertNil(history.fetchError)
     }
 }
