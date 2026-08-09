@@ -198,7 +198,7 @@ extension ChargeControllerSafetyTests {
         let backend = FakeChargeBackend()
         backend.enqueueTemperatures([30, 45])
         backend.enqueueTemperatureReadDelays([0, 0.3], ignoringCancellation: true)
-        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
         let infoSource = TestBatteryInfoSource(info)
         let monitor = BatteryMonitor(
             batteryInfoProvider: { infoSource.read() },
@@ -235,7 +235,7 @@ extension ChargeControllerSafetyTests {
         let backend = FakeChargeBackend()
         backend.enqueueTemperatures([30, 45, 30])
         backend.enqueueTemperatureReadDelays([0, 0.3, 0], ignoringCancellation: true)
-        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
         let infoSource = TestBatteryInfoSource(info)
         let monitor = BatteryMonitor(
             batteryInfoProvider: { infoSource.read() },
@@ -258,8 +258,9 @@ extension ChargeControllerSafetyTests {
             backend.operations.filter { $0 == "read-temperature" }.count == 2
         }
         XCTAssertTrue(delayedSampleStarted)
-        infoSource.set(nil)
-        monitor.batteryInfo = nil
+        let wakeInfo = makeBatteryInfo(charge: 70, temperature: 30)
+        infoSource.set(wakeInfo)
+        monitor.batteryInfo = wakeInfo
 
         await controller.reconcileAfterWake()
         try await Task.sleep(nanoseconds: 400_000_000)
@@ -274,7 +275,7 @@ extension ChargeControllerSafetyTests {
         let backend = FakeChargeBackend()
         backend.enqueueTemperatures([30, 45, 30])
         backend.enqueueTemperatureReadDelays([0, 0.3, 0.1], ignoringCancellation: true)
-        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
         let infoSource = TestBatteryInfoSource(info)
         let monitor = BatteryMonitor(
             batteryInfoProvider: { infoSource.read() },
@@ -333,7 +334,7 @@ extension ChargeControllerSafetyTests {
         let backend = FakeChargeBackend()
         backend.enqueueTemperatures([30, 45])
         backend.enqueueTemperatureReadDelays([0, 0.3], ignoringCancellation: true)
-        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
         let infoSource = TestBatteryInfoSource(info)
         let monitor = BatteryMonitor(
             batteryInfoProvider: { infoSource.read() },

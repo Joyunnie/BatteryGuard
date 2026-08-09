@@ -330,12 +330,18 @@ extension ChargeControllerSafetyTests {
         }
 
 
-        do {
-            try await controller.shutdown()
-            XCTFail("Manual intervention must not be auto-recovered on retry")
-        } catch {
-            XCTAssertEqual(controller.readiness, .ready)
-        }
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+        await controller.retryManualInterventionRecovery()
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        try await controller.shutdown()
     }
 
     func testFailedDischargeShutdownKeepsSleepPreventionUntilVerifiedRecovery() async throws {
@@ -355,12 +361,107 @@ extension ChargeControllerSafetyTests {
             XCTAssertEqual(controller.readiness, .ready)
         }
 
-        do {
-            try await controller.shutdown()
-            XCTFail("Manual intervention must retain the sleep assertion")
-        } catch {
-            XCTAssertTrue(monitor.isSleepPreventionActive)
-        }
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+        await controller.retryManualInterventionRecovery()
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+        try await controller.shutdown()
+    }
+
+    func testManualRecoveryReportsVerifiedMismatchAsExternalDrift() async {
+        let failed = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "uncertain hardware state",
+            disposition: .manualIntervention
+        )
+        let (controller, backend, _, _) = makeSUT(initialMode: failed)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 60,
+                maintainWorker: .running(pid: 6_060, target: 60)
+            )
+        )
+
+        await controller.retryManualInterventionRecovery()
+
+        XCTAssertEqual(
+            controller.mode,
+            .externalDrift(
+                expected: .maintaining(limit: 80),
+                observed: .maintaining(limit: 60)
+            )
+        )
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertTrue(controller.lastError?.contains("기대 상태와 일치하지 않습니다") == true)
+    }
+
+    func testManualRecoveryReadFailureRemainsExplicitlyRetryable() async {
+        let failed = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "uncertain hardware state",
+            disposition: .manualIntervention
+        )
+        let (controller, backend, _, _) = makeSUT(initialMode: failed)
+        backend.failNext("read-status")
+
+        await controller.retryManualInterventionRecovery()
+
+        XCTAssertEqual(controller.mode, failed)
+        XCTAssertNotNil(controller.manualInterventionRecoveryDescription)
+        XCTAssertTrue(controller.lastError?.contains("확인하지 못했습니다") == true)
+    }
+
+    func testManualRecoveryConvergesUncertainDischargeToSafeMaintain() async {
+        let failed = ChargeMode.failed(
+            previous: .discharging(target: 60, returnLimit: 80),
+            message: "uncertain discharge state",
+            disposition: .manualIntervention
+        )
+        let (controller, backend, monitor, _) = makeSUT(initialMode: failed)
+        XCTAssertTrue(monitor.preventSleep(reason: "test uncertain discharge"))
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+
+        await controller.retryManualInterventionRecovery()
+
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(monitor.isSleepPreventionActive)
+    }
+
+    func testManualRecoveryDoesNotAcceptMaintainWhileSMCIsDegraded() async {
+        let failed = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "uncertain hardware state",
+            disposition: .manualIntervention
+        )
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            initialMode: failed
+        )
+        backend.failNext("read-temperature")
+
+        await controller.retryManualInterventionRecovery()
+
+        XCTAssertEqual(controller.mode, failed)
+        XCTAssertFalse(controller.safetyTemperatureSnapshot.failures.isEmpty)
+        XCTAssertTrue(controller.lastError?.contains("온도") == true)
     }
 
     func testShutdownCancellationFailureStopsBeforeAnyRecoveryMutation() async {

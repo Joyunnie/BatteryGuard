@@ -596,6 +596,31 @@ extension ChargeControllerSafetyTests {
         XCTAssertFalse(backend.operations.contains("top-up:100"))
     }
 
+    func testWakeDoesNotResumeMaintainWhenSMCFailsButIOKitIsCool() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            initialMode: .sleepProtected(previous: previous, charge: 70)
+        )
+        backend.failNext("read-temperature")
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+
+        await controller.reconcileAfterWake()
+
+        XCTAssertEqual(controller.mode, .heatBlocked(previous: previous))
+        XCTAssertFalse(controller.safetyTemperatureSnapshot.failures.isEmpty)
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
     func testDisabledStrategyDoesNotMutateBatteryState() async {
         let (controller, backend, _, _) = makeSUT(
             initialMode: .maintaining(limit: 80),

@@ -166,7 +166,7 @@ struct MenuBarView: View {
                 )
             }
 
-            ExternalDriftStatusView(controller: controller, compact: true)
+            ChargeRecoveryStatusView(controller: controller, compact: true)
 
             if let error = controller.lastError, !controller.hasExternalControlDrift {
                 PastelNotice(message: error, kind: .warning)
@@ -225,28 +225,61 @@ struct MenuBarView: View {
     }
 }
 
-struct ExternalDriftStatusView: View {
+struct ChargeRecoveryStatusView: View {
     @ObservedObject var controller: ChargeController
     var compact = false
 
-    var body: some View {
+    private struct RecoveryContent {
+        let title: String
+        let detail: String?
+        let buttonTitle: String
+        let isManualIntervention: Bool
+    }
+
+    private var recoveryContent: RecoveryContent? {
         if let drift = controller.externalDriftDescription {
+            return RecoveryContent(
+                title: drift,
+                detail: controller.externalDriftRecoveryDescription,
+                buttonTitle: "다시 확인",
+                isManualIntervention: false
+            )
+        }
+        if let recovery = controller.manualInterventionRecoveryDescription {
+            return RecoveryContent(
+                title: "수동 복구 확인이 필요합니다",
+                detail: recovery,
+                buttonTitle: "안전 상태 다시 확인",
+                isManualIntervention: true
+            )
+        }
+        return nil
+    }
+
+    var body: some View {
+        if let content = recoveryContent {
             VStack(alignment: .leading, spacing: compact ? 6 : 9) {
-                Label(drift, systemImage: "arrow.triangle.2.circlepath")
+                Label(content.title, systemImage: "arrow.triangle.2.circlepath")
                     .font(.system(size: compact ? 10.5 : 12, weight: .semibold))
-                if let recovery = controller.externalDriftRecoveryDescription {
-                    Text(recovery)
+                if let detail = content.detail {
+                    Text(detail)
                         .font(.system(size: compact ? 9.5 : 11))
                         .foregroundStyle(.secondary)
                 }
                 Button {
-                    Task { await controller.reconcileExternalState() }
+                    Task {
+                        if content.isManualIntervention {
+                            await controller.retryManualInterventionRecovery()
+                        } else {
+                            await controller.reconcileExternalState()
+                        }
+                    }
                 } label: {
-                    Label("다시 확인", systemImage: "arrow.clockwise")
+                    Label(content.buttonTitle, systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(controller.isReconcilingExternalState)
+                .disabled(controller.isReconcilingExternalState || controller.isCommandPending)
             }
             .foregroundStyle(BatteryGuardPalette.warning)
             .frame(maxWidth: .infinity, alignment: .leading)
