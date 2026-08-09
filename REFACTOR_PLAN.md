@@ -932,6 +932,7 @@ enum ChargeMode: Equatable {
 20. `[PR #18 구현·자동·실기 검증 완료]` Maintain worker 조회의 안전 상한을 raw `pgrep` 문자열 일치 수가 아니라 exact worker argv 파싱 뒤의 fan-out에 적용한다. 성능 측정은 readiness와 background activity gate를 통과한 trial만 채택하고, 실패 launch를 평균에서 제외한다. 통제된 4+4회 재측정에서 Current의 total CPU는 24.6%, app task energy proxy는 13.2% 낮았으며 total wakeup은 2.2% 낮았지만 pair별 변동 때문에 wakeup 개선은 확정하지 않는다. raw 후보 41개 상태의 설치본 재시작에서도 80% Maintain과 exact worker 1개를 검증했다.
 21. `[PR #19 구현·hostile review 보완·자동·설치본 검증 완료]` `LSUIElement`로 이미 accessory인 launch를 idempotent no-op으로 처리하고, 실제 activation policy 전환은 setter 승인과 exact postcondition을 모두 검증해 거짓 실패 진단을 제거한다. UI의 창 요청도 정책 검증 뒤에만 실행하며, 설치본 3회 launch에서 새 거짓 실패가 없음을 확인했다.
 22. `[구현·hostile review 보완·자동 검증 완료]` Dashboard, menu bar와 Settings를 공통 pastel surface/ink token 기반으로 재설계하고, 작은 상태 문구의 light/dark 대비를 분리된 semantic ink로 보장한다. 충전 이력은 7일을 보존하되 24시간 viewport를 유지하고 왼쪽 스크롤로 과거를 탐색한다. 7일 전체를 전역 200점으로 압축하지 않고 24시간 구간별 최대 120점을 보존해 기존 15분 heartbeat 해상도를 유지하며, live-edge 추적과 과거 위치 보존을 순수 `BatteryHistoryViewport` 상태로 분리해 회귀 테스트한다. 엄격 동시성·경고 오류화 조건의 289개 테스트, Release build와 Analyze를 모두 통과했다.
+23. `[hostile review 안전 보완·자동 검증 완료]` 정상 종료는 초기화가 확정한 첫 충전 안전 상태를 기다린 뒤 정책을 선택해 초기화 중 Heat Protection 결정을 Maintain으로 덮지 않는다. 초기화, wake와 Heat 복원은 fresh SMC·IOKit 전체 센서 coverage가 성공한 경우에만 자동 충전을 재개하고, 한 센서의 값이 남아 있어도 다른 독립 센서 실패가 있으면 charging-off로 fail closed 한다. `manualIntervention`은 주기적 자동 reconciliation 대상에서 계속 제외하되, 사용자가 실제 CLI를 기록된 Maintain 한도로 복원한 뒤 누르는 read-only 검증 경로와 공통 Dashboard/menu/Settings 복구 UI를 제공한다. 수동 복구도 Heat Protection이 켜져 있으면 fresh complete 온도 검증을 추가로 요구한다. 검증된 Maintain만 실패 상태와 Discharge sleep assertion을 해제하며, 불일치는 external drift로 전환하고 status read 실패는 재시도 가능한 수동 실패를 보존한다. 엄격 동시성·경고 오류화 조건의 296개 테스트, Release build와 Analyze를 모두 통과했다.
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -974,11 +975,11 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | not run | 개인용 앱 전제와 제품 범위는 기존 계획에서 이미 확정 |
-| Codex Review | hostile whole-project review | Independent review | 1 | issues addressed | UI 대비, 이력 해상도와 viewport 테스트 결함을 Checkpoint 22에 반영; lifecycle 안전 결함은 독립 후속 PR로 분리 |
+| Codex Review | hostile whole-project review | Independent review | 1 | issues addressed | UI 대비·이력 결함은 Checkpoint 22, lifecycle 종료 경쟁·sensor fail-closed·manual recovery는 독립 Checkpoint 23에 반영 |
 | Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | clean | 2 issues: SMC sample task lifetime, test topology debt; both scheduled independently |
 | Design Review | hostile whole-project review | UI/UX gaps | 1 | issues addressed | pastel fill/ink 대비 분리와 24시간 단위 이력 해상도 보존 |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | not needed | 개인용 로컬 프로젝트이며 test topology만 후속 범위 |
 
-**VERDICT:** CHECKPOINT 22 COMPLETE — targeted history/viewport tests와 엄격 동시성·경고 오류화 조건의 전체 289개 테스트, Release build와 Analyze가 통과했다. Lifecycle 종료 경쟁, degraded 센서 자동 재개와 manual-intervention 복구는 이 PR에 섞지 않고 다음 안전 PR에서 처리한다.
+**VERDICT:** CHECKPOINT 23 COMPLETE — controller safety targeted tests와 엄격 동시성·경고 오류화 조건의 전체 296개 테스트, Release build와 Analyze가 통과했다. `ChargeController`와 `SMCKit` 파일 분해는 동작·안전 계약 변경과 섞지 않는 후속 maintainability 작업으로 유지한다.
 
 NO UNRESOLVED DECISIONS

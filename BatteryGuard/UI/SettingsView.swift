@@ -236,7 +236,7 @@ struct SettingsView: View {
                         PastelNotice(message: denial, kind: .info)
                     }
 
-                    ExternalDriftStatusView(controller: controller)
+                    ChargeRecoveryStatusView(controller: controller)
                 }
             }
 

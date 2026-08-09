@@ -191,11 +191,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if terminationApproved { return .terminateNow }
         if terminationTask != nil { return .terminateLater }
 
-        initializationTask?.cancel()
+        let initialization = initializationTask
         initializationTask = nil
         terminationTask = Task { @MainActor [weak self, weak sender] in
             guard let self, let sender else { return }
             do {
+                // Initialization owns the first safety decision. Let it finish
+                // before shutdown chooses whether Maintain or charging-off must
+                // survive termination.
+                await initialization?.value
                 try await ChargeController.shared.shutdown()
                 await DiagnosticLog.shared.flushPendingEvents()
                 self.terminationApproved = true

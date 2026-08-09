@@ -39,6 +39,15 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    private struct FreshSafetyTemperatureRead {
+        let maximum: Double?
+        let failures: [String]
+
+        func permitsAutomaticCharging(upTo threshold: Double) -> Bool {
+            failures.isEmpty && maximum.map { $0 <= threshold } == true
+        }
+    }
+
     private struct HeatRestoreReblockedError: LocalizedError {
         let underlying: Error
         var errorDescription: String? {
@@ -198,6 +207,11 @@ final class ChargeController: ObservableObject {
         }
         return "Terminal에서 실제 상태를 BatteryGuard 기대 상태(\(expected.userDescription))로 복원한 뒤 다시 확인하세요."
     }
+    var manualInterventionRecoveryDescription: String? {
+        guard case .failed(let previous?, _, .manualIntervention) = mode else { return nil }
+        let expected = manualRecoveryExpectation(for: previous)
+        return "실제 CLI 상태를 \(expected.userDescription)(으)로 복원한 뒤 안전 상태를 다시 확인하세요."
+    }
     var isHeatProtectionBlockingControls: Bool {
         switch mode {
         case .heatBlocked:
@@ -243,6 +257,8 @@ final class ChargeController: ObservableObject {
     private var wakeFallbackObserver: NSObjectProtocol?
     private var chargeLimitDebounceWork: DispatchWorkItem?
     private var isShuttingDown = false
+    private var initializationInProgress = false
+    private var initializationCompletionWaiters: [CheckedContinuation<Void, Never>] = []
     private var backendAvailableForShutdown: Bool
     private var initializationHardwareMutationAttempted: Bool
     private var operationGeneration: UInt64 = 0
@@ -320,6 +336,11 @@ final class ChargeController: ObservableObject {
 
     func initialize() async throws {
         guard readiness != .shuttingDown else { throw CancellationError() }
+        guard !initializationInProgress else {
+            throw BatteryError.unsupported("초기화가 이미 진행 중입니다.")
+        }
+        initializationInProgress = true
+        defer { finishInitializationLifecycle() }
         readiness = .initializing
         mode = .idle
         do {
@@ -378,15 +399,12 @@ final class ChargeController: ObservableObject {
                 if settings.heatProtectionEnabled {
                     let temperature = await readFreshSafetyTemperature(fallbackInfo: info)
                     guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
-                    if let temperature, temperature <= settings.heatProtectionThreshold {
+                    if temperature.permitsAutomaticCharging(upTo: settings.heatProtectionThreshold) {
                         initializationHardwareMutationAttempted = true
                         try await backend.applyMaintain(level: desiredLimit)
                         mode = .maintaining(limit: desiredLimit)
                         settings.chargeLimit = desiredLimit
                     } else {
-                        if temperature == nil {
-                            setSensorError("온도를 읽을 수 없어 Heat Protection이 degraded 상태입니다.")
-                        }
                         initializationHardwareMutationAttempted = true
                         try await backend.cancelLongRunningOperation()
                         try await backend.disableCharging()
@@ -456,7 +474,22 @@ final class ChargeController: ObservableObject {
         stopExternalReconciliation()
     }
 
+    private func finishInitializationLifecycle() {
+        initializationInProgress = false
+        let waiters = initializationCompletionWaiters
+        initializationCompletionWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForInitializationIfNeeded() async {
+        guard initializationInProgress else { return }
+        await withCheckedContinuation { continuation in
+            initializationCompletionWaiters.append(continuation)
+        }
+    }
+
     func shutdown() async throws {
+        await waitForInitializationIfNeeded()
         guard !isShuttingDown else {
             throw BatteryError.unsupported("종료 정리가 이미 진행됐거나 실패했습니다.")
         }
@@ -550,10 +583,24 @@ final class ChargeController: ObservableObject {
                     observed: .unavailable(error.localizedDescription)
                 )
             } else {
+                let recoveryMode: RestorableChargeMode
+                let failureDisposition: ChargeFailureDisposition
+                switch requestedPolicy {
+                case .keepChargingDisabled:
+                    recoveryMode = modeBeforeShutdown.restorableMode
+                        ?? .maintaining(limit: requestedLimit)
+                    failureDisposition = .heatProtection
+                case .restoreMaintain(let limit):
+                    recoveryMode = .maintaining(limit: limit)
+                    failureDisposition = .manualIntervention
+                case .preserveMaintain, .preserveReleasedControl, .releaseControl:
+                    recoveryMode = .maintaining(limit: requestedLimit)
+                    failureDisposition = .manualIntervention
+                }
                 mode = .failed(
-                    previous: modeBeforeShutdown.restorableMode ?? .maintaining(limit: requestedLimit),
+                    previous: recoveryMode,
                     message: error.localizedDescription,
-                    disposition: .manualIntervention
+                    disposition: failureDisposition
                 )
             }
             commandError = "종료 안전 정리 실패: \(error.localizedDescription)"
@@ -1186,7 +1233,9 @@ final class ChargeController: ObservableObject {
         )
     }
 
-    private func readFreshSafetyTemperature(fallbackInfo: BatteryInfo? = nil) async -> Double? {
+    private func readFreshSafetyTemperature(
+        fallbackInfo: BatteryInfo? = nil
+    ) async -> FreshSafetyTemperatureRead {
         var smc: Double?
         var failures: [String] = []
         do {
@@ -1218,8 +1267,14 @@ final class ChargeController: ObservableObject {
             failures.append("IOKit: 배터리 정보 없음")
         }
         let value = publishSafetyTemperature(smc: smc, ioKit: ioKit, failures: failures)
+        if failures.isEmpty {
+            clearSensorError()
+        } else {
+            setSensorError("Heat Protection 센서 degraded: \(failures.joined(separator: "; "))")
+        }
+        refreshDisplayedError()
         lastTemperature = value
-        return value
+        return FreshSafetyTemperatureRead(maximum: value, failures: failures)
     }
 
     @discardableResult
@@ -1394,9 +1449,7 @@ final class ChargeController: ObservableObject {
                         let restoreThreshold = self.settings.heatProtectionThreshold
                         let preflight = await self.readFreshSafetyTemperature()
                         try Task.checkCancellation()
-                        guard self.safetyTemperatureSnapshot.failures.isEmpty,
-                              let preflight,
-                              preflight <= restoreThreshold - 2 else {
+                        guard preflight.permitsAutomaticCharging(upTo: restoreThreshold - 2) else {
                             throw BatteryError.commandFailed("Heat Protection restore", -1, "fresh temperature is unavailable or above the restore threshold")
                         }
                     }
@@ -1411,9 +1464,7 @@ final class ChargeController: ObservableObject {
                         let postflightThreshold = self.settings.heatProtectionThreshold
                         let postflight = await self.readFreshSafetyTemperature()
                         try Task.checkCancellation()
-                        guard self.safetyTemperatureSnapshot.failures.isEmpty,
-                              let postflight,
-                              postflight <= postflightThreshold else {
+                        guard postflight.permitsAutomaticCharging(upTo: postflightThreshold) else {
                             throw BatteryError.commandFailed("Heat Protection restore", -1, "post-restore temperature is unavailable or unsafe")
                         }
                     }
@@ -2096,6 +2147,94 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    func retryManualInterventionRecovery() async {
+        guard case .failed(let previous?, _, .manualIntervention) = mode,
+              !isShuttingDown,
+              activeOperationID == nil,
+              pendingChargeLimit == nil,
+              !isReconcilingExternalState else {
+            return
+        }
+
+        let failedMode = mode
+        let readinessBeforeRecovery = readiness
+        let expectation = manualRecoveryExpectation(for: previous)
+        let stateBefore = failedMode.diagnosticLabel
+        isReconcilingExternalState = true
+        readiness = .reconciling
+        defer { isReconcilingExternalState = false }
+
+        do {
+            let snapshot = try await readReconciliationSnapshot(for: expectation)
+            guard !isShuttingDown, mode == failedMode else { return }
+
+            if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
+                if settings.heatProtectionEnabled {
+                    let temperature = await readFreshSafetyTemperature()
+                    try Task.checkCancellation()
+                    guard !isShuttingDown, mode == failedMode else { return }
+                    guard temperature.permitsAutomaticCharging(
+                        upTo: settings.heatProtectionThreshold
+                    ) else {
+                        throw BatteryError.unsupported(
+                            "독립 온도 센서 전체를 새로 확인할 수 없거나 안전 온도를 벗어나 수동 복구를 승인하지 않았습니다."
+                        )
+                    }
+                }
+                if case .maintaining = expectation {
+                    monitor.allowSleep()
+                }
+                mode = expectation.reconciledMode
+                readiness = .ready
+                commandError = nil
+                driftError = nil
+                refreshDisplayedError()
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .control,
+                        operation: "manual recovery verified",
+                        outcome: .succeeded,
+                        stateBefore: stateBefore,
+                        stateAfter: mode.diagnosticLabel
+                    )
+                )
+                return
+            }
+
+            let observed = ChargeReconciliationPolicy.observedMode(from: snapshot.status)
+            mode = .externalDrift(expected: expectation, observed: observed)
+            readiness = .ready
+            commandError = nil
+            driftError = "수동 복구 확인 결과: \(observed.userDescription). 기대 상태와 일치하지 않습니다."
+            refreshDisplayedError()
+            await diagnostics.record(
+                DiagnosticEvent(
+                    category: .control,
+                    operation: "manual recovery verification",
+                    outcome: .drifted,
+                    message: snapshot.status.diagnosticDescription,
+                    stateBefore: stateBefore,
+                    stateAfter: mode.diagnosticLabel
+                )
+            )
+        } catch {
+            guard !isShuttingDown, mode == failedMode else { return }
+            readiness = readinessBeforeRecovery
+            commandError = "수동 복구 상태를 확인하지 못했습니다: \(error.localizedDescription)"
+            refreshDisplayedError()
+            await diagnostics.record(
+                DiagnosticEvent(
+                    category: .control,
+                    operation: "manual recovery verification",
+                    outcome: .failed,
+                    message: error.localizedDescription,
+                    stateBefore: stateBefore,
+                    stateAfter: mode.diagnosticLabel
+                )
+            )
+        }
+    }
+
     private func readReconciliationSnapshot(
         for expectation: ReconciledChargeExpectation
     ) async throws -> ChargeReconciliationSnapshot {
@@ -2117,6 +2256,15 @@ final class ChargeController: ObservableObject {
             status: status,
             ownedLongRunningOperation: ownedLongRunningOperation
         )
+    }
+
+    private func manualRecoveryExpectation(
+        for previous: RestorableChargeMode
+    ) -> ReconciledChargeExpectation {
+        // Explicit recovery always converges an uncertain Top Up/Discharge
+        // state to its recorded safe Maintain limit instead of reviving the
+        // interrupted long-running operation.
+        .maintaining(limit: previous.maintainLimit)
     }
 
     private var reconciliationExpectation: ReconciledChargeExpectation? {
@@ -2352,7 +2500,7 @@ final class ChargeController: ObservableObject {
             if settings.heatProtectionEnabled {
                 let temperature = await readFreshSafetyTemperature(fallbackInfo: freshInfo)
                 guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
-                guard let temperature, temperature <= settings.heatProtectionThreshold else {
+                guard temperature.permitsAutomaticCharging(upTo: settings.heatProtectionThreshold) else {
                     try await backend.disableCharging()
                     guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
                     mode = .heatBlocked(previous: prior)
@@ -2446,7 +2594,7 @@ final class ChargeController: ObservableObject {
             if shouldEvaluateHeatProtection {
                 let temperature = await readFreshSafetyTemperature(fallbackInfo: freshInfo)
                 guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
-                guard let temperature, temperature <= settings.heatProtectionThreshold else {
+                guard temperature.permitsAutomaticCharging(upTo: settings.heatProtectionThreshold) else {
                     try await backend.disableCharging()
                     guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
                     mode = .heatBlocked(previous: prior)

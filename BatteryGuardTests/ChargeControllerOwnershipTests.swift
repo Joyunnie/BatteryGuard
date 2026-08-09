@@ -120,7 +120,7 @@ extension ChargeControllerSafetyTests {
         let clock = TestClock(Date(timeIntervalSince1970: 1_000_000))
         let backend = FakeChargeBackend()
         backend.temperature = 30
-        let info = makeBatteryInfo(charge: 70, temperature: nil)
+        let info = makeBatteryInfo(charge: 70, temperature: 30)
         let monitor = BatteryMonitor(
             batteryInfoProvider: { info },
             runsMonitoringInfrastructure: false

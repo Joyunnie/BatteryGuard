@@ -53,6 +53,60 @@ extension ChargeControllerSafetyTests {
         XCTAssertFalse(backend.operations.contains("maintain:80"))
     }
 
+    func testInitializationDoesNotResumeChargingWhenSMCFailsButIOKitIsCool() async throws {
+        let backend = FakeChargeBackend()
+        backend.failNext("read-temperature")
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 70, temperature: 30) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.heatProtectionEnabled = true
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        try await controller.initialize()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertEqual(controller.mode, .heatBlocked(previous: .maintaining(limit: 80)))
+        XCTAssertFalse(controller.safetyTemperatureSnapshot.failures.isEmpty)
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        try await controller.shutdown()
+    }
+
+    func testShutdownWaitsForInitializationSafetyDecision() async throws {
+        let backend = FakeChargeBackend()
+        backend.temperature = 45
+        backend.enqueueTemperatureReadDelays([0.2])
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 70, temperature: 45) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        settings.heatProtectionEnabled = true
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        let initialization = Task { try await controller.initialize() }
+        let temperatureReadStarted = await eventually {
+            backend.operations.contains("read-temperature")
+        }
+        XCTAssertTrue(temperatureReadStarted)
+
+        let shutdown = Task { try await controller.shutdown() }
+        try await initialization.value
+        try await shutdown.value
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
     func testInitializationFailureLeavesControlsUnavailable() async {
         let backend = FakeChargeBackend()
         backend.failNext("open")
