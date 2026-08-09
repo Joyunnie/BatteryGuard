@@ -102,27 +102,27 @@ struct BatteryGuardApp: App {
             MenuBarView()
                 .environmentObject(ChargeController.shared)
                 .environmentObject(BatteryMonitor.shared)
-                .environmentObject(UserSettings.shared)
         } label: {
             MenuBarLabel()
         }
         .menuBarExtraStyle(.window)
 
-        Window("BatteryGuard Dashboard", id: "dashboard") {
+        Window("BatteryGuard 대시보드", id: "dashboard") {
             DashboardView()
                 .environmentObject(ChargeController.shared)
                 .environmentObject(BatteryMonitor.shared)
-                .environmentObject(UserSettings.shared)
-                .frame(minWidth: 600, minHeight: 500)
+                .frame(minWidth: 820, minHeight: 620)
         }
+        .defaultSize(width: 980, height: 720)
 
-        Window("BatteryGuard Settings", id: "settings") {
+        Window("BatteryGuard 설정", id: "settings") {
             SettingsView()
                 .environmentObject(UserSettings.shared)
                 .environmentObject(ChargeController.shared)
-                .frame(width: 450, height: 350)
+                .frame(minWidth: 720, minHeight: 520)
         }
-        .windowResizability(.contentSize)
+        .defaultSize(width: 760, height: 560)
+        .windowResizability(.contentMinSize)
     }
 }
 
