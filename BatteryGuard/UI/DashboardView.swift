@@ -6,6 +6,9 @@ struct DashboardView: View {
     @EnvironmentObject private var monitor: BatteryMonitor
     @State private var historyRecords: [BatteryHistory.ChartRecord] = []
     @State private var historyError: String?
+    @State private var historyDomainEnd = Date()
+    @State private var historyScrollPosition = Date().addingTimeInterval(-HistoryChart.visibleInterval)
+    @State private var hasInitializedHistoryViewport = false
 
     private enum Layout {
         static let cardSpacing: CGFloat = 18
@@ -14,6 +17,11 @@ struct DashboardView: View {
         static let regularMinimumWidth = primaryColumnMinimumWidth + secondaryColumnWidth + cardSpacing
         static let summaryRowMinimumHeight: CGFloat = 244
         static let detailRowMinimumHeight: CGFloat = 270
+    }
+
+    private enum HistoryChart {
+        static let visibleInterval: TimeInterval = 24 * 60 * 60
+        static let liveEdgeTolerance: TimeInterval = 2 * 60
     }
 
     var body: some View {
@@ -336,7 +344,7 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 16) {
                 PastelSectionHeader(
                     "7일 충전 흐름",
-                    subtitle: "최근 7일의 실제 충전량과 검증된 한도를 비교합니다.",
+                    subtitle: "최근 하루를 보고, 왼쪽으로 스크롤해 이전 기록을 확인합니다.",
                     icon: "chart.xyaxis.line",
                     tint: BatteryGuardPalette.accent
                 )
@@ -398,6 +406,12 @@ struct DashboardView: View {
                     .lineStyle(StrokeStyle(lineWidth: 1.7, dash: [6, 4]))
                 }
             }
+            .chartXScale(
+                domain: historyDomainEnd.addingTimeInterval(-BatteryHistory.visibleHistoryInterval)...historyDomainEnd
+            )
+            .chartScrollableAxes(.horizontal)
+            .chartXVisibleDomain(length: HistoryChart.visibleInterval)
+            .chartScrollPosition(x: $historyScrollPosition)
             .chartYScale(domain: 0...100)
             .chartYAxis {
                 AxisMarks(values: [0, 25, 50, 75, 100]) { value in
@@ -410,9 +424,17 @@ struct DashboardView: View {
                 }
             }
             .chartXAxis {
-                AxisMarks(values: .stride(by: .day, count: 1)) { _ in
+                AxisMarks(values: .stride(by: .hour, count: 3)) { value in
                     AxisGridLine().foregroundStyle(Color.secondary.opacity(0.10))
-                    AxisValueLabel(format: .dateTime.month(.defaultDigits).day())
+                    if let timestamp = value.as(Date.self) {
+                        AxisValueLabel {
+                            if Calendar.current.component(.hour, from: timestamp) == 0 {
+                                Text(timestamp, format: .dateTime.month(.defaultDigits).day())
+                            } else {
+                                Text(timestamp, format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)))
+                            }
+                        }
+                    }
                 }
             }
             .chartLegend(.hidden)
@@ -462,7 +484,18 @@ struct DashboardView: View {
     @MainActor
     private func refreshHistory() async {
         let history = BatteryHistory.shared
-        historyRecords = await history.loadRecentHistory()
+        let records = await history.loadRecentHistory()
+        let newDomainEnd = Date()
+        let previousLatestPosition = historyDomainEnd.addingTimeInterval(-HistoryChart.visibleInterval)
+        let shouldFollowLatest = !hasInitializedHistoryViewport
+            || abs(historyScrollPosition.timeIntervalSince(previousLatestPosition)) <= HistoryChart.liveEdgeTolerance
+
+        historyDomainEnd = newDomainEnd
+        if shouldFollowLatest {
+            historyScrollPosition = newDomainEnd.addingTimeInterval(-HistoryChart.visibleInterval)
+        }
+        hasInitializedHistoryViewport = true
+        historyRecords = records
         historyError = history.visibleError
     }
 }
