@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>BatteryGuard 1.0</title>
+    <organization>com.jiwon.batteryguard</organization>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="14.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <welcome file="Welcome.html"/>
+    <readme file="ReadMe.html"/>
+    <license file="License.html"/>
+    <conclusion file="Conclusion.html"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="payload"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="payload" visible="false">
+        <pkg-ref id="com.jiwon.batteryguard.friend-installer.payload"/>
+    </choice>
+    <pkg-ref id="com.jiwon.batteryguard.friend-installer.payload" version="1.0" auth="Root">BatteryGuard-payload.pkg</pkg-ref>
+</installer-gui-script>

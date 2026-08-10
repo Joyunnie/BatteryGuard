@@ -1,0 +1,60 @@
+#!/bin/zsh
+
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+readonly dependency_dir="/usr/local/co.palokaj.battery"
+readonly sudoers_file="/private/etc/sudoers.d/battery"
+readonly expected_battery_hash="ce1917ba2176851bf6096f1a343ff9e1306c748e1ee2c5fbe9e37fa3cd45bf04"
+readonly expected_smc_hash="e3b4392c966dee700f3e1d6cc3812c0d487954c3d6d77b91f521a9590aadae44"
+
+fail() {
+  print -u2 -- "BatteryGuard 설치 중단: $*"
+  exit 1
+}
+
+[[ "$(id -u)" == "0" ]] || fail "관리자 권한이 필요합니다."
+[[ "$(uname -m)" == "arm64" ]] || fail "Apple Silicon Mac만 지원합니다."
+
+os_major="$(sw_vers -productVersion | cut -d. -f1)"
+[[ "$os_major" == <-> && "$os_major" -ge 14 ]] || fail "macOS 14 이상이 필요합니다."
+
+if [[ -L "/usr/local" || (-e "/usr/local" && ! -d "/usr/local") ]]; then
+  fail "/usr/local 경로가 신뢰할 수 있는 디렉터리가 아닙니다."
+fi
+if [[ -L "$dependency_dir" || (-e "$dependency_dir" && ! -d "$dependency_dir") ]]; then
+  fail "${dependency_dir} 경로가 신뢰할 수 있는 디렉터리가 아닙니다."
+fi
+
+verify_existing_file() {
+  local path="$1"
+  local expected_hash="$2"
+  local display_name="$3"
+
+  [[ -e "$path" || -L "$path" ]] || return 0
+  [[ -f "$path" && ! -L "$path" ]] || fail "기존 ${display_name}이 일반 파일이 아닙니다: ${path}"
+  local actual_hash
+  actual_hash="$(shasum -a 256 "$path" | awk '{print $1}')"
+  [[ "$actual_hash" == "$expected_hash" ]] || \
+    fail "다른 버전의 ${display_name}이 이미 설치되어 있습니다. 기존 배터리 관리 도구를 안전하게 해제·제거한 뒤 다시 설치하세요."
+}
+
+verify_existing_file "$dependency_dir/battery" "$expected_battery_hash" "battery CLI"
+verify_existing_file "$dependency_dir/smc" "$expected_smc_hash" "SMC 도구"
+
+if [[ -e "$sudoers_file" || -L "$sudoers_file" ]]; then
+  [[ -f "$sudoers_file" && ! -L "$sudoers_file" ]] || fail "기존 battery sudoers 정책이 일반 파일이 아닙니다."
+  grep -qF '# BatteryGuard least-privilege policy' "$sudoers_file" || \
+    fail "다른 배터리 도구의 관리자 권한 정책이 이미 있습니다. 해당 도구의 제어를 안전하게 해제·제거한 뒤 다시 설치하세요."
+fi
+
+if pgrep -x BatteryGuard >/dev/null 2>&1; then
+  fail "실행 중인 BatteryGuard를 먼저 정상 종료하세요."
+fi
+
+if ps -axo command= | awk -v battery="$dependency_dir/battery" \
+  '$1 == "/bin/bash" && $2 == battery && $3 == "maintain_synchronous" { found = 1 } END { exit !found }'; then
+  fail "기존 Maintain 작업이 실행 중입니다. 기존 배터리 관리 앱에서 충전 제어를 안전하게 해제한 뒤 다시 설치하세요."
+fi
+
+exit 0
