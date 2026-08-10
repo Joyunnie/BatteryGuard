@@ -1,0 +1,74 @@
+#!/bin/zsh
+
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+readonly assets_dir="/Library/Application Support/BatteryGuard/InstallerAssets"
+readonly dependency_dir="/usr/local/co.palokaj.battery"
+readonly sudoers_dir="/private/etc/sudoers.d"
+readonly sudoers_file="${sudoers_dir}/battery"
+readonly expected_battery_hash="ce1917ba2176851bf6096f1a343ff9e1306c748e1ee2c5fbe9e37fa3cd45bf04"
+readonly expected_smc_hash="e3b4392c966dee700f3e1d6cc3812c0d487954c3d6d77b91f521a9590aadae44"
+
+fail() {
+  print -u2 -- "BatteryGuard 설치 실패: $*"
+  exit 1
+}
+
+verify_hash() {
+  local path="$1"
+  local expected_hash="$2"
+  local actual_hash
+  actual_hash="$(shasum -a 256 "$path" | awk '{print $1}')"
+  [[ "$actual_hash" == "$expected_hash" ]] || fail "설치 파일 무결성 검증에 실패했습니다: ${path}"
+}
+
+[[ -d "$assets_dir" && ! -L "$assets_dir" ]] || fail "설치 자산 디렉터리를 신뢰할 수 없습니다."
+[[ "$(stat -f '%u:%g' "$assets_dir")" == "0:0" ]] || fail "설치 자산이 root:wheel 소유가 아닙니다."
+[[ -f "$assets_dir/battery" && ! -L "$assets_dir/battery" ]] || fail "battery CLI 설치 자산이 없습니다."
+[[ -f "$assets_dir/smc" && ! -L "$assets_dir/smc" ]] || fail "SMC 설치 자산이 없습니다."
+verify_hash "$assets_dir/battery" "$expected_battery_hash"
+verify_hash "$assets_dir/smc" "$expected_smc_hash"
+codesign --verify --deep --strict "/Applications/BatteryGuard.app" || fail "BatteryGuard 코드 서명 검증에 실패했습니다."
+
+console_user="$(stat -f '%Su' /dev/console)"
+[[ -n "$console_user" && "$console_user" != "root" && "$console_user" != "loginwindow" ]] || \
+  fail "현재 로그인한 사용자를 확인할 수 없습니다. 로그인한 데스크톱 세션에서 설치하세요."
+print -r -- "$console_user" | grep -Eq '^[A-Za-z0-9._-]+$' || fail "지원하지 않는 macOS 사용자 이름입니다."
+
+install -d -m 755 -o root -g wheel "$dependency_dir"
+install -m 755 -o root -g wheel "$assets_dir/battery" "$dependency_dir/battery"
+install -m 755 -o root -g wheel "$assets_dir/smc" "$dependency_dir/smc"
+install -m 644 -o root -g wheel "$assets_dir/Battery-CLI-MIT.txt" "$dependency_dir/Battery-CLI-MIT.txt"
+install -m 644 -o root -g wheel "$assets_dir/Third-Party-Notices.md" "$dependency_dir/Third-Party-Notices.md"
+
+install -d -m 755 -o root -g wheel "$sudoers_dir"
+sudoers_temp="$(mktemp "${sudoers_dir}/.batteryguard.XXXXXX")"
+sudoers_backup=""
+cleanup() {
+  rm -f "$sudoers_temp"
+  [[ -z "$sudoers_backup" ]] || rm -f "$sudoers_backup"
+}
+trap cleanup EXIT INT TERM
+
+sed "s/__BATTERYGUARD_USER__/${console_user}/g" "$assets_dir/battery.sudoers" >"$sudoers_temp"
+chown root:wheel "$sudoers_temp"
+chmod 440 "$sudoers_temp"
+visudo -c -f "$sudoers_temp" >/dev/null || fail "sudoers 정책 검증에 실패했습니다."
+if [[ -f "$sudoers_file" ]]; then
+  sudoers_backup="$(mktemp /private/tmp/batteryguard-sudoers-backup.XXXXXX)"
+  cp -p "$sudoers_file" "$sudoers_backup"
+fi
+mv -f "$sudoers_temp" "$sudoers_file"
+chown root:wheel "$sudoers_file"
+chmod 440 "$sudoers_file"
+if ! visudo -c >/dev/null; then
+  if [[ -n "$sudoers_backup" ]]; then
+    cp -p "$sudoers_backup" "$sudoers_file"
+  else
+    rm -f "$sudoers_file"
+  fi
+  fail "전체 sudoers 설정 검증에 실패하여 기존 정책을 복원했습니다."
+fi
+
+exit 0

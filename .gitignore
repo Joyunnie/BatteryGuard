@@ -64,3 +64,5 @@ fastlane/test_output
 # Local macOS and Xcode state
 .DS_Store
 *.xcuserstate
+# Local distribution artifacts
+dist/
