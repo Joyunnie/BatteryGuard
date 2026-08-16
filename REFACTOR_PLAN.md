@@ -989,11 +989,11 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | not run | 개인용 앱 전제와 제품 범위는 기존 계획에서 이미 확정 |
-| Codex Review | hostile whole-project review | Independent review | 1 | issues addressed | UI 대비·이력 결함은 Checkpoint 22, lifecycle 종료 경쟁·sensor fail-closed·manual recovery는 독립 Checkpoint 23에 반영 |
+| Codex Review | hostile whole-project review | Independent review | 1 | issues addressed | UI 대비·이력 결함은 Checkpoint 22, lifecycle 종료 경쟁·sensor fail-closed·manual recovery는 Checkpoint 23, 전원 edge UI settlement는 Checkpoint 24에 반영 |
 | Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | clean | 2 issues: SMC sample task lifetime, test topology debt; both scheduled independently |
 | Design Review | hostile whole-project review | UI/UX gaps | 1 | issues addressed | pastel fill/ink 대비 분리와 24시간 단위 이력 해상도 보존 |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | not needed | 개인용 로컬 프로젝트이며 test topology만 후속 범위 |
 
-**VERDICT:** CHECKPOINT 23 COMPLETE — controller safety targeted tests와 엄격 동시성·경고 오류화 조건의 전체 296개 테스트, Release build와 Analyze가 통과했다. `ChargeController`와 `SMCKit` 파일 분해는 동작·안전 계약 변경과 섞지 않는 후속 maintainability 작업으로 유지한다.
+**VERDICT:** CHECKPOINT 24 COMPLETE — 전원 연결·분리 settlement 회귀를 포함한 전체 311개 테스트, 엄격 동시성·경고 오류화 build-for-testing, Release build와 Analyze가 통과했다. `ChargeController`와 `SMCKit` 파일 분해는 동작·안전 계약 변경과 섞지 않는 후속 maintainability 작업으로 유지한다.
 
 NO UNRESOLVED DECISIONS
