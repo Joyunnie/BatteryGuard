@@ -57,7 +57,12 @@ work_dir="$(/usr/bin/mktemp -d /tmp/batteryguard-installer.XXXXXX)"
 cleanup() {
   /bin/rm -rf "$work_dir"
 }
-trap cleanup EXIT INT TERM
+handle_signal() {
+  trap - INT TERM
+  exit 130
+}
+trap cleanup EXIT
+trap handle_signal INT TERM
 
 readonly derived_data="${work_dir}/DerivedData"
 readonly dependencies="${work_dir}/Dependencies"

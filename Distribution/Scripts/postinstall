@@ -112,7 +112,12 @@ finish_install() {
   fi
   return "$exit_status"
 }
-trap finish_install EXIT INT TERM
+handle_signal() {
+  trap - INT TERM
+  exit 130
+}
+trap finish_install EXIT
+trap handle_signal INT TERM
 
 backup_existing_file "$dependency_dir/battery" battery
 backup_existing_file "$dependency_dir/smc" smc
