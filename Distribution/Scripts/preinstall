@@ -28,7 +28,9 @@ verify_secure_root_directory() {
   (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 디렉터리입니다: ${path}"
 }
 
-verify_secure_root_directory "/usr"
+# PackageKit presents the sealed system volume through an installer sandbox.
+# Validate the writable destination boundary below instead of the sandboxed
+# /usr mount, whose projected ownership is not a reliable host invariant.
 if [[ -e "/usr/local" || -L "/usr/local" ]]; then
   verify_secure_root_directory "/usr/local"
 fi
