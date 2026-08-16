@@ -155,9 +155,10 @@ mv -f "$sudoers_temp" "$sudoers_file"
 sudoers_temp=""
 chown root:wheel "$sudoers_file"
 chmod 440 "$sudoers_file"
-if ! visudo -c >/dev/null; then
-  fail "전체 sudoers 설정 검증에 실패했습니다. 설치 변경을 복원합니다."
-fi
+# The candidate was validated before replacement. Do not make BatteryGuard's
+# transaction depend on unrelated pre-existing files under sudoers.d; another
+# app's invalid permissions must not cause this valid policy to be rolled back.
+visudo -c -f "$sudoers_file" >/dev/null || fail "설치된 sudoers 정책 검증에 실패했습니다. 설치 변경을 복원합니다."
 
 install_committed=1
 
