@@ -4,22 +4,22 @@
 import Foundation
 import Darwin
 
-private let defaultBatteryPath = "/usr/local/co.palokaj.battery/battery"
-private let defaultSMCBinaryPath = "/usr/local/co.palokaj.battery/smc"
+let defaultBatteryPath = "/usr/local/co.palokaj.battery/battery"
+let defaultSMCBinaryPath = "/usr/local/co.palokaj.battery/smc"
 private let bundledTemperatureReaderName = "BatteryGuardSMCReader"
 private let defaultSMCTemperatureReadTimeout: TimeInterval = 2
 private let defaultSMCTemperatureTotalBudget: TimeInterval = 4.5
 private let defaultTemperatureReaderRetryDelay: TimeInterval = 60
-private let maximumMaintainWorkerCandidates = 32
+let maximumMaintainWorkerCandidates = 32
 
-private func bundledTemperatureReaderPath() -> String {
+func bundledTemperatureReaderPath() -> String {
     Bundle.main.bundleURL
         .appendingPathComponent("Contents/Helpers", isDirectory: true)
         .appendingPathComponent(bundledTemperatureReaderName, isDirectory: false)
         .path
 }
 
-private actor AsyncOperationGate {
+actor AsyncOperationGate {
     private var isLocked = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -238,33 +238,35 @@ actor SMCKit: ChargeBackend {
         diagnostics: .shared
     )
 
-    private let runner: BatteryCommandRunner
-    private let controlGate = AsyncOperationGate()
+    // Internal only so implementation extensions in sibling files can share
+    // the actor's single runner, gates, and verified executable state.
+    let runner: BatteryCommandRunner
+    let controlGate = AsyncOperationGate()
     private let ledGate = AsyncOperationGate()
-    private let batteryPath: String
-    private let smcBinaryPath: String
-    private let temperatureReaderPath: String?
+    let batteryPath: String
+    let smcBinaryPath: String
+    let temperatureReaderPath: String?
     private let usesSudoForSMCWrites: Bool
-    private let maintainPIDFilePath: String
-    private let maintainWorkerProbe: MaintainWorkerProbe?
-    private let executableTrustPolicy: ExecutableTrustPolicy
-    private let diagnostics: DiagnosticLog
-    private let smcTemperatureReadTimeout: TimeInterval
-    private let smcTemperatureTotalBudget: TimeInterval
-    private let temperatureReaderRetryDelay: TimeInterval
-    private let statusCommandTimeout: TimeInterval = 2
+    let maintainPIDFilePath: String
+    let maintainWorkerProbe: MaintainWorkerProbe?
+    let executableTrustPolicy: ExecutableTrustPolicy
+    let diagnostics: DiagnosticLog
+    let smcTemperatureReadTimeout: TimeInterval
+    let smcTemperatureTotalBudget: TimeInterval
+    let temperatureReaderRetryDelay: TimeInterval
+    let statusCommandTimeout: TimeInterval = 2
     private let longRunningVerificationTimeoutNanoseconds: UInt64 = 3_000_000_000
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
     private let longRunningOperationTimeout: TimeInterval = 12 * 60 * 60
-    private var rawSMCAvailable = false
+    var rawSMCAvailable = false
     private var savedMagSafeLEDValue: UInt8?
-    private var batteryExecutableIdentity: ExecutableIdentity?
-    private var smcExecutableIdentity: ExecutableIdentity?
-    private var temperatureReaderExecutableIdentity: ExecutableIdentity?
-    private var bundledTemperatureReaderState: TemperatureSourceState = .untested
-    private var batchedTemperatureReaderState: TemperatureSourceState = .untested
+    var batteryExecutableIdentity: ExecutableIdentity?
+    var smcExecutableIdentity: ExecutableIdentity?
+    var temperatureReaderExecutableIdentity: ExecutableIdentity?
+    var bundledTemperatureReaderState: TemperatureSourceState = .untested
+    var batchedTemperatureReaderState: TemperatureSourceState = .untested
 
-    private enum TemperatureSourceState: Equatable, Sendable {
+    enum TemperatureSourceState: Equatable, Sendable {
         case untested
         case available
         case retryAfter(UInt64)
@@ -282,7 +284,7 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private struct BatteryTemperatureReadings {
+    struct BatteryTemperatureReadings {
         let valuesByKey: [String: Float]
         var maximum: Float? { valuesByKey.values.max() }
         var hasCompleteCoverage: Bool {
@@ -290,7 +292,7 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private struct ExecutableIdentity: Equatable, Sendable {
+    struct ExecutableIdentity: Equatable, Sendable {
         let device: dev_t
         let inode: ino_t
         let size: off_t
@@ -315,7 +317,7 @@ actor SMCKit: ChargeBackend {
         let startMicroseconds: UInt64
     }
 
-    private struct ParsedMaintainCommand: Equatable, Sendable {
+    struct ParsedMaintainCommand: Equatable, Sendable {
         let target: Int?
     }
 
@@ -355,178 +357,6 @@ actor SMCKit: ChargeBackend {
         self.smcTemperatureTotalBudget = max(0.05, smcTemperatureTotalBudget)
         self.temperatureReaderRetryDelay = max(0, temperatureReaderRetryDelay)
         self.diagnostics = diagnostics
-    }
-
-    func open() async throws {
-        try await withGate(controlGate) {
-            try await openUnlocked()
-        }
-    }
-
-    private func openUnlocked() async throws {
-        batteryExecutableIdentity = try validateExecutableBeforeUse(
-            path: batteryPath,
-            expectedProductionPath: defaultBatteryPath,
-            displayName: "battery CLI"
-        )
-        smcExecutableIdentity = try validateExecutableBeforeUse(
-            path: smcBinaryPath,
-            expectedProductionPath: defaultSMCBinaryPath,
-            displayName: "SMC binary"
-        )
-        rawSMCAvailable = true
-        if let temperatureReaderPath {
-            do {
-                temperatureReaderExecutableIdentity = try validateTemperatureReaderBeforeUse(
-                    path: temperatureReaderPath
-                )
-                bundledTemperatureReaderState = .untested
-            } catch {
-                temperatureReaderExecutableIdentity = nil
-                bundledTemperatureReaderState = .incompatible(error.localizedDescription)
-                await diagnostics.record(
-                    DiagnosticEvent(
-                        category: .sensor,
-                        operation: "validate bundled SMC temperature reader",
-                        outcome: .failed,
-                        message: error.localizedDescription
-                    )
-                )
-            }
-        }
-
-        try await validateBatteryCLIVersionUnlocked()
-        _ = try await readControlStatusUnlocked()
-        print("[SMCKit] battery CLI and SMC binary ready")
-    }
-
-    private func validateExecutableBeforeUse(
-        path: String,
-        expectedProductionPath: String,
-        displayName: String
-    ) throws -> ExecutableIdentity {
-        guard path.hasPrefix("/") else {
-            throw BatteryError.preflightFailed("\(displayName) path is not absolute: \(path)")
-        }
-        guard FileManager.default.fileExists(atPath: path) else {
-            throw BatteryError.binaryNotFound(
-                "\(displayName) is not installed at \(path). Install and verify it manually before enabling charge control."
-            )
-        }
-
-        switch executableTrustPolicy {
-        case .production:
-            guard path == expectedProductionPath else {
-                throw BatteryError.preflightFailed(
-                    "\(displayName) must use the pinned path \(expectedProductionPath), received \(path)"
-                )
-            }
-            try validateRootOwnedPath(path, expectedType: S_IFREG, displayName: displayName)
-            let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
-            try validateRootOwnedPath(parent, expectedType: S_IFDIR, displayName: "\(displayName) directory")
-        case .testFixture:
-            var metadata = stat()
-            guard lstat(path, &metadata) == 0,
-                  metadata.st_mode & S_IFMT == S_IFREG,
-                  metadata.st_mode & S_IXUSR != 0 else {
-                throw BatteryError.preflightFailed("test fixture is not an executable regular file: \(path)")
-            }
-        }
-        var metadata = stat()
-        guard lstat(path, &metadata) == 0 else {
-            throw BatteryError.preflightFailed("could not capture \(displayName) identity")
-        }
-        return executableIdentity(from: metadata)
-    }
-
-    private func validateRootOwnedPath(
-        _ path: String,
-        expectedType: mode_t,
-        displayName: String
-    ) throws {
-        var metadata = stat()
-        guard lstat(path, &metadata) == 0 else {
-            throw BatteryError.preflightFailed("could not inspect \(displayName) at \(path): \(String(cString: strerror(errno)))")
-        }
-        guard metadata.st_mode & S_IFMT == expectedType else {
-            throw BatteryError.preflightFailed("\(displayName) must not be a symlink and has the wrong file type: \(path)")
-        }
-        guard metadata.st_uid == 0, metadata.st_gid == 0 else {
-            throw BatteryError.preflightFailed("\(displayName) must be owned by root:wheel: \(path)")
-        }
-        guard metadata.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
-            throw BatteryError.preflightFailed("\(displayName) is writable by group or others: \(path)")
-        }
-        if expectedType == S_IFREG, metadata.st_mode & S_IXUSR == 0 {
-            throw BatteryError.preflightFailed("\(displayName) is not owner-executable: \(path)")
-        }
-    }
-
-    private func validateTemperatureReaderBeforeUse(path: String) throws -> ExecutableIdentity {
-        guard path.hasPrefix("/") else {
-            throw BatteryError.preflightFailed(
-                "SMC temperature reader path is not absolute: \(path)"
-            )
-        }
-        guard FileManager.default.fileExists(atPath: path) else {
-            throw BatteryError.binaryNotFound(
-                "SMC temperature reader is unavailable at \(path)"
-            )
-        }
-        if executableTrustPolicy == .production {
-            let expectedPath = bundledTemperatureReaderPath()
-            guard path == expectedPath else {
-                throw BatteryError.preflightFailed(
-                    "SMC temperature reader must use the bundled path \(expectedPath)"
-                )
-            }
-            let helperDirectory = URL(fileURLWithPath: path).deletingLastPathComponent().path
-            var directoryMetadata = stat()
-            guard lstat(helperDirectory, &directoryMetadata) == 0,
-                  directoryMetadata.st_mode & S_IFMT == S_IFDIR,
-                  directoryMetadata.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
-                throw BatteryError.preflightFailed(
-                    "SMC temperature reader directory is not a trusted directory"
-                )
-            }
-        }
-
-        var metadata = stat()
-        guard lstat(path, &metadata) == 0,
-              metadata.st_mode & S_IFMT == S_IFREG,
-              metadata.st_mode & S_IXUSR != 0,
-              metadata.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
-            throw BatteryError.preflightFailed(
-                "SMC temperature reader is not a trusted executable regular file"
-            )
-        }
-        return executableIdentity(from: metadata)
-    }
-
-    private func validateBatteryCLIVersionUnlocked() async throws {
-        guard executableTrustPolicy == .production else { return }
-        let result = try await runProcess(
-            executable: "/bin/bash",
-            arguments: [batteryPath, "version"],
-            environment: batteryEnvironment,
-            label: "battery version",
-            timeout: statusCommandTimeout
-        )
-        guard let version = Self.parseSemanticVersion(result.stdout),
-              version == [1, 3, 4] else {
-            throw BatteryError.preflightFailed(
-                "Only the verified battery CLI v1.3.4 contract is supported; received \(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))"
-            )
-        }
-    }
-
-    private static func parseSemanticVersion(_ output: String) -> [Int]? {
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        let versionText = trimmed.hasPrefix("v") ? String(trimmed.dropFirst()) : trimmed
-        let fields = versionText.split(separator: ".", omittingEmptySubsequences: false)
-        guard fields.count == 3 else { return nil }
-        let components = fields.compactMap { Int($0) }
-        return components.count == fields.count ? components : nil
     }
 
     // MARK: - Verified charge operations
@@ -729,702 +559,6 @@ actor SMCKit: ChargeBackend {
         try await runner.cancelAll()
     }
 
-    // MARK: - Status
-
-    func readControlStatus() async throws -> BatteryControlStatus {
-        try await withGate(controlGate) {
-            try await readControlStatusUnlocked()
-        }
-    }
-
-    private func readControlStatusUnlocked(
-        deadlineUptimeNanoseconds: UInt64? = nil
-    ) async throws -> BatteryControlStatus {
-        let result = try await batteryCommand(
-            ["status_csv"],
-            timeout: try boundedSleepPreparationTimeout(
-                maximum: statusCommandTimeout,
-                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-            )
-        )
-        guard let parsedStatus = Self.parseControlStatus(csv: result.stdout) else {
-            throw BatteryError.unsupported("Installed battery CLI returned an unsupported status_csv format")
-        }
-        let workerStatus = try await readMaintainWorkerStatusUnlocked(
-            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-        )
-        return BatteryControlStatus(
-            charging: parsedStatus.charging,
-            isDischarging: parsedStatus.isDischarging,
-            maintainLevel: parsedStatus.maintainLevel,
-            maintainWorker: workerStatus
-        )
-    }
-
-    private func readMaintainWorkerStatusUnlocked(
-        deadlineUptimeNanoseconds: UInt64? = nil
-    ) async throws -> MaintainWorkerStatus {
-        if let maintainWorkerProbe {
-            return try await maintainWorkerProbe(maintainPIDFilePath, batteryPath)
-        }
-
-        return Self.classifyMaintainWorkers(
-            pidFilePID: try readMaintainPIDFile(),
-            workers: try await currentMaintainWorkersUnlocked(
-                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-            )
-        )
-    }
-
-    static func classifyMaintainWorkers(
-        pidFilePID: Int32?,
-        pgrepOutput: String,
-        batteryPath: String
-    ) -> MaintainWorkerStatus {
-        let workers = parsePgrepMaintainWorkerProcesses(
-            pgrepOutput: pgrepOutput,
-            batteryPath: batteryPath
-        )
-        return classifyMaintainWorkers(pidFilePID: pidFilePID, workers: workers)
-    }
-
-    static func classifyMaintainWorkers(
-        pidFilePID: Int32?,
-        pgrepOutput: String,
-        processTable: String,
-        batteryPath: String,
-        identitiesBefore: [Int32: ProcessIdentity],
-        identitiesAfter: [Int32: ProcessIdentity]
-    ) -> MaintainWorkerStatus {
-        classifyMaintainWorkers(
-            pidFilePID: pidFilePID,
-            workers: stableMaintainWorkers(
-                pgrepOutput: pgrepOutput,
-                processTable: processTable,
-                batteryPath: batteryPath,
-                identitiesBefore: identitiesBefore,
-                identitiesAfter: identitiesAfter
-            )
-        )
-    }
-
-    private static func classifyMaintainWorkers(
-        pidFilePID: Int32?,
-        workers: [MaintainWorkerProcess]
-    ) -> MaintainWorkerStatus {
-        guard workers.count <= 1 else { return .duplicate(pids: workers.map(\.pid).sorted()) }
-        guard let worker = workers.first else {
-            return pidFilePID == nil ? .stopped : .stale(pid: pidFilePID)
-        }
-        guard worker.pid == pidFilePID else { return .stale(pid: pidFilePID ?? worker.pid) }
-        return .running(pid: worker.pid, target: worker.target)
-    }
-
-    private static func parsePgrepMaintainWorkerProcesses(
-        pgrepOutput: String,
-        batteryPath: String
-    ) -> [MaintainWorkerProcess] {
-        pgrepOutput.split(whereSeparator: \Character.isNewline).compactMap { line in
-            let fields = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-            guard fields.count == 2,
-                  let pid = Int32(fields[0]),
-                  pid > 1,
-                  let parsed = Self.parseExactMaintainCommand(
-                    String(fields[1]),
-                    batteryPath: batteryPath
-                  ) else {
-                return nil
-            }
-            return MaintainWorkerProcess(
-                pid: pid,
-                command: String(fields[1]),
-                target: parsed.target,
-                identity: nil
-            )
-        }
-    }
-
-    static func boundedPgrepMaintainWorkerProcesses(
-        pgrepOutput: String,
-        batteryPath: String,
-        excludingPID: Int32? = nil
-    ) throws -> [MaintainWorkerProcess] {
-        let parsedCandidates = parsePgrepMaintainWorkerProcesses(
-            pgrepOutput: pgrepOutput,
-            batteryPath: batteryPath
-        ).filter { $0.pid != excludingPID }
-        guard parsedCandidates.count <= maximumMaintainWorkerCandidates else {
-            throw BatteryError.commandFailed(
-                "inspect battery CLI processes",
-                -1,
-                "refusing unbounded process inspection: \(parsedCandidates.count) exact candidates"
-            )
-        }
-        return parsedCandidates
-    }
-
-    private static func parsePSMaintainWorkerProcesses(
-        processTable: String,
-        batteryPath: String
-    ) -> [MaintainWorkerProcess] {
-        processTable.split(whereSeparator: \Character.isNewline).compactMap { line in
-            let fields = line.split(maxSplits: 2, whereSeparator: { $0.isWhitespace })
-            guard fields.count == 3,
-                  let pid = Int32(fields[0]),
-                  pid > 1,
-                  let parsed = Self.parseExactMaintainCommand(
-                    String(fields[2]),
-                    batteryPath: batteryPath
-                  ) else {
-                return nil
-            }
-            return MaintainWorkerProcess(
-                pid: pid,
-                command: String(fields[2]),
-                target: parsed.target,
-                identity: nil
-            )
-        }
-    }
-
-    private static func stableMaintainWorkers(
-        pgrepOutput: String,
-        processTable: String,
-        batteryPath: String,
-        identitiesBefore: [Int32: ProcessIdentity],
-        identitiesAfter: [Int32: ProcessIdentity]
-    ) -> [MaintainWorkerProcess] {
-        let parsedCandidates = parsePgrepMaintainWorkerProcesses(
-            pgrepOutput: pgrepOutput,
-            batteryPath: batteryPath
-        )
-        var candidates: [Int32: MaintainWorkerProcess] = [:]
-        var duplicatePIDs = Set<Int32>()
-        for candidate in parsedCandidates {
-            if candidates.updateValue(candidate, forKey: candidate.pid) != nil {
-                duplicatePIDs.insert(candidate.pid)
-            }
-        }
-        return parsePSMaintainWorkerProcesses(
-            processTable: processTable,
-            batteryPath: batteryPath
-        ).compactMap { inspected in
-            guard !duplicatePIDs.contains(inspected.pid),
-                  let candidate = candidates[inspected.pid],
-                  candidate.command == inspected.command,
-                  candidate.target == inspected.target,
-                  let identityBefore = identitiesBefore[inspected.pid],
-                  identitiesAfter[inspected.pid] == identityBefore else {
-                return nil
-            }
-            return MaintainWorkerProcess(
-                pid: inspected.pid,
-                command: inspected.command,
-                target: inspected.target,
-                identity: identityBefore
-            )
-        }
-    }
-
-    private static func parseExactMaintainCommand(
-        _ command: String,
-        batteryPath: String
-    ) -> ParsedMaintainCommand? {
-        let arguments = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        let batteryIndex: Int
-        if arguments.first == batteryPath {
-            batteryIndex = 0
-        } else if arguments.count >= 2,
-                  ["/bin/bash", "/bin/zsh"].contains(arguments[0]),
-                  arguments[1] == batteryPath {
-            batteryIndex = 1
-        } else {
-            return nil
-        }
-        guard arguments.count == batteryIndex + 3 else { return nil }
-        let action = arguments[batteryIndex + 1]
-        let targetText = arguments[batteryIndex + 2]
-        switch action {
-        case "maintain_synchronous":
-            guard let target = Int(targetText), UserSettings.chargeLimitRange.contains(target) else {
-                return nil
-            }
-            return ParsedMaintainCommand(target: target)
-        case "maintain_voltage_synchronous":
-            guard Double(targetText) != nil else { return nil }
-            return ParsedMaintainCommand(target: nil)
-        default:
-            return nil
-        }
-    }
-
-    private func terminateMaintainWorkersUnlocked(
-        deadlineUptimeNanoseconds: UInt64? = nil
-    ) async throws {
-        let workers = try await currentMaintainWorkersUnlocked(
-            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-        )
-        guard !workers.isEmpty else {
-            if try readMaintainPIDFile() != nil {
-                try FileManager.default.removeItem(atPath: maintainPIDFilePath)
-            }
-            return
-        }
-
-        for worker in workers {
-            guard try await isExactCurrentMaintainWorker(
-                worker,
-                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-            ) else { continue }
-            guard Darwin.kill(worker.pid, SIGTERM) == 0 || errno == ESRCH else {
-                throw BatteryError.commandFailed(
-                    "stop maintain worker \(worker.pid)",
-                    -1,
-                    String(cString: strerror(errno))
-                )
-            }
-        }
-        try ensureSleepPreparationDeadline(deadlineUptimeNanoseconds)
-        try await Task.sleep(nanoseconds: 250_000_000)
-        let remainingAfterTerm = try await currentMaintainWorkersUnlocked(
-            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-        )
-        for worker in remainingAfterTerm where workers.contains(worker) {
-            guard try await isExactCurrentMaintainWorker(
-                worker,
-                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-            ) else { continue }
-            guard Darwin.kill(worker.pid, SIGKILL) == 0 || errno == ESRCH else {
-                throw BatteryError.commandFailed(
-                    "stop maintain worker \(worker.pid)",
-                    -1,
-                    String(cString: strerror(errno))
-                )
-            }
-        }
-        try ensureSleepPreparationDeadline(deadlineUptimeNanoseconds)
-        try await Task.sleep(nanoseconds: 100_000_000)
-        let currentWorkers = try await currentMaintainWorkersUnlocked(
-            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-        )
-        let survivors = currentWorkers.filter { current in
-            workers.contains(current)
-        }
-        guard survivors.isEmpty else {
-            throw BatteryError.commandFailed(
-                "stop maintain workers",
-                -1,
-                "workers survived termination: \(survivors.map(\.pid))"
-            )
-        }
-        if try readMaintainPIDFile() != nil {
-            try FileManager.default.removeItem(atPath: maintainPIDFilePath)
-        }
-    }
-
-    private func isExactCurrentMaintainWorker(
-        _ expected: MaintainWorkerProcess,
-        deadlineUptimeNanoseconds: UInt64?
-    ) async throws -> Bool {
-        let current = try await currentMaintainWorkersUnlocked(
-            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-        )
-        guard current.contains(expected) else { return false }
-        return try currentIdentity(for: expected.pid) == expected.identity
-    }
-
-    private func currentMaintainWorkersUnlocked(
-        deadlineUptimeNanoseconds: UInt64? = nil
-    ) async throws -> [MaintainWorkerProcess] {
-        let escapedPath = NSRegularExpression.escapedPattern(for: batteryPath)
-        let candidates = try await runProcess(
-            executable: "/usr/bin/pgrep",
-            arguments: ["-fl", escapedPath],
-            label: "inspect battery CLI processes",
-            timeout: try boundedSleepPreparationTimeout(
-                maximum: statusCommandTimeout,
-                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-            ),
-            allowedExitCodes: [0, 1]
-        )
-        guard candidates.exitCode == 0 else { return [] }
-
-        let parsedCandidates = try Self.boundedPgrepMaintainWorkerProcesses(
-            pgrepOutput: candidates.stdout,
-            batteryPath: batteryPath,
-            excludingPID: getpid()
-        )
-        guard !parsedCandidates.isEmpty else { return [] }
-
-        var identitiesBefore: [Int32: ProcessIdentity] = [:]
-        for candidate in parsedCandidates {
-            if let identity = try currentIdentity(for: candidate.pid) {
-                identitiesBefore[candidate.pid] = identity
-            }
-        }
-        guard !identitiesBefore.isEmpty else { return [] }
-
-        let inspection = try await runProcess(
-            executable: "/bin/ps",
-            arguments: [
-                "-p",
-                identitiesBefore.keys.sorted().map(String.init).joined(separator: ","),
-                "-o",
-                "pid=,pgid=,command="
-            ],
-            label: "verify battery CLI process identities",
-            timeout: try boundedSleepPreparationTimeout(
-                maximum: statusCommandTimeout,
-                deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
-            ),
-            allowedExitCodes: [0, 1]
-        )
-        guard inspection.exitCode == 0 else { return [] }
-
-        var identitiesAfter: [Int32: ProcessIdentity] = [:]
-        for pid in identitiesBefore.keys {
-            if let identity = try currentIdentity(for: pid) {
-                identitiesAfter[pid] = identity
-            }
-        }
-        return Self.stableMaintainWorkers(
-            pgrepOutput: candidates.stdout,
-            processTable: inspection.stdout,
-            batteryPath: batteryPath,
-            identitiesBefore: identitiesBefore,
-            identitiesAfter: identitiesAfter
-        )
-    }
-
-    private func currentIdentity(for pid: Int32) throws -> ProcessIdentity? {
-        var info = proc_bsdinfo()
-        let expectedSize = MemoryLayout<proc_bsdinfo>.stride
-        errno = 0
-        let result = proc_pidinfo(
-            pid,
-            PROC_PIDTBSDINFO,
-            0,
-            &info,
-            Int32(expectedSize)
-        )
-        if result == expectedSize {
-            return ProcessIdentity(
-                startSeconds: info.pbi_start_tvsec,
-                startMicroseconds: info.pbi_start_tvusec
-            )
-        }
-        if result == 0 {
-            let inspectionErrno = errno
-            if inspectionErrno == ESRCH { return nil }
-            errno = 0
-            if Darwin.kill(pid, 0) == -1, errno == ESRCH { return nil }
-            errno = inspectionErrno
-        }
-        throw BatteryError.commandFailed(
-            "inspect maintain worker identity \(pid)",
-            -1,
-            result == 0 ? String(cString: strerror(errno)) : "incomplete process identity"
-        )
-    }
-
-    private func readMaintainPIDFile() throws -> Int32? {
-        var fileStatus = stat()
-        guard Darwin.lstat(maintainPIDFilePath, &fileStatus) == 0 else {
-            if errno == ENOENT { return nil }
-            throw BatteryError.commandFailed(
-                "inspect maintain PID file",
-                -1,
-                String(cString: strerror(errno))
-            )
-        }
-        guard (fileStatus.st_mode & S_IFMT) == S_IFREG,
-              fileStatus.st_uid == geteuid(),
-              fileStatus.st_size > 0,
-              fileStatus.st_size <= 32 else {
-            throw BatteryError.preflightFailed(
-                "maintain PID file is not a small current-user-owned regular file"
-            )
-        }
-
-        let descriptor = Darwin.open(
-            maintainPIDFilePath,
-            O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
-        )
-        guard descriptor >= 0 else {
-            throw BatteryError.commandFailed(
-                "open maintain PID file",
-                -1,
-                String(cString: strerror(errno))
-            )
-        }
-        defer { Darwin.close(descriptor) }
-        var bytes = [UInt8](repeating: 0, count: 33)
-        let count = bytes.withUnsafeMutableBytes { buffer in
-            Darwin.read(descriptor, buffer.baseAddress, 32)
-        }
-        guard count > 0 else {
-            let message = count == 0 ? "empty file" : String(cString: strerror(errno))
-            throw BatteryError.commandFailed("read maintain PID file", -1, message)
-        }
-        let text = String(decoding: bytes.prefix(Int(count)), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let pid = Int32(text), pid > 1 else {
-            throw BatteryError.preflightFailed("maintain PID file contains an invalid PID")
-        }
-        return pid
-    }
-
-    static func parseControlStatus(csv: String) -> BatteryControlStatus? {
-        let line = csv
-            .split(whereSeparator: \Character.isNewline)
-            .last
-            .map(String.init)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let fields = line.split(separator: ",", omittingEmptySubsequences: false)
-        guard fields.count >= 5 else { return nil }
-
-        let charging: BatteryChargingStatus
-        switch fields[2].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "enabled": charging = .enabled
-        case "disabled": charging = .disabled
-        default: charging = .unknown
-        }
-
-        let dischargeText = fields[3].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let isDischarging: Bool?
-        switch dischargeText {
-        case "discharging": isDischarging = true
-        case "not discharging": isDischarging = false
-        default: isDischarging = nil
-        }
-
-        return BatteryControlStatus(
-            charging: charging,
-            isDischarging: isDischarging,
-            maintainLevel: Int(fields[4].trimmingCharacters(in: .whitespacesAndNewlines))
-        )
-    }
-
-    // MARK: - Battery temperature
-
-    func readBatteryTemperature() async throws -> BatteryTemperatureSample {
-        guard rawSMCAvailable else {
-            throw BatteryError.unsupported("Raw SMC binary is unavailable; battery temperature cannot be read")
-        }
-        let startedAt = DispatchTime.now().uptimeNanoseconds
-        let budgetNanoseconds = UInt64(smcTemperatureTotalBudget * 1_000_000_000)
-        let deadlineResult = startedAt.addingReportingOverflow(budgetNanoseconds)
-        guard !deadlineResult.overflow else {
-            throw BatteryError.commandTimedOut("SMC temperature read")
-        }
-        let deadline = deadlineResult.partialValue
-
-        if bundledTemperatureReaderState.shouldAttempt(at: startedAt),
-           let temperatureReaderPath,
-           temperatureReaderExecutableIdentity != nil {
-            do {
-                try revalidateExecutableIdentity(
-                    path: temperatureReaderPath,
-                    expected: temperatureReaderExecutableIdentity,
-                    displayName: "SMC temperature reader"
-                )
-                let result = try await runProcess(
-                    executable: temperatureReaderPath,
-                    arguments: [],
-                    label: "read battery temperatures",
-                    timeout: try remainingTemperatureBudget(until: deadline)
-                )
-                let readings = Self.parseBatteryTemperatureReadings(result.stdout)
-                if readings.hasCompleteCoverage, let maximum = readings.maximum {
-                    bundledTemperatureReaderState = .available
-                    return .complete(maximum)
-                }
-                bundledTemperatureReaderState = .incompatible(
-                    "output did not contain complete TB0T/TB1T/TB2T coverage"
-                )
-                await diagnostics.record(
-                    DiagnosticEvent(
-                        category: .sensor,
-                        operation: "read bundled battery temperatures",
-                        outcome: .failed,
-                        message: "output did not contain complete TB0T/TB1T/TB2T coverage"
-                    )
-                )
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch let error as BatteryError {
-                switch error {
-                case .commandCancelled, .commandTimedOut:
-                    throw error
-                default:
-                    bundledTemperatureReaderState = retryState(
-                        after: temperatureReaderRetryDelay
-                    )
-                    await diagnostics.record(
-                        DiagnosticEvent(
-                            category: .sensor,
-                            operation: "read bundled battery temperatures",
-                            outcome: .failed,
-                            message: error.localizedDescription
-                        )
-                    )
-                }
-            } catch {
-                bundledTemperatureReaderState = retryState(
-                    after: temperatureReaderRetryDelay
-                )
-                await diagnostics.record(
-                    DiagnosticEvent(
-                        category: .sensor,
-                        operation: "read bundled battery temperatures",
-                        outcome: .failed,
-                        message: error.localizedDescription
-                    )
-                )
-            }
-        }
-
-        try revalidateExecutableIdentity(
-            path: smcBinaryPath,
-            expected: smcExecutableIdentity,
-            displayName: "SMC binary"
-        )
-
-        let batchAttemptStartedAt = DispatchTime.now().uptimeNanoseconds
-        if batchedTemperatureReaderState.shouldAttempt(at: batchAttemptStartedAt) {
-            do {
-                let result = try await runProcess(
-                    executable: smcBinaryPath,
-                    arguments: ["-t"],
-                    label: "smc -t",
-                    timeout: min(
-                        smcTemperatureReadTimeout,
-                        try remainingTemperatureBudget(until: deadline)
-                    )
-                )
-                let readings = Self.parseBatteryTemperatureReadings(result.stdout)
-                if readings.hasCompleteCoverage, let maximum = readings.maximum {
-                    batchedTemperatureReaderState = .available
-                    return .complete(maximum)
-                }
-                batchedTemperatureReaderState = .incompatible(
-                    "output did not contain complete TB0T/TB1T/TB2T coverage"
-                )
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch let error as BatteryError {
-                switch error {
-                case .commandCancelled, .commandTimedOut:
-                    throw error
-                default:
-                    batchedTemperatureReaderState = retryState(
-                        after: temperatureReaderRetryDelay
-                    )
-                }
-                // Older or variant SMC binaries do not all expose the same `-t`
-                // listing. Fall through to the proven per-key read contract.
-            } catch {
-                batchedTemperatureReaderState = retryState(
-                    after: temperatureReaderRetryDelay
-                )
-            }
-        }
-
-        var valuesByKey: [String: Float] = [:]
-        var failures: [String] = []
-        let keys = ["TB0T", "TB1T", "TB2T"]
-        for (index, key) in keys.enumerated() {
-            let now = DispatchTime.now().uptimeNanoseconds
-            guard now < deadline else {
-                failures.append(contentsOf: keys[index...].map { "\($0): total deadline expired" })
-                break
-            }
-            let remaining = TimeInterval(deadline - now) / 1_000_000_000
-            do {
-                let result = try await runProcess(
-                    executable: smcBinaryPath,
-                    arguments: ["-k", key, "-r"],
-                    label: "smc -k \(key) -r",
-                    timeout: min(smcTemperatureReadTimeout, remaining)
-                )
-                guard let value = Self.parseBatteryTemperatureReadings(result.stdout)
-                    .valuesByKey[key] else {
-                    failures.append("\(key): unrecognized output")
-                    continue
-                }
-                valuesByKey[key] = value
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch let error as BatteryError {
-                if case .commandCancelled = error { throw error }
-                failures.append("\(key): \(error.localizedDescription)")
-            } catch {
-                failures.append("\(key): \(error.localizedDescription)")
-            }
-        }
-        guard let maximum = valuesByKey.values.max() else {
-            throw BatteryError.commandFailed(
-                "smc temperature read",
-                -1,
-                failures.joined(separator: "; ")
-            )
-        }
-        if valuesByKey.count != keys.count {
-            for key in keys where valuesByKey[key] == nil && !failures.contains(where: { $0.hasPrefix("\(key):") }) {
-                failures.append("\(key): no reading")
-            }
-        }
-        return BatteryTemperatureSample(maximum: maximum, failures: failures)
-    }
-
-    private func remainingTemperatureBudget(until deadline: UInt64) throws -> TimeInterval {
-        let now = DispatchTime.now().uptimeNanoseconds
-        guard now < deadline else {
-            throw BatteryError.commandTimedOut("SMC temperature read")
-        }
-        return min(
-            smcTemperatureReadTimeout,
-            TimeInterval(deadline - now) / 1_000_000_000
-        )
-    }
-
-    private func retryState(after delay: TimeInterval) -> TemperatureSourceState {
-        let now = DispatchTime.now().uptimeNanoseconds
-        let delayNanoseconds = UInt64(delay * 1_000_000_000)
-        let retryAt = now.addingReportingOverflow(delayNanoseconds)
-        return .retryAfter(retryAt.overflow ? UInt64.max : retryAt.partialValue)
-    }
-
-    static func parseBatteryTemperatureList(_ output: String) -> Float? {
-        parseBatteryTemperatureReadings(output).maximum
-    }
-
-    private static func parseBatteryTemperatureReadings(
-        _ output: String
-    ) -> BatteryTemperatureReadings {
-        let supportedKeys = Set(["TB0T", "TB1T", "TB2T"])
-        var valuesByKey: [String: Float] = [:]
-        for line in output.split(whereSeparator: \Character.isNewline) {
-            let fields = line.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-            guard let rawKey = fields.first else { continue }
-            let key = String(rawKey)
-            guard supportedKeys.contains(key),
-                  let bracketEnd = line.range(of: "]"),
-                  let bytesStart = line.range(of: "(bytes"),
-                  bracketEnd.upperBound <= bytesStart.lowerBound else {
-                continue
-            }
-            let text = line[bracketEnd.upperBound..<bytesStart.lowerBound]
-                .trimmingCharacters(in: .whitespaces)
-            guard let rawValue = Float(text),
-                  let value = BatteryMonitor.validatedTemperature(Double(rawValue)) else {
-                continue
-            }
-            valuesByKey[key] = Float(value)
-        }
-        return BatteryTemperatureReadings(valuesByKey: valuesByKey)
-    }
-
     // MARK: - MagSafe LED
 
     func setMagSafeLED(_ state: MagSafeLEDState) async throws {
@@ -1511,7 +645,7 @@ actor SMCKit: ChargeBackend {
 
     // MARK: - CLI execution
 
-    private var batteryEnvironment: [String: String] {
+    var batteryEnvironment: [String: String] {
         let batteryDirectory = URL(fileURLWithPath: batteryPath).deletingLastPathComponent().path
         return [
             "PATH": "\(batteryDirectory):/usr/bin:/bin:/usr/sbin:/sbin",
@@ -1520,7 +654,7 @@ actor SMCKit: ChargeBackend {
         ]
     }
 
-    private func ensureSleepPreparationDeadline(_ deadlineUptimeNanoseconds: UInt64?) throws {
+    func ensureSleepPreparationDeadline(_ deadlineUptimeNanoseconds: UInt64?) throws {
         guard let deadlineUptimeNanoseconds else { return }
         guard DispatchTime.now().uptimeNanoseconds < deadlineUptimeNanoseconds else {
             throw BatteryError.commandFailed(
@@ -1531,7 +665,7 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private func boundedSleepPreparationTimeout(
+    func boundedSleepPreparationTimeout(
         maximum: TimeInterval,
         deadlineUptimeNanoseconds: UInt64?
     ) throws -> TimeInterval {
@@ -1545,7 +679,7 @@ actor SMCKit: ChargeBackend {
         return min(maximum, remaining)
     }
 
-    private func batteryCommand(
+    func batteryCommand(
         _ arguments: [String],
         timeout: TimeInterval = 30,
         outputPolicy: BatteryCommandRunner.OutputPolicy = .capture,
@@ -1586,7 +720,7 @@ actor SMCKit: ChargeBackend {
         )
     }
 
-    private func revalidateExecutableIdentity(
+    func revalidateExecutableIdentity(
         path: String,
         expected: ExecutableIdentity?,
         displayName: String
@@ -1606,7 +740,7 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private func executableIdentity(from metadata: stat) -> ExecutableIdentity {
+    func executableIdentity(from metadata: stat) -> ExecutableIdentity {
         ExecutableIdentity(
             device: metadata.st_dev,
             inode: metadata.st_ino,
@@ -1671,7 +805,7 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private func runProcess(
+    func runProcess(
         executable: String,
         arguments: [String],
         environment: [String: String]? = nil,
@@ -1770,7 +904,7 @@ actor SMCKit: ChargeBackend {
         }
     }
 
-    private func withGate<T>(
+    func withGate<T>(
         _ gate: AsyncOperationGate,
         operation: () async throws -> T
     ) async throws -> T {
