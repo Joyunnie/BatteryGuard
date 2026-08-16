@@ -19,6 +19,22 @@ build or installation.
 The result is written to `dist/BatteryGuard-1.0-Installer.pkg`. The
 package is intentionally not committed.
 
+Before a build, the script requires a clean Git worktree. It then validates
+the pinned battery CLI version string, builds an arm64 Release app, creates the
+package in a temporary directory, expands and inspects the finished payload,
+and only then replaces the file in `dist/`.
+
+## Installation and removal
+
+The recipient must read the ownership guidance shown by Installer. Installation
+starts BatteryGuard in monitoring-only mode and does not claim charge control.
+Use **BatteryGuard Control** only after disabling macOS Charge Limit and other
+battery-control apps.
+
+Removal is intentionally manual because silently removing a persistent Maintain
+worker would be unsafe. Follow `UNINSTALL.md`: release BatteryGuard control in
+the app and verify normal charging before removing the installed files.
+
 ## Distribution limitation
 
 This repository currently has no Developer ID Application or Developer ID

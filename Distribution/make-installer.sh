@@ -50,6 +50,8 @@ done
 
 [[ "$(/usr/bin/uname -m)" == "arm64" ]] || fail "the installer can only be built on Apple Silicon"
 [[ -d "${repo_root}/BatteryGuard.xcodeproj" ]] || fail "run this script from the BatteryGuard repository"
+[[ -z "$(/usr/bin/git -C "$repo_root" status --porcelain --untracked-files=normal)" ]] || \
+  fail "commit or remove source changes before building a distributable package"
 
 work_dir="$(/usr/bin/mktemp -d /tmp/batteryguard-installer.XXXXXX)"
 cleanup() {
@@ -92,6 +94,9 @@ download_verified \
   "$dependencies/Battery-CLI-MIT.txt" \
   "a2b9af548380c1fae9d668e538e3ca36894038b301a371f52f817f678dc88d27"
 
+/usr/bin/grep -qF 'BATTERY_CLI_VERSION="v1.3.4"' "$dependencies/battery" || \
+  fail "the pinned battery script does not declare the supported v1.3.4 contract"
+
 print -- "Building BatteryGuard Release app…"
 /usr/bin/xcodebuild \
   -project "${repo_root}/BatteryGuard.xcodeproj" \
@@ -123,29 +128,44 @@ readonly app_path="${derived_data}/Build/Products/Release/BatteryGuard.app"
   "$installer_assets/BatteryGuardSMCReader-source/LICENSE"
 /bin/cp "${script_dir}/Templates/battery.sudoers" "$installer_assets/battery.sudoers"
 /bin/cp "${script_dir}/Templates/Third-Party-Notices.md" "$installer_assets/Third-Party-Notices.md"
+/bin/cp "${script_dir}/UNINSTALL.md" "$installer_assets/UNINSTALL.md"
 /usr/bin/xattr -cr "$payload"
 /usr/bin/codesign --verify --deep --strict "${payload}/Applications/BatteryGuard.app"
 
 /usr/bin/pkgbuild \
   --root "$payload" \
+  --ownership recommended \
   --identifier com.jiwon.batteryguard.friend-installer.payload \
   --version "$version" \
   --install-location / \
   --scripts "${script_dir}/Scripts" \
   "$packages/BatteryGuard-payload.pkg" >/dev/null
 
+readonly staged_output_pkg="${work_dir}/BatteryGuard-${version}-Installer.pkg"
 /usr/bin/productbuild \
   --distribution "${script_dir}/Distribution.xml" \
   --resources "${script_dir}/Resources" \
   --package-path "$packages" \
-  "$output_pkg" >/dev/null
+  "$staged_output_pkg" >/dev/null
 
-/usr/sbin/pkgutil --expand-full "$output_pkg" "$expanded_pkg"
+/usr/sbin/pkgutil --expand-full "$staged_output_pkg" "$expanded_pkg"
 [[ -f "$expanded_pkg/Distribution" ]] || fail "final package could not be expanded"
 [[ -f "$expanded_pkg/BatteryGuard-payload.pkg/Payload/Applications/BatteryGuard.app/Contents/MacOS/BatteryGuard" ]] || \
   fail "final package does not contain BatteryGuard.app"
 [[ -f "$expanded_pkg/BatteryGuard-payload.pkg/Payload/Library/Application Support/BatteryGuard/InstallerAssets/battery" ]] || \
   fail "final package does not contain the battery CLI"
+[[ -f "$expanded_pkg/BatteryGuard-payload.pkg/Payload/Library/Application Support/BatteryGuard/InstallerAssets/smc" ]] || \
+  fail "final package does not contain the SMC executable"
+[[ -f "$expanded_pkg/BatteryGuard-payload.pkg/Payload/Library/Application Support/BatteryGuard/InstallerAssets/battery.sudoers" ]] || \
+  fail "final package does not contain the least-privilege sudoers template"
+[[ -f "$expanded_pkg/BatteryGuard-payload.pkg/Payload/Library/Application Support/BatteryGuard/InstallerAssets/smc-source/LICENSE" ]] || \
+  fail "final package does not contain the SMC corresponding-source license"
+[[ -f "$expanded_pkg/BatteryGuard-payload.pkg/Payload/Library/Application Support/BatteryGuard/InstallerAssets/BatteryGuardSMCReader-source/main.c" ]] || \
+  fail "final package does not contain the bundled reader corresponding source"
+[[ -f "$expanded_pkg/BatteryGuard-payload.pkg/Payload/Library/Application Support/BatteryGuard/InstallerAssets/UNINSTALL.md" ]] || \
+  fail "final package does not contain safe removal guidance"
+
+/bin/mv -f "$staged_output_pkg" "$output_pkg"
 
 print -- "Created: ${output_pkg}"
 /usr/bin/shasum -a 256 "$output_pkg"

@@ -15,6 +15,24 @@ fail() {
   exit 1
 }
 
+verify_secure_root_directory() {
+  local path="$1"
+  [[ -d "$path" && ! -L "$path" ]] || fail "신뢰할 수 있는 디렉터리가 아닙니다: ${path}"
+  [[ "$(stat -f '%u' "$path")" == "0" ]] || fail "root 소유 디렉터리가 아닙니다: ${path}"
+  local mode
+  mode="$(stat -f '%Lp' "$path")"
+  (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 디렉터리입니다: ${path}"
+}
+
+verify_secure_root_file() {
+  local path="$1"
+  [[ -f "$path" && ! -L "$path" ]] || fail "신뢰할 수 있는 일반 파일이 아닙니다: ${path}"
+  [[ "$(stat -f '%u' "$path")" == "0" ]] || fail "root 소유 파일이 아닙니다: ${path}"
+  local mode
+  mode="$(stat -f '%Lp' "$path")"
+  (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 파일입니다: ${path}"
+}
+
 verify_hash() {
   local path="$1"
   local expected_hash="$2"
@@ -23,12 +41,19 @@ verify_hash() {
   [[ "$actual_hash" == "$expected_hash" ]] || fail "설치 파일 무결성 검증에 실패했습니다: ${path}"
 }
 
-[[ -d "$assets_dir" && ! -L "$assets_dir" ]] || fail "설치 자산 디렉터리를 신뢰할 수 없습니다."
-[[ "$(stat -f '%u:%g' "$assets_dir")" == "0:0" ]] || fail "설치 자산이 root:wheel 소유가 아닙니다."
-[[ -f "$assets_dir/battery" && ! -L "$assets_dir/battery" ]] || fail "battery CLI 설치 자산이 없습니다."
-[[ -f "$assets_dir/smc" && ! -L "$assets_dir/smc" ]] || fail "SMC 설치 자산이 없습니다."
+verify_secure_root_directory "/Library"
+verify_secure_root_directory "/Library/Application Support"
+verify_secure_root_directory "/Library/Application Support/BatteryGuard"
+verify_secure_root_directory "$assets_dir"
+verify_secure_root_file "$assets_dir/battery"
+verify_secure_root_file "$assets_dir/smc"
+verify_secure_root_file "$assets_dir/Battery-CLI-MIT.txt"
+verify_secure_root_file "$assets_dir/Third-Party-Notices.md"
+verify_secure_root_file "$assets_dir/battery.sudoers"
 verify_hash "$assets_dir/battery" "$expected_battery_hash"
 verify_hash "$assets_dir/smc" "$expected_smc_hash"
+grep -qF 'BATTERY_CLI_VERSION="v1.3.4"' "$assets_dir/battery" || fail "지원하는 battery CLI v1.3.4가 아닙니다."
+verify_secure_root_directory "/Applications/BatteryGuard.app"
 codesign --verify --deep --strict "/Applications/BatteryGuard.app" || fail "BatteryGuard 코드 서명 검증에 실패했습니다."
 
 console_user="$(stat -f '%Su' /dev/console)"
@@ -36,39 +61,87 @@ console_user="$(stat -f '%Su' /dev/console)"
   fail "현재 로그인한 사용자를 확인할 수 없습니다. 로그인한 데스크톱 세션에서 설치하세요."
 print -r -- "$console_user" | grep -Eq '^[A-Za-z0-9._-]+$' || fail "지원하지 않는 macOS 사용자 이름입니다."
 
+readonly backup_dir="$(mktemp -d /private/tmp/batteryguard-install-backup.XXXXXX)"
+readonly dependency_dir_existed="$([[ -d "$dependency_dir" ]] && print 1 || print 0)"
+install_committed=0
+sudoers_temp=""
+
+backup_existing_file() {
+  local path="$1"
+  local name="$2"
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    touch "$backup_dir/.absent-$name"
+    return 0
+  fi
+  [[ -f "$path" && ! -L "$path" ]] || fail "기존 설치 대상이 일반 파일이 아닙니다: ${path}"
+  cp -p "$path" "$backup_dir/$name"
+}
+
+restore_or_remove_file() {
+  local path="$1"
+  local name="$2"
+  if [[ -f "$backup_dir/$name" ]]; then
+    cp -p "$backup_dir/$name" "$path"
+  elif [[ -f "$backup_dir/.absent-$name" ]]; then
+    rm -f "$path"
+  fi
+}
+
+finish_install() {
+  local exit_status=$?
+  local rollback_failed=0
+  if (( install_committed == 0 )); then
+    restore_or_remove_file "$dependency_dir/battery" battery || rollback_failed=1
+    restore_or_remove_file "$dependency_dir/smc" smc || rollback_failed=1
+    restore_or_remove_file "$dependency_dir/Battery-CLI-MIT.txt" battery-license || rollback_failed=1
+    restore_or_remove_file "$dependency_dir/Third-Party-Notices.md" notices || rollback_failed=1
+    restore_or_remove_file "$sudoers_file" sudoers || rollback_failed=1
+    if [[ "$dependency_dir_existed" == "0" ]]; then
+      rmdir "$dependency_dir" 2>/dev/null || true
+    fi
+  fi
+  [[ -z "$sudoers_temp" ]] || rm -f "$sudoers_temp"
+  if (( rollback_failed == 0 )); then
+    rm -rf "$backup_dir"
+  else
+    print -u2 -- "BatteryGuard 설치 복원이 완전하지 않습니다. 백업 보존 위치: ${backup_dir}"
+  fi
+  return "$exit_status"
+}
+trap finish_install EXIT INT TERM
+
+backup_existing_file "$dependency_dir/battery" battery
+backup_existing_file "$dependency_dir/smc" smc
+backup_existing_file "$dependency_dir/Battery-CLI-MIT.txt" battery-license
+backup_existing_file "$dependency_dir/Third-Party-Notices.md" notices
+backup_existing_file "$sudoers_file" sudoers
+
 install -d -m 755 -o root -g wheel "$dependency_dir"
+verify_secure_root_directory "/usr/local"
+verify_secure_root_directory "$dependency_dir"
 install -m 755 -o root -g wheel "$assets_dir/battery" "$dependency_dir/battery"
 install -m 755 -o root -g wheel "$assets_dir/smc" "$dependency_dir/smc"
 install -m 644 -o root -g wheel "$assets_dir/Battery-CLI-MIT.txt" "$dependency_dir/Battery-CLI-MIT.txt"
 install -m 644 -o root -g wheel "$assets_dir/Third-Party-Notices.md" "$dependency_dir/Third-Party-Notices.md"
+verify_hash "$dependency_dir/battery" "$expected_battery_hash"
+verify_hash "$dependency_dir/smc" "$expected_smc_hash"
 
 install -d -m 755 -o root -g wheel "$sudoers_dir"
+verify_secure_root_directory "$sudoers_dir"
 sudoers_temp="$(mktemp "${sudoers_dir}/.batteryguard.XXXXXX")"
-sudoers_backup=""
-cleanup() {
-  rm -f "$sudoers_temp"
-  [[ -z "$sudoers_backup" ]] || rm -f "$sudoers_backup"
-}
-trap cleanup EXIT INT TERM
 
 sed "s/__BATTERYGUARD_USER__/${console_user}/g" "$assets_dir/battery.sudoers" >"$sudoers_temp"
 chown root:wheel "$sudoers_temp"
 chmod 440 "$sudoers_temp"
 visudo -c -f "$sudoers_temp" >/dev/null || fail "sudoers 정책 검증에 실패했습니다."
-if [[ -f "$sudoers_file" ]]; then
-  sudoers_backup="$(mktemp /private/tmp/batteryguard-sudoers-backup.XXXXXX)"
-  cp -p "$sudoers_file" "$sudoers_backup"
-fi
 mv -f "$sudoers_temp" "$sudoers_file"
+sudoers_temp=""
 chown root:wheel "$sudoers_file"
 chmod 440 "$sudoers_file"
 if ! visudo -c >/dev/null; then
-  if [[ -n "$sudoers_backup" ]]; then
-    cp -p "$sudoers_backup" "$sudoers_file"
-  else
-    rm -f "$sudoers_file"
-  fi
-  fail "전체 sudoers 설정 검증에 실패하여 기존 정책을 복원했습니다."
+  fail "전체 sudoers 설정 검증에 실패했습니다. 설치 변경을 복원합니다."
 fi
+
+install_committed=1
 
 exit 0
