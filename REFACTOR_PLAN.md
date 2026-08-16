@@ -420,6 +420,19 @@ strict-concurrency complete와 warnings-as-errors에서 전체 283개 테스트,
 
 PR #19 병합 뒤 Release 앱을 `/Applications`에 다시 설치하고 최초 실행과 두 번의 추가 정상 종료·재실행을 확인했다. 기존 49건의 `set initial accessory activation policy` 실패 이후 새 이벤트는 0건이었고, 실행 정책은 accessory(raw value 1)였다. 모든 실행의 최종 하드웨어 상태는 80%, charging disabled, not discharging, Maintain 80, exact worker 1개였다.
 
+### 0.28 PR #23 전원 전환 UI settlement (2026-08-16)
+
+2초 polling을 notification-driven monitoring과 30초 watchdog으로 바꾼 뒤, 충전기 연결 직후 한 번 읽은 과도기 IOKit snapshot이 다음 알림이나 watchdog까지 남아 UI 반영이 1분 이상 늦어질 수 있는 회귀를 수정했다.
+
+- routine IOPowerSource 알림은 100ms에 한 번만 coalesce하고, 실제 `kIOPSNotifyPowerSource` edge는 최초 monotonic timestamp에 고정된 100/500/1000/2000ms settlement로 분리했다.
+- 같은 방향 callback은 deadline을 연장하지 않고, 반대 방향 edge와 stop/restart는 generation과 owning task를 함께 무효화한다. observer 등록 사이의 edge도 등록 직후 source 재확인으로 놓치지 않는다.
+- broad source와 30초 watchdog을 common run-loop mode에 두고 MenuBar, Dashboard와 app activation의 표시 요청은 한 번으로 coalesce한다. active settlement가 있으면 별도 read를 만들지 않는다.
+- 새 측정값은 기존 Heat Protection, Top Up/Discharge와 reconciliation policy를 그대로 통과하며 verified CLI control state와 섞지 않는다.
+- provider-lag, registration race/failure, reverse edge, stale callback, stop/start, read budget과 controller safety 반응을 포함한 전체 311개 테스트가 strict concurrency와 warnings-as-errors에서 통과했고 Debug build-for-testing, Release build와 Analyze도 통과했다.
+- 검증한 Release 앱을 `/Applications`에 설치한 뒤 UI 닫힘 4건, 메뉴 열림 4건, Dashboard chart tracking 2건의 read-only 전원 전환을 기록했다. IOKit edge부터 최초 material publish까지 10/10이 104~115ms(평균 109.9ms)로 3초 상한을 통과했다.
+- 배터리가 이미 Maintain 80%여서 연결 뒤 charging은 의도대로 disabled 상태였다. 양의 충전 전류 전환은 하드웨어를 변경하지 않고 deterministic regression test로 검증했다.
+- 최종 상태는 80%, AC attached, charging disabled, not discharging, exact Maintain 80 worker 1개이며 PID 파일과 PID 3395가 일치했다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -933,6 +946,7 @@ enum ChargeMode: Equatable {
 21. `[PR #19 구현·hostile review 보완·자동·설치본 검증 완료]` `LSUIElement`로 이미 accessory인 launch를 idempotent no-op으로 처리하고, 실제 activation policy 전환은 setter 승인과 exact postcondition을 모두 검증해 거짓 실패 진단을 제거한다. UI의 창 요청도 정책 검증 뒤에만 실행하며, 설치본 3회 launch에서 새 거짓 실패가 없음을 확인했다.
 22. `[구현·hostile review 보완·자동 검증 완료]` Dashboard, menu bar와 Settings를 공통 pastel surface/ink token 기반으로 재설계하고, 작은 상태 문구의 light/dark 대비를 분리된 semantic ink로 보장한다. 충전 이력은 7일을 보존하되 24시간 viewport를 유지하고 왼쪽 스크롤로 과거를 탐색한다. 7일 전체를 전역 200점으로 압축하지 않고 24시간 구간별 최대 120점을 보존해 기존 15분 heartbeat 해상도를 유지하며, live-edge 추적과 과거 위치 보존을 순수 `BatteryHistoryViewport` 상태로 분리해 회귀 테스트한다. 엄격 동시성·경고 오류화 조건의 289개 테스트, Release build와 Analyze를 모두 통과했다.
 23. `[hostile review 안전 보완·자동 검증 완료]` 정상 종료는 초기화가 확정한 첫 충전 안전 상태를 기다린 뒤 정책을 선택해 초기화 중 Heat Protection 결정을 Maintain으로 덮지 않는다. 초기화, wake와 Heat 복원은 fresh SMC·IOKit 전체 센서 coverage가 성공한 경우에만 자동 충전을 재개하고, 한 센서의 값이 남아 있어도 다른 독립 센서 실패가 있으면 charging-off로 fail closed 한다. `manualIntervention`은 주기적 자동 reconciliation 대상에서 계속 제외하되, 사용자가 실제 CLI를 기록된 Maintain 한도로 복원한 뒤 누르는 read-only 검증 경로와 공통 Dashboard/menu/Settings 복구 UI를 제공한다. 수동 복구도 Heat Protection이 켜져 있으면 fresh complete 온도 검증을 추가로 요구한다. 검증된 Maintain만 실패 상태와 Discharge sleep assertion을 해제하며, 불일치는 external drift로 전환하고 status read 실패는 재시도 가능한 수동 실패를 보존한다. 엄격 동시성·경고 오류화 조건의 296개 테스트, Release build와 Analyze를 모두 통과했다.
+24. `[PR #23 구현·hostile review·자동·실기 검증 완료]` 실제 AC/Battery edge에 100/500/1000/2000ms anchored settlement를 적용하고 routine notification, UI visibility와 watchdog read를 coalesce해 상시 polling 없이 stale 배터리 UI를 해소했다. provider-lag, observer 등록 창, reverse edge, cancellation과 controller 안전 반응을 회귀 테스트로 고정했다. 전체 311개 테스트와 Debug/strict/Release/Analyze가 통과했고, 닫힘·메뉴 열림·Dashboard tracking을 포함한 5회 분리와 5회 연결 실기 trial은 최초 material publish 104~115ms, 평균 109.9ms로 모두 3초 상한을 통과했다. 최종 상태는 exact Maintain 80 worker 1개와 non-discharge다.
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 

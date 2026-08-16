@@ -235,6 +235,29 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 8. raw trial별 latency와 성공/실패를 보존한다. 실패 launch를 평균에 섞지 않는다.
 9. 마지막에 Maintain 80%, exact worker 1개, non-discharge로 복원·검증한다.
 
+#### 완료 결과 (2026-08-16)
+
+자동 gate를 통과한 Release 앱을 `/Applications/BatteryGuard.app`에 설치한 뒤, 동일한 `kIOPSNotifyPowerSource` edge를 관찰하는 read-only recorder와 앱의 `BatteryMonitor` unified log를 함께 기록했다. 시작과 종료 상태는 모두 80%, AC attached, charging disabled, not discharging, exact `maintain_synchronous 80` worker 1개였고 PID 파일은 PID 3395를 가리켰다.
+
+| UI 상태 | 방향 | IOKit edge (UTC) | 최초 material publish (UTC) | 지연 |
+|---|---|---:|---:|---:|
+| 닫힘 | 분리 | 11:44:41.528 | 11:44:41.632 | 104ms |
+| 닫힘 | 연결 | 11:44:49.483 | 11:44:49.590 | 107ms |
+| 닫힘 | 분리 | 11:44:56.548 | 11:44:56.658 | 110ms |
+| 닫힘 | 연결 | 11:45:04.482 | 11:45:04.597 | 115ms |
+| 메뉴 열림 | 분리 | 11:45:47.627 | 11:45:47.739 | 112ms |
+| 메뉴 열림 | 연결 | 11:45:54.294 | 11:45:54.405 | 111ms |
+| 메뉴 열림 | 분리 | 11:46:01.165 | 11:46:01.275 | 110ms |
+| 메뉴 열림 | 연결 | 11:46:08.578 | 11:46:08.687 | 109ms |
+| Dashboard chart tracking | 분리 | 11:48:41.330 | 11:48:41.442 | 112ms |
+| Dashboard chart tracking | 연결 | 11:48:50.049 | 11:48:50.158 | 109ms |
+
+- 10/10 trial이 3초 상한을 통과했다. 최소 104ms, 최대 115ms, 평균 109.9ms다.
+- 모든 최초 publish는 100ms settlement offset에서 발생했다. 연결 trial 일부는 IOKit 값이 더 안정화되면서 500ms offset에서 두 번째 material publish가 있었지만 deadline 재시작이나 read 폭주는 없었다.
+- 배터리가 이미 Maintain 80%였으므로 연결 뒤 `charging=false`는 정상이다. 실제 양의 충전 전류 전환을 만들기 위해 limit을 변경하거나 Top Up을 실행하지 않았으며, transitional negative-amperage snapshot에서 charging snapshot으로 수렴하는 경로는 deterministic monitor test로 검증했다.
+- 전체 311개 XCTest, Debug build-for-testing, strict concurrency와 warnings-as-errors, Release build, Analyze가 통과했다.
+- 실기 검증 뒤에도 PID 파일과 exact worker가 일치하는 Maintain 80%, charging disabled, not discharging 상태를 유지했다.
+
 ### 9단계: 전달
 
 - logical code+test commit과 verification docs commit을 만든다.
@@ -242,6 +265,8 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 - base가 `main`이고 installer diff가 없는 PR을 생성한다.
 - PR 본문에 자동 검증, read-count budget, raw hardware trial 결과, 최종 battery-control 상태를 기록한다.
 - 실기 검증이 실패하면 PR은 열 수 있어도 병합하지 않는다.
+
+PR #23은 installer 작업과 분리된 단일 원자적 UI refresh PR로 열었다. monitor settlement, UI trigger와 controller safety test는 하나만 먼저 병합하면 불완전한 동작 계약이 되므로 별도 stacked PR로 나누지 않았다. 코드·테스트와 계획은 논리적 커밋으로 분리하고, 이 실기 결과는 verification docs 커밋으로 같은 PR에 추가한다.
 
 ## 7. 승인 기준
 
