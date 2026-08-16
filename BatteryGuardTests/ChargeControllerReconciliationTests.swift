@@ -198,9 +198,13 @@ extension ChargeControllerSafetyTests {
 
     func testAppActivationTriggersDriftReconciliation() async throws {
         let backend = FakeChargeBackend()
-        let info = makeBatteryInfo(charge: 80)
+        var info = makeBatteryInfo(charge: 80)
+        var monitorReadCount = 0
         let monitor = BatteryMonitor(
-            batteryInfoProvider: { info },
+            batteryInfoProvider: {
+                monitorReadCount += 1
+                return info
+            },
             runsMonitoringInfrastructure: false
         )
         let settings = UserSettings(
@@ -217,10 +221,15 @@ extension ChargeControllerSafetyTests {
                 maintainWorker: .running(pid: 6_565, target: 65)
             )
         )
+        info = makeBatteryInfo(charge: 79, isCharging: true, amperage: 1_250)
+        let readsBeforeActivation = monitorReadCount
 
         NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
         let driftDetected = await eventually { controller.hasExternalControlDrift }
         XCTAssertTrue(driftDetected)
+        XCTAssertGreaterThan(monitorReadCount, readsBeforeActivation)
+        XCTAssertEqual(monitor.batteryInfo?.currentCharge, 79)
+        XCTAssertEqual(monitor.batteryInfo?.isCharging, true)
         try await controller.shutdown()
     }
 

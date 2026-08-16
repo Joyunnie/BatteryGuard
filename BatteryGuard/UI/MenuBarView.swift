@@ -21,6 +21,7 @@ struct MenuBarView: View {
         }
         .tint(BatteryGuardPalette.accent)
         .frame(width: 344)
+        .onAppear { monitor.requestPresentationRefresh() }
     }
 
     private var headerSection: some View {
