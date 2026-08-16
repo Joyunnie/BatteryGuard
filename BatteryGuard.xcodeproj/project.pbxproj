@@ -9,6 +9,10 @@
 /* Begin PBXBuildFile section */
 		AA000001 /* BatteryGuardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100001 /* BatteryGuardApp.swift */; };
 		AA000002 /* SMCKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100002 /* SMCKit.swift */; };
+		AA000041 /* SMCKit+Preflight.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100041 /* SMCKit+Preflight.swift */; };
+		AA000042 /* SMCKit+Status.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100042 /* SMCKit+Status.swift */; };
+		AA000043 /* SMCKit+MaintainWorkers.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100043 /* SMCKit+MaintainWorkers.swift */; };
+		AA000044 /* SMCKit+Temperature.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100044 /* SMCKit+Temperature.swift */; };
 		AA000009 /* BatteryHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100009 /* BatteryHistory.swift */; };
 		AA000010 /* BatteryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100010 /* BatteryMonitor.swift */; };
 		AA000011 /* ChargeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100011 /* ChargeController.swift */; };
@@ -103,6 +107,10 @@
 /* Begin PBXFileReference section */
 		AA100001 /* BatteryGuardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardApp.swift; sourceTree = "<group>"; };
 		AA100002 /* SMCKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMCKit.swift; sourceTree = "<group>"; };
+		AA100041 /* SMCKit+Preflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SMCKit+Preflight.swift"; sourceTree = "<group>"; };
+		AA100042 /* SMCKit+Status.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SMCKit+Status.swift"; sourceTree = "<group>"; };
+		AA100043 /* SMCKit+MaintainWorkers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SMCKit+MaintainWorkers.swift"; sourceTree = "<group>"; };
+		AA100044 /* SMCKit+Temperature.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SMCKit+Temperature.swift"; sourceTree = "<group>"; };
 		AA100004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA100005 /* BatteryGuard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BatteryGuard.entitlements; sourceTree = "<group>"; };
 		AA100006 /* BatteryGuard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BatteryGuard.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -223,6 +231,10 @@
 			children = (
 				AA100021 /* BatteryCommandRunner.swift */,
 				AA100002 /* SMCKit.swift */,
+				AA100041 /* SMCKit+Preflight.swift */,
+				AA100042 /* SMCKit+Status.swift */,
+				AA100043 /* SMCKit+MaintainWorkers.swift */,
+				AA100044 /* SMCKit+Temperature.swift */,
 				AA100032 /* SystemPowerObserver.swift */,
 			);
 			path = SMC;
@@ -441,6 +453,10 @@
 				AA000030 /* SleepChargingProtection.swift in Sources */,
 				AA000032 /* SystemPowerObserver.swift in Sources */,
 				AA000002 /* SMCKit.swift in Sources */,
+				AA000041 /* SMCKit+Preflight.swift in Sources */,
+				AA000042 /* SMCKit+Status.swift in Sources */,
+				AA000043 /* SMCKit+MaintainWorkers.swift in Sources */,
+				AA000044 /* SMCKit+Temperature.swift in Sources */,
 				AA000009 /* BatteryHistory.swift in Sources */,
 				AA000010 /* BatteryMonitor.swift in Sources */,
 				AA000011 /* ChargeController.swift in Sources */,
