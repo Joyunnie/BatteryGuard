@@ -20,12 +20,12 @@ os_major="$(sw_vers -productVersion | cut -d. -f1)"
 [[ "$os_major" == <-> && "$os_major" -ge 14 ]] || fail "macOS 14 이상이 필요합니다."
 
 verify_secure_root_directory() {
-  local path="$1"
-  [[ -d "$path" && ! -L "$path" ]] || fail "신뢰할 수 있는 디렉터리가 아닙니다: ${path}"
-  [[ "$(stat -f '%u' "$path")" == "0" ]] || fail "root 소유 디렉터리가 아닙니다: ${path}"
+  local target_path="$1"
+  [[ -d "$target_path" && ! -L "$target_path" ]] || fail "신뢰할 수 있는 디렉터리가 아닙니다: ${target_path}"
+  [[ "$(stat -f '%u' "$target_path")" == "0" ]] || fail "root 소유 디렉터리가 아닙니다: ${target_path}"
   local mode
-  mode="$(stat -f '%Lp' "$path")"
-  (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 디렉터리입니다: ${path}"
+  mode="$(stat -f '%Lp' "$target_path")"
+  (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 디렉터리입니다: ${target_path}"
 }
 
 # PackageKit presents the sealed system volume through an installer sandbox.
@@ -44,14 +44,14 @@ if [[ -e "/Applications/BatteryGuard.app" || -L "/Applications/BatteryGuard.app"
 fi
 
 verify_existing_file() {
-  local path="$1"
+  local target_path="$1"
   local expected_hash="$2"
   local display_name="$3"
 
-  [[ -e "$path" || -L "$path" ]] || return 0
-  [[ -f "$path" && ! -L "$path" ]] || fail "기존 ${display_name}이 일반 파일이 아닙니다: ${path}"
+  [[ -e "$target_path" || -L "$target_path" ]] || return 0
+  [[ -f "$target_path" && ! -L "$target_path" ]] || fail "기존 ${display_name}이 일반 파일이 아닙니다: ${target_path}"
   local actual_hash
-  actual_hash="$(shasum -a 256 "$path" | awk '{print $1}')"
+  actual_hash="$(shasum -a 256 "$target_path" | awk '{print $1}')"
   [[ "$actual_hash" == "$expected_hash" ]] || \
     fail "다른 버전의 ${display_name}이 이미 설치되어 있습니다. 기존 배터리 관리 도구를 안전하게 해제·제거한 뒤 다시 설치하세요."
 }

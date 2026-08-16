@@ -16,29 +16,29 @@ fail() {
 }
 
 verify_secure_root_directory() {
-  local path="$1"
-  [[ -d "$path" && ! -L "$path" ]] || fail "신뢰할 수 있는 디렉터리가 아닙니다: ${path}"
-  [[ "$(stat -f '%u' "$path")" == "0" ]] || fail "root 소유 디렉터리가 아닙니다: ${path}"
+  local target_path="$1"
+  [[ -d "$target_path" && ! -L "$target_path" ]] || fail "신뢰할 수 있는 디렉터리가 아닙니다: ${target_path}"
+  [[ "$(stat -f '%u' "$target_path")" == "0" ]] || fail "root 소유 디렉터리가 아닙니다: ${target_path}"
   local mode
-  mode="$(stat -f '%Lp' "$path")"
-  (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 디렉터리입니다: ${path}"
+  mode="$(stat -f '%Lp' "$target_path")"
+  (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 디렉터리입니다: ${target_path}"
 }
 
 verify_secure_root_file() {
-  local path="$1"
-  [[ -f "$path" && ! -L "$path" ]] || fail "신뢰할 수 있는 일반 파일이 아닙니다: ${path}"
-  [[ "$(stat -f '%u' "$path")" == "0" ]] || fail "root 소유 파일이 아닙니다: ${path}"
+  local target_path="$1"
+  [[ -f "$target_path" && ! -L "$target_path" ]] || fail "신뢰할 수 있는 일반 파일이 아닙니다: ${target_path}"
+  [[ "$(stat -f '%u' "$target_path")" == "0" ]] || fail "root 소유 파일이 아닙니다: ${target_path}"
   local mode
-  mode="$(stat -f '%Lp' "$path")"
-  (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 파일입니다: ${path}"
+  mode="$(stat -f '%Lp' "$target_path")"
+  (( (8#$mode & 8#22) == 0 )) || fail "그룹 또는 다른 사용자가 쓸 수 있는 파일입니다: ${target_path}"
 }
 
 verify_hash() {
-  local path="$1"
+  local target_path="$1"
   local expected_hash="$2"
   local actual_hash
-  actual_hash="$(shasum -a 256 "$path" | awk '{print $1}')"
-  [[ "$actual_hash" == "$expected_hash" ]] || fail "설치 파일 무결성 검증에 실패했습니다: ${path}"
+  actual_hash="$(shasum -a 256 "$target_path" | awk '{print $1}')"
+  [[ "$actual_hash" == "$expected_hash" ]] || fail "설치 파일 무결성 검증에 실패했습니다: ${target_path}"
 }
 
 verify_secure_root_directory "/Library"
@@ -68,23 +68,23 @@ install_committed=0
 sudoers_temp=""
 
 backup_existing_file() {
-  local path="$1"
+  local target_path="$1"
   local name="$2"
-  if [[ ! -e "$path" && ! -L "$path" ]]; then
+  if [[ ! -e "$target_path" && ! -L "$target_path" ]]; then
     touch "$backup_dir/.absent-$name"
     return 0
   fi
-  [[ -f "$path" && ! -L "$path" ]] || fail "기존 설치 대상이 일반 파일이 아닙니다: ${path}"
-  cp -p "$path" "$backup_dir/$name"
+  [[ -f "$target_path" && ! -L "$target_path" ]] || fail "기존 설치 대상이 일반 파일이 아닙니다: ${target_path}"
+  cp -p "$target_path" "$backup_dir/$name"
 }
 
 restore_or_remove_file() {
-  local path="$1"
+  local target_path="$1"
   local name="$2"
   if [[ -f "$backup_dir/$name" ]]; then
-    cp -p "$backup_dir/$name" "$path"
+    cp -p "$backup_dir/$name" "$target_path"
   elif [[ -f "$backup_dir/.absent-$name" ]]; then
-    rm -f "$path"
+    rm -f "$target_path"
   fi
 }
 
