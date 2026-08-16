@@ -164,6 +164,12 @@ readonly staged_output_pkg="${work_dir}/BatteryGuard-${version}-Installer.pkg"
   fail "final package does not contain the bundled reader corresponding source"
 [[ -f "$expanded_pkg/BatteryGuard-payload.pkg/Payload/Library/Application Support/BatteryGuard/InstallerAssets/UNINSTALL.md" ]] || \
   fail "final package does not contain safe removal guidance"
+[[ -z "$(/usr/bin/find "$expanded_pkg/BatteryGuard-payload.pkg/Payload" -type l -print -quit)" ]] || \
+  fail "final package payload unexpectedly contains a symbolic link"
+/usr/bin/cmp -s "$script_dir/Scripts/preinstall" "$expanded_pkg/BatteryGuard-payload.pkg/Scripts/preinstall" || \
+  fail "packaged preinstall script differs from the reviewed source"
+/usr/bin/cmp -s "$script_dir/Scripts/postinstall" "$expanded_pkg/BatteryGuard-payload.pkg/Scripts/postinstall" || \
+  fail "packaged postinstall script differs from the reviewed source"
 
 /bin/mv -f "$staged_output_pkg" "$output_pkg"
 

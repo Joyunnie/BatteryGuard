@@ -62,6 +62,7 @@ console_user="$(stat -f '%Su' /dev/console)"
 print -r -- "$console_user" | grep -Eq '^[A-Za-z0-9._-]+$' || fail "지원하지 않는 macOS 사용자 이름입니다."
 
 readonly backup_dir="$(mktemp -d /private/tmp/batteryguard-install-backup.XXXXXX)"
+readonly usr_local_existed="$([[ -d "/usr/local" ]] && print 1 || print 0)"
 readonly dependency_dir_existed="$([[ -d "$dependency_dir" ]] && print 1 || print 0)"
 install_committed=0
 sudoers_temp=""
@@ -99,6 +100,9 @@ finish_install() {
     if [[ "$dependency_dir_existed" == "0" ]]; then
       rmdir "$dependency_dir" 2>/dev/null || true
     fi
+    if [[ "$usr_local_existed" == "0" ]]; then
+      rmdir "/usr/local" 2>/dev/null || true
+    fi
   fi
   [[ -z "$sudoers_temp" ]] || rm -f "$sudoers_temp"
   if (( rollback_failed == 0 )); then
@@ -116,7 +120,9 @@ backup_existing_file "$dependency_dir/Battery-CLI-MIT.txt" battery-license
 backup_existing_file "$dependency_dir/Third-Party-Notices.md" notices
 backup_existing_file "$sudoers_file" sudoers
 
-install -d -m 755 -o root -g wheel "$dependency_dir"
+if [[ "$dependency_dir_existed" == "0" ]]; then
+  install -d -m 755 -o root -g wheel "$dependency_dir"
+fi
 verify_secure_root_directory "/usr/local"
 verify_secure_root_directory "$dependency_dir"
 install -m 755 -o root -g wheel "$assets_dir/battery" "$dependency_dir/battery"
@@ -125,8 +131,14 @@ install -m 644 -o root -g wheel "$assets_dir/Battery-CLI-MIT.txt" "$dependency_d
 install -m 644 -o root -g wheel "$assets_dir/Third-Party-Notices.md" "$dependency_dir/Third-Party-Notices.md"
 verify_hash "$dependency_dir/battery" "$expected_battery_hash"
 verify_hash "$dependency_dir/smc" "$expected_smc_hash"
+[[ "$(stat -f '%u:%g:%Lp' "$dependency_dir/battery")" == "0:0:755" ]] || fail "battery CLI 권한 검증에 실패했습니다."
+[[ "$(stat -f '%u:%g:%Lp' "$dependency_dir/smc")" == "0:0:755" ]] || fail "SMC 도구 권한 검증에 실패했습니다."
+[[ "$(stat -f '%u:%g:%Lp' "$dependency_dir/Battery-CLI-MIT.txt")" == "0:0:644" ]] || fail "battery 라이선스 권한 검증에 실패했습니다."
+[[ "$(stat -f '%u:%g:%Lp' "$dependency_dir/Third-Party-Notices.md")" == "0:0:644" ]] || fail "제3자 고지 권한 검증에 실패했습니다."
 
-install -d -m 755 -o root -g wheel "$sudoers_dir"
+if [[ ! -d "$sudoers_dir" ]]; then
+  install -d -m 755 -o root -g wheel "$sudoers_dir"
+fi
 verify_secure_root_directory "$sudoers_dir"
 sudoers_temp="$(mktemp "${sudoers_dir}/.batteryguard.XXXXXX")"
 

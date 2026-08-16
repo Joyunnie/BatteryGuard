@@ -19,6 +19,15 @@ build or installation.
 The result is written to `dist/BatteryGuard-1.0-Installer.pkg`. The
 package is intentionally not committed.
 
+Because the package is unsigned, send its printed SHA-256 through a separate
+trusted message. Before opening it, the recipient should run:
+
+```sh
+shasum -a 256 BatteryGuard-1.0-Installer.pkg
+```
+
+Install only when the result exactly matches the separately received value.
+
 Before a build, the script requires a clean Git worktree. It then validates
 the pinned battery CLI version string, builds an arm64 Release app, creates the
 package in a temporary directory, expands and inspects the finished payload,
