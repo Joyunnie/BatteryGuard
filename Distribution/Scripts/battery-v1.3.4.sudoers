@@ -1,0 +1,25 @@
+
+# Visudo settings for the battery utility installed from https://github.com/actuallymentor/battery
+# intended to be placed in /private/etc/sudoers.d/battery on a mac
+
+# Allow passwordless update (All battery app executables are owned by root to prevent privilege escalation attacks)
+ALL ALL = NOPASSWD: /usr/local/co.palokaj.battery/battery update_silent
+ALL ALL = NOPASSWD: /usr/local/co.palokaj.battery/battery update_silent is_enabled
+
+# Allow passwordless battery-charging–related SMC write commands
+Cmnd_Alias    CHARGING_OFF = /usr/local/co.palokaj.battery/smc -k CH0B -w 02, /usr/local/co.palokaj.battery/smc -k CH0C -w 02, /usr/local/co.palokaj.battery/smc -k CHTE -w 01000000
+Cmnd_Alias    CHARGING_ON = /usr/local/co.palokaj.battery/smc -k CH0B -w 00, /usr/local/co.palokaj.battery/smc -k CH0C -w 00, /usr/local/co.palokaj.battery/smc -k CHTE -w 00000000
+Cmnd_Alias    FORCE_DISCHARGE_OFF = /usr/local/co.palokaj.battery/smc -k CH0I -w 00, /usr/local/co.palokaj.battery/smc -k CHIE -w 00, /usr/local/co.palokaj.battery/smc -k CH0J -w 00
+Cmnd_Alias    FORCE_DISCHARGE_ON = /usr/local/co.palokaj.battery/smc -k CH0I -w 01, /usr/local/co.palokaj.battery/smc -k CHIE -w 08, /usr/local/co.palokaj.battery/smc -k CH0J -w 01
+Cmnd_Alias    LED_CONTROL = /usr/local/co.palokaj.battery/smc -k ACLC -w 04, /usr/local/co.palokaj.battery/smc -k ACLC -w 03, /usr/local/co.palokaj.battery/smc -k ACLC -w 02, /usr/local/co.palokaj.battery/smc -k ACLC -w 01, /usr/local/co.palokaj.battery/smc -k ACLC -w 00
+ALL ALL = NOPASSWD: CHARGING_OFF
+ALL ALL = NOPASSWD: CHARGING_ON
+ALL ALL = NOPASSWD: FORCE_DISCHARGE_OFF
+ALL ALL = NOPASSWD: FORCE_DISCHARGE_ON
+ALL ALL = NOPASSWD: LED_CONTROL
+
+# Temporarily keep passwordless SMC reading commands so the old menubar GUI versions don't ask for password on each launch
+# trying to execute 'battery visudo'. There is no harm in removing this, so do it as soon as you believe users are no
+# longer using old versions.
+ALL ALL = NOPASSWD: /usr/local/co.palokaj.battery/smc -k CH0C -r, /usr/local/co.palokaj.battery/smc -k CH0I -r, /usr/local/co.palokaj.battery/smc -k ACLC -r, /usr/local/co.palokaj.battery/smc -k CHIE -r, /usr/local/co.palokaj.battery/smc -k CHTE -r
+

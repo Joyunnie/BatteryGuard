@@ -5,6 +5,8 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
 readonly dependency_dir="/usr/local/co.palokaj.battery"
 readonly sudoers_file="/private/etc/sudoers.d/battery"
+readonly script_dir="${0:A:h}"
+readonly legacy_sudoers_file="${script_dir}/battery-v1.3.4.sudoers"
 readonly expected_battery_hash="ce1917ba2176851bf6096f1a343ff9e1306c748e1ee2c5fbe9e37fa3cd45bf04"
 readonly expected_smc_hash="e3b4392c966dee700f3e1d6cc3812c0d487954c3d6d77b91f521a9590aadae44"
 
@@ -63,9 +65,13 @@ if [[ -e "$sudoers_file" || -L "$sudoers_file" ]]; then
   [[ -f "$sudoers_file" && ! -L "$sudoers_file" ]] || fail "기존 battery sudoers 정책이 일반 파일이 아닙니다."
   [[ "$(stat -f '%u:%g:%Lp' "$sudoers_file")" == "0:0:440" ]] || \
     fail "기존 battery sudoers 정책의 소유권 또는 권한이 안전하지 않습니다."
-  grep -qF '# BatteryGuard least-privilege policy' "$sudoers_file" || \
-    fail "다른 배터리 도구의 관리자 권한 정책이 이미 있습니다. 해당 도구의 제어를 안전하게 해제·제거한 뒤 다시 설치하세요."
   visudo -c -f "$sudoers_file" >/dev/null || fail "기존 battery sudoers 정책이 유효하지 않습니다."
+  if ! grep -qF '# BatteryGuard least-privilege policy' "$sudoers_file"; then
+    [[ -f "$legacy_sudoers_file" && ! -L "$legacy_sudoers_file" ]] || \
+      fail "검증용 battery CLI v1.3.4 정책이 패키지에 없습니다."
+    cmp -s "$sudoers_file" "$legacy_sudoers_file" || \
+      fail "다른 배터리 도구의 관리자 권한 정책이 이미 있습니다. 해당 도구의 제어를 안전하게 해제·제거한 뒤 다시 설치하세요."
+  fi
 fi
 
 if pgrep -x BatteryGuard >/dev/null 2>&1; then

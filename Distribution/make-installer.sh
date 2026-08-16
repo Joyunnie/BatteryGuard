@@ -175,6 +175,8 @@ readonly staged_output_pkg="${work_dir}/BatteryGuard-${version}-Installer.pkg"
   fail "packaged preinstall script differs from the reviewed source"
 /usr/bin/cmp -s "$script_dir/Scripts/postinstall" "$expanded_pkg/BatteryGuard-payload.pkg/Scripts/postinstall" || \
   fail "packaged postinstall script differs from the reviewed source"
+/usr/bin/cmp -s "$script_dir/Scripts/battery-v1.3.4.sudoers" "$expanded_pkg/BatteryGuard-payload.pkg/Scripts/battery-v1.3.4.sudoers" || \
+  fail "packaged legacy sudoers reference differs from the reviewed source"
 
 /bin/mv -f "$staged_output_pkg" "$output_pkg"
 
