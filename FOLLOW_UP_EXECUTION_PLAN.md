@@ -79,3 +79,16 @@ After all PRs are merged:
 - Automated verification passes on the final merged `main`.
 - No unique branch or generated installer artifact is removed accidentally.
 - Remaining work, if any, is recorded explicitly rather than implied by stale plan text.
+
+## Completion Record — 2026-08-16
+
+- PR A: [#24](https://github.com/Joyunnie/BatteryGuard/pull/24) merged the plan and Checkpoint 24 consistency update.
+- PR B: [#25](https://github.com/Joyunnie/BatteryGuard/pull/25) merged the audited friend installer and verified install/reinstall on this Mac.
+- PR C: [#26](https://github.com/Joyunnie/BatteryGuard/pull/26) decomposed `ChargeController` without changing its normalized method bodies or safety behavior.
+- PR D: [#27](https://github.com/Joyunnie/BatteryGuard/pull/27) decomposed `SMCKit`; all four normalized moved blocks matched their source and the targeted parser/worker/helper tests passed.
+- Final merged `main` passed all 311 tests, strict-concurrency warnings-as-errors build-for-testing, Release build, and Analyze.
+- The final read-only hardware check confirmed the installed `/Applications/BatteryGuard.app`, an 80% Maintain target, no forced discharge, one exact `maintain_synchronous 80` worker, and a matching regular PID file.
+- Merged working branches were removed. The superseded `feat/friend-installer` and `feature/smc-layer` tips were proven patch-equivalent to `main`, preserved as `archive/friend-installer-v1-20260816` and `archive/smc-layer-pre-history-link-20260816`, then removed as branches. `baseline/import` and `backup/*` remain preserved.
+- The generated installer remains ignored and untracked. `main` is synchronized with `origin/main`, and no pull request remains open.
+
+This plan is complete. Testing the installer on the friend's Mac and deciding whether Gatekeeper requires Developer ID signing or notarization are optional external follow-ups, not unfinished application code.
