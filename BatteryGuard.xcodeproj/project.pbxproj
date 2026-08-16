@@ -30,6 +30,13 @@
 		AA000030 /* SleepChargingProtection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100030 /* SleepChargingProtection.swift */; };
 		AA000032 /* SystemPowerObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100032 /* SystemPowerObserver.swift */; };
 		AA000033 /* BatteryGuardTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100033 /* BatteryGuardTheme.swift */; };
+		AA000034 /* ChargeController+HeatProtection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100034 /* ChargeController+HeatProtection.swift */; };
+		AA000035 /* ChargeController+Operations.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100035 /* ChargeController+Operations.swift */; };
+		AA000036 /* ChargeController+Reconciliation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100036 /* ChargeController+Reconciliation.swift */; };
+		AA000037 /* ChargeController+SleepWake.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100037 /* ChargeController+SleepWake.swift */; };
+		AA000038 /* ChargeController+Diagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100038 /* ChargeController+Diagnostics.swift */; };
+		AA000039 /* ChargeController+Lifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100039 /* ChargeController+Lifecycle.swift */; };
+		AA000040 /* ChargeController+Monitoring.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100040 /* ChargeController+Monitoring.swift */; };
 		BB000001 /* ChargeStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001 /* ChargeStateTests.swift */; };
 		BB000003 /* ChargeReconciliationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100003 /* ChargeReconciliationPolicyTests.swift */; };
 		BB000004 /* ChargeControllerSafetyTestCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100004 /* ChargeControllerSafetyTestCase.swift */; };
@@ -120,6 +127,13 @@
 		AA100030 /* SleepChargingProtection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepChargingProtection.swift; sourceTree = "<group>"; };
 		AA100032 /* SystemPowerObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPowerObserver.swift; sourceTree = "<group>"; };
 		AA100033 /* BatteryGuardTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatteryGuardTheme.swift; sourceTree = "<group>"; };
+		AA100034 /* ChargeController+HeatProtection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChargeController+HeatProtection.swift"; sourceTree = "<group>"; };
+		AA100035 /* ChargeController+Operations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChargeController+Operations.swift"; sourceTree = "<group>"; };
+		AA100036 /* ChargeController+Reconciliation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChargeController+Reconciliation.swift"; sourceTree = "<group>"; };
+		AA100037 /* ChargeController+SleepWake.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChargeController+SleepWake.swift"; sourceTree = "<group>"; };
+		AA100038 /* ChargeController+Diagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChargeController+Diagnostics.swift"; sourceTree = "<group>"; };
+		AA100039 /* ChargeController+Lifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChargeController+Lifecycle.swift"; sourceTree = "<group>"; };
+		AA100040 /* ChargeController+Monitoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChargeController+Monitoring.swift"; sourceTree = "<group>"; };
 		BB100001 /* ChargeStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeStateTests.swift; sourceTree = "<group>"; };
 		BB100002 /* BatteryGuardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BatteryGuardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB100003 /* ChargeReconciliationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargeReconciliationPolicyTests.swift; sourceTree = "<group>"; };
@@ -222,6 +236,13 @@
 				AA100010 /* BatteryMonitor.swift */,
 				AA100025 /* ChargeControlConstraints.swift */,
 				AA100011 /* ChargeController.swift */,
+				AA100038 /* ChargeController+Diagnostics.swift */,
+				AA100034 /* ChargeController+HeatProtection.swift */,
+				AA100039 /* ChargeController+Lifecycle.swift */,
+				AA100040 /* ChargeController+Monitoring.swift */,
+				AA100035 /* ChargeController+Operations.swift */,
+				AA100036 /* ChargeController+Reconciliation.swift */,
+				AA100037 /* ChargeController+SleepWake.swift */,
 				AA100026 /* ChargeLifecyclePolicy.swift */,
 				AA100024 /* ChargeReconciliationPolicy.swift */,
 				AA100014 /* ChargeState.swift */,
@@ -423,6 +444,13 @@
 				AA000009 /* BatteryHistory.swift in Sources */,
 				AA000010 /* BatteryMonitor.swift in Sources */,
 				AA000011 /* ChargeController.swift in Sources */,
+				AA000038 /* ChargeController+Diagnostics.swift in Sources */,
+				AA000034 /* ChargeController+HeatProtection.swift in Sources */,
+				AA000039 /* ChargeController+Lifecycle.swift in Sources */,
+				AA000040 /* ChargeController+Monitoring.swift in Sources */,
+				AA000035 /* ChargeController+Operations.swift in Sources */,
+				AA000036 /* ChargeController+Reconciliation.swift in Sources */,
+				AA000037 /* ChargeController+SleepWake.swift in Sources */,
 				AA000014 /* ChargeState.swift in Sources */,
 				AA000016 /* UserSettings.swift in Sources */,
 				AA000017 /* TopUpAndLED.swift in Sources */,
