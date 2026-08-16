@@ -36,6 +36,7 @@ struct DashboardView: View {
         }
         .tint(BatteryGuardPalette.accent)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { monitor.requestPresentationRefresh() }
         .task { await refreshHistory() }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
             Task { await refreshHistory() }

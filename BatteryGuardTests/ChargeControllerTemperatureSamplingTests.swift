@@ -91,6 +91,29 @@ extension ChargeControllerSafetyTests {
         try await controller.shutdown()
     }
 
+    func testPresentationRefreshPublishesHotSnapshotThroughHeatProtectionPolicy() async throws {
+        let infoSource = TestBatteryInfoSource(makeBatteryInfo(charge: 70, temperature: 30))
+        let (controller, backend, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            batteryInfoProvider: { infoSource.read() }
+        )
+        try await controller.initialize()
+        backend.clearOperations()
+
+        infoSource.set(makeBatteryInfo(charge: 70, temperature: 45))
+        monitor.requestPresentationRefresh()
+        let blocked = await eventually {
+            if case .heatBlocked = controller.mode { return true }
+            return false
+        }
+
+        XCTAssertTrue(blocked)
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+        try await controller.shutdown()
+    }
+
     func testPartialSMCSampleBlocksOnHighValueAndRemainsDegraded() async throws {
         let info = makeBatteryInfo(charge: 70, temperature: 30)
         let (controller, backend, _, _) = makeSUT(

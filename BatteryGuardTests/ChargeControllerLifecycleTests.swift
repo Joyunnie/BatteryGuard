@@ -499,6 +499,29 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(backend.operations.contains("read-status"))
     }
 
+    func testPresentationRefreshDrivesTopUpProgressThroughExistingPolicy() async throws {
+        let infoSource = TestBatteryInfoSource(makeBatteryInfo(charge: 70))
+        let (controller, backend, monitor, _) = makeSUT(
+            charge: 70,
+            batteryInfoProvider: { infoSource.read() },
+            longRunningHeartbeatInterval: 10
+        )
+        try await controller.initialize()
+        controller.startTopUp()
+        let topUpStarted = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(topUpStarted)
+        backend.clearOperations()
+
+        infoSource.set(makeBatteryInfo(charge: 100, isCharging: true, amperage: 1_000))
+        monitor.requestPresentationRefresh()
+        let restored = await eventually { controller.mode == .maintaining(limit: 80) }
+
+        XCTAssertTrue(restored)
+        XCTAssertTrue(backend.operations.contains("cancel-long"))
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+        try await controller.shutdown()
+    }
+
     func testShutdownDuringDischargeCancelsAndRestoresVerifiedMaintain() async throws {
         let (controller, backend, _, settings) = makeSUT(charge: 90)
         settings.chargeLimit = 80

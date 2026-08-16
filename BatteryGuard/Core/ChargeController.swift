@@ -2035,7 +2035,9 @@ final class ChargeController: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                await self?.reconcileExternalState(trigger: .appActivation)
+                guard let self else { return }
+                self.monitor.requestPresentationRefresh()
+                await self.reconcileExternalState(trigger: .appActivation)
             }
         }
     }
