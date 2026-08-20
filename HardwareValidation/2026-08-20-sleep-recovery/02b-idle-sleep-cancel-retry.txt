@@ -1,0 +1,30 @@
+trial=2-retry
+scenario=AC connected, Maintain 80, cancel vetoable idle sleep with immediate user activity when display turns off
+temporary_pmset=displaysleep 1; sleep 1 on AC and battery
+amphetamine_before_trial_session=inactive (saved original: infinite, display sleep prevented, non-trigger)
+
+[before]
+wall_clock=2026-08-20T13:43:52+0900
+pmset_battery=71%; AC attached; charging; no estimate; present=true
+battery_status_csv=71,(no,enabled,not discharging,80
+maintain_pid_file=94464
+exact_maintain_worker=94464; ppid=1; start=Thu Aug 20 13:42:23 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+ui_screenshot=02b-idle-sleep-cancel-retry-before-ui.png
+
+[after]
+wall_clock=2026-08-20T13:45:40+0900
+power_log_transitions=none
+batteryguard_sleep_diagnostics=none
+pmset_battery=71%; AC attached; charging; 2:27 remaining; present=true
+battery_status_csv=71,2:27,enabled,not discharging,80
+maintain_pid_file=94464
+exact_maintain_worker=94464; ppid=1; start=Thu Aug 20 13:42:23 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+ui_screenshot=02b-idle-sleep-cancel-retry-after-ui.png
+
+[verdict]
+scenario_result=NOT_EXECUTED_AS_INTENDED
+safety_result=PASS
+reason=User activity occurred after display-off but before macOS issued a vetoable system-sleep request. No BatteryGuard sleep lifecycle path ran and no hardware mutation occurred.
+retry_required=true

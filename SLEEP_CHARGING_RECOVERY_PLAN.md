@@ -1,5 +1,17 @@
 # BatteryGuard Sleep Charging Recovery Plan
 
+## 0. 실행 결과 (2026-08-20)
+
+이 계획의 코드 변경과 통제된 실제 하드웨어 검증은 완료됐다.
+
+- PR #29: bounded read-only status settlement를 구현하고 316개 테스트, strict-concurrency warnings-as-errors build-for-testing, Release build와 Analyze를 통과했다.
+- PR #30: typed system sleep lifecycle과 cancellation ownership을 구현하고 321개 테스트 및 동일한 build gate를 통과했다.
+- PR #31: read-only 재확인과 명시적인 verified Maintain 복구 UI를 분리하고 329개 테스트 및 동일한 build gate를 통과했다.
+- 실제 Mac에서 아래 8개 sleep/wake 조건을 모두 통과했다. 최종 상태는 Maintain 80, non-discharge, exact worker 1개와 일치하는 PID file이다.
+- 갱신된 `main`의 최종 Release 앱을 `/Applications/BatteryGuard.app`에 설치했다. 앱 binary, read-only SMC helper, GPL license, `Info.plist`, `CodeResources`가 build artifact와 byte-identical이고 deep strict codesign 검증을 통과했다.
+
+원자료와 판정은 [`HardwareValidation/2026-08-20-sleep-recovery/`](HardwareValidation/2026-08-20-sleep-recovery/)에 보존한다. 후반 trial capture에서 raw capacity key가 누락된 한계도 같은 위치에 명시했으며, 사후 추정값으로 보충하지 않았다.
+
 ## 1. 문제 정의
 
 2026-08-20 조사 시점에 macOS와 IOKit은 충전기 연결을 정상적으로 감지하고 있었다.
@@ -226,7 +238,7 @@ Forced sleep 준비가 불확실하게 실패한 뒤 wake에서 fresh status를 
 
 ## 7. PR 분리와 실행 순서
 
-### PR 1 — `fix/sleep-status-settlement`
+### PR 1 — `fix/sleep-status-settlement` `[PR #29 병합 완료]`
 
 범위:
 
@@ -247,7 +259,7 @@ PR 1은 각 status command와 terminal settlement event가 동일 operation ID�
 - cancellation 이후 command/read가 실행됨
 - 실제 시간에 의존하는 flaky test만 존재함
 
-### PR 2 — `fix/typed-system-sleep-lifecycle`
+### PR 2 — `fix/typed-system-sleep-lifecycle` `[PR #30 병합 완료]`
 
 범위:
 
@@ -266,7 +278,7 @@ PR 1은 각 status command와 terminal settlement event가 동일 operation ID�
 - shutdown policy가 다시 Boolean과 mode 두 source에 의존함
 - 같은 sleep sequence에서 mutation이 중복 실행됨
 
-### PR 3 — `fix/explicit-charge-recovery-ui`
+### PR 3 — `fix/explicit-charge-recovery-ui` `[PR #31 병합 완료]`
 
 범위:
 
@@ -280,9 +292,11 @@ PR 1은 각 status command와 terminal settlement event가 동일 operation ID�
 - 실패를 성공 또는 단순 “일시정지”로 표시함
 - periodic/app-activation reconciliation이 mutation을 시작함
 
-### PR 4 — controlled hardware validation and plan closure
+### PR 4 — controlled hardware validation and plan closure `[검증 완료]`
 
 코드 변경 없이 실제 Mac에서 opt-in 검증 결과만 기록한다. 사용자의 명시적 승인 후 수행하며 시작/종료 상태를 Maintain 80, non-discharge, exact worker 하나로 복원한다.
+
+8개 조건의 원자료, 실패/부분 시도, 환경 원복과 설치본 동일성 증거를 보존했다. 이 문서와 원자료만 별도 문서 PR로 병합해 application code diff와 분리한다.
 
 PR은 순서대로 병합한다. 각 PR은 직전 PR이 병합된 최신 `main`에서 분기하고, refactor나 unrelated cleanup을 섞지 않는다.
 
@@ -343,6 +357,25 @@ Idle sleep을 재현하기 위해 `pmset` 값을 임시 변경해야 한다면 �
 
 평균값만 남기지 않고 모든 trial 원자료를 보존한다. 준비 실패나 hardware 초기 상태 mismatch가 있는 trial은 성능 또는 안정성 결과에 포함하지 않는다.
 
+### 9.1 실행 결과 (2026-08-20)
+
+| 조건 | 결과 | 원자료 |
+|---|---|---|
+| Idle sleep 허용 후 wake | 통과. 이 Mac에서는 vetoable-only 대신 forced event가 이어지는 platform variance를 기록했다. | `01-idle-sleep-allow.txt` |
+| Vetoable idle sleep 취소 | 통과. 통제된 IOKit veto에서 `negotiationCancelled`를 확인했고 Maintain 복원은 약 0.76초였다. | `02d-idle-iokit-veto.txt` |
+| 짧은 뚜껑 sleep/wake | 통과 | `04-lid-short-retry.txt` |
+| 10분 이상 뚜껑 sleep/wake | 통과. 12분 27초 동안 표시 용량은 70%로 유지됐고 wake 복원은 약 1.1초였다. | `03-lid-short.txt` |
+| 빠른 sleep/wake 반복 | 통과. 연속 4회에서 stale completion이나 duplicate worker가 없었다. | `05-rapid-lid-cycles.txt` |
+| sleep 중 AC 분리 | 통과 | `06-disconnect-ac-asleep.txt` |
+| sleep 중 AC 연결 | 통과. USB-C 연결 DarkWake를 포함한다. | `07-connect-ac-asleep.txt` |
+| forced generation 3회 이상 안정성 | 통과. 위 4회 연속 trial이 더 강한 동일 조건을 충족했다. | `08-forced-generation-stability.txt` |
+
+취소 조건을 만들지 못한 세 번의 실패/부분 시도도 각각 `02-idle-sleep-cancel.txt`, `02b-idle-sleep-cancel-retry.txt`, `02c-idle-cancel-watcher.txt`에 보존하고 통과 판정에서는 제외했다.
+
+원자료 한계가 하나 있다. preflight와 첫 trial은 `AppleRawCurrentCapacity`와 `AppleRawMaxCapacity`를 보존했지만, 후반 capture 명령이 두 key를 실수로 필터링했다. 후반 자료에는 normalized capacity/percentage, 전원 전환, complete CLI tuple, operation-correlated diagnostics, exact worker identity가 남아 있다. 특히 long-sleep trial은 전후 70%, 잠들기 전 verified charging-off와 예상 밖 full wake 부재를 입증한다. 누락된 과거 값을 재구성하지 않고 이 한계를 acceptance evidence에 그대로 남긴다.
+
+검증 종료 뒤 임시 `pmset` 값과 Amphetamine 설정을 원래 상태로 복원했고, 임시 IOKit veto helper를 삭제했다. 최종 설치·제어 상태는 `99-final-state.txt`에 기록했다.
+
 ## 10. 성능 및 복잡도 점검
 
 - settlement는 잠자기 전 mutation 직후에만 실행하며 background polling이 아니다.
@@ -370,16 +403,17 @@ Idle sleep을 재현하기 위해 `pmset` 값을 임시 변경해야 한다면 �
 
 ## 12. 완료 기준
 
-다음을 모두 만족해야 이 문제를 해결 완료로 표시한다.
+다음을 모두 만족해 이 문제를 해결 완료로 표시한다.
 
-- transient tuple fixture가 기존 one-shot failure를 재현하고 새 settlement로 통과한다.
-- persistent/unknown/cancelled/deadline failure는 모두 fail-closed 한다.
-- vetoable idle sleep과 forced sleep이 controller와 diagnostics에서 구분된다.
-- 불확실한 실패는 자동 mutation 없이 명시적인 복구가 가능하다.
-- AC 연결과 CLI drift가 UI에서 동시에 사실대로 보인다.
-- 모든 automated gate가 통과한다.
-- 승인된 hardware matrix가 원자료와 함께 통과한다.
-- 최종 설치 앱과 build artifact가 일치하고, 실제 상태가 Maintain 80, non-discharge, exact worker 1개다.
+- [x] transient tuple fixture가 기존 one-shot failure를 재현하고 새 settlement로 통과한다.
+- [x] persistent/unknown/cancelled/deadline failure는 모두 fail-closed 한다.
+- [x] vetoable idle sleep과 forced sleep이 controller와 diagnostics에서 구분된다.
+- [x] 불확실한 실패는 자동 mutation 없이 명시적인 복구가 가능하다.
+- [x] AC 연결과 CLI drift가 UI에서 동시에 사실대로 보인다.
+- [x] 모든 automated gate가 통과한다.
+- [x] 승인된 hardware matrix의 8개 operational safety condition이 통과한다.
+- [!] 후반 trial의 raw-capacity key는 보존되지 않았다. 9.1절에 증거 완전성 한계를 명시하고 남은 원자료로 판정 범위를 제한했다.
+- [x] 최종 설치 앱과 build artifact가 일치하고, 실제 상태가 Maintain 80, non-discharge, exact worker 1개다.
 
 “다시는 발생하지 않음”은 일시적인 CLI/SMC 값이 절대 나타나지 않는다는 뜻이 아니다. 그런 값이 다시 나타나더라도 bounded settlement로 정상 안정화를 흡수하고, 안정화되지 않는 경우에는 안전하게 중단하며, 사용자가 원인을 정확히 보고 검증된 복구를 수행할 수 있음을 뜻한다.
 

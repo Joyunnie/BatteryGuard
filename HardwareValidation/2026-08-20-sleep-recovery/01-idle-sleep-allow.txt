@@ -1,0 +1,50 @@
+trial=1
+scenario=AC connected, battery below 80%, Maintain 80, vetoable idle sleep allowed, then wake
+original_pmset=displaysleep 10; sleep 1 on AC and battery
+temporary_pmset=displaysleep 1; sleep 1 on AC and battery
+amphetamine_before_trial_session=inactive (saved original: infinite, display sleep prevented, non-trigger)
+
+[before]
+wall_clock=2026-08-20T11:16:20+0900
+pmset_battery=70%; AC attached; charging; estimated 3:04 remaining; present=true
+external_connected=true
+is_charging=true
+instant_amperage=501
+raw_current_capacity=3916
+raw_max_capacity=5831
+battery_status_csv=70,3:04,enabled,not discharging,80
+maintain_pid_file=50874
+exact_maintain_worker=50874; ppid=1; start=Thu Aug 20 11:11:16 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+ui_screenshot=01-idle-sleep-allow-before-ui.png
+
+[sleep_wake]
+prepare_wall_clock=2026-08-20T11:18:01+0900
+sleep_wall_clock=2026-08-20T11:19:37+0900
+sleep_reason=Maintenance Sleep
+sleep_duration_seconds=210
+wake_wall_clock=2026-08-20T11:23:07+0900
+wake_reason=Deep Idle; lid/UserActivity
+observer_request_kind=forcedSystemSleep
+observer_request_id=7366E7B7-8211-4430-BBD1-15DF9FF87615
+observer_request_generation=1
+sleep_operation_id=9C7A78FE-8263-47C3-9C73-331AD3AACC1B
+sleep_prepare_result=PASS; one settlement attempt; elapsed=90220541ns
+sleep_verified_tuple=charging disabled; not discharging; worker stopped
+wake_operation_id=00779E01-AD52-489A-BF7E-65443A4E4B40
+wake_restore_result=PASS; exact Maintain 80 restored at 11:23:08+0900
+
+[after]
+wall_clock=2026-08-20T11:23:39+0900
+pmset_battery=70%; AC attached; not charging; present=true
+external_connected=true
+external_charge_capable=true
+is_charging=false
+instant_amperage=0
+raw_current_capacity=3942
+raw_max_capacity=5831
+battery_status_csv=70,attached;,enabled,not discharging,80
+maintain_pid_file=59964
+exact_maintain_worker=59964; ppid=1; start=Thu Aug 20 11:23:07 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+ui_screenshot=01-idle-sleep-allow-after-ui.png
+result=PASS_WITH_PLATFORM_VARIANCE
+note=The idle timer produced a Maintenance Sleep and macOS delivered systemWillSleep/forcedSystemSleep rather than a canSystemSleep request. Battery safety and wake restoration passed; the vetoable request kind was not observed in this trial.

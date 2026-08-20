@@ -1,0 +1,50 @@
+trial=2
+scenario=AC connected, Maintain 80, idle sleep preparation cancelled by immediate user activity after display-off
+temporary_pmset=displaysleep 1; sleep 1 on AC and battery
+amphetamine_before_trial_session=inactive (saved original: infinite, display sleep prevented, non-trigger)
+
+[before]
+wall_clock=2026-08-20T11:24:35+0900
+pmset_battery=70%; AC attached; charging; no estimate; present=true
+battery_status_csv=70,(no,enabled,not discharging,80
+maintain_pid_file=59964
+exact_maintain_worker=59964; ppid=1; start=Thu Aug 20 11:23:07 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+ui_screenshot=02-idle-sleep-cancel-before-ui.png
+
+[observed_sleep_sequence]
+vetoable_request_local=2026-08-20T11:25:47+0900
+vetoable_request_id=2AD216C2-97F9-43EA-B9A0-442541666CFE
+vetoable_request_generation=2
+sleep_control_operation_id=851A6A79-17F5-49C8-93AE-C6FF033C26EC
+sleep_control_result=charging disabled; discharging false; Maintain 80 worker stopped
+sleep_control_settlement=1 attempt; 90,712,291 ns
+forced_request_local=2026-08-20T11:25:47+0900
+forced_request_id=E5F6FFF3-C6B8-47C3-AE9C-979FE90906CE
+forced_request_generation=3
+forced_verification_operation_id=5DD45EE3-FC24-4038-AB60-077FD63DF78A
+forced_verification_result=read-only verification; charging disabled; discharging false; worker stopped
+forced_verification_settlement=1 attempt; 95,624,958 ns
+power_log_1=2026-08-20 11:25:52 +0900; Idle Sleep; AC; charge 70%; 1 second
+power_log_2=2026-08-20 11:25:53 +0900; DarkWake; AC; charge 70%; 45 seconds
+power_log_3=2026-08-20 11:26:38 +0900; Maintenance Sleep; AC; charge 70%
+power_log_final=2026-08-20 13:01:25 +0900; user Wake from Deep Idle; lid/UserActivity; AC; charge 70%
+completion_event=poweredOn
+completion_local=2026-08-20T13:01:25+0900
+
+[after]
+wall_clock=2026-08-20T13:01:50+0900
+pmset_battery=70%; AC attached; not charging; present=true
+iokit=external connected=true; external charge capable=true; charging=false; amperage=0; raw current/max=3976/5825
+battery_status_csv=70,attached;,enabled,not discharging,80
+maintain_pid_file=68116
+exact_maintain_worker=68116; ppid=1; start=Thu Aug 20 13:01:26 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+wake_restore_operation_id=937C6140-5C0E-46F7-85E5-523CE8B4FC44
+wake_restore_result=verified Maintain 80; charging enabled; discharging false; exact worker running
+ui_screenshot=02-idle-sleep-cancel-after-ui.png
+
+[verdict]
+scenario_result=NOT_EXECUTED_AS_INTENDED
+safety_result=PASS
+reason=Immediate user activity did not occur during the cancellation window. The Mac entered real sleep and woke at 13:01, so no systemWillNotSleep completion was emitted.
+important_observation=The real vetoableIdleSleep -> forcedSystemSleep sequence was exercised. BatteryGuard mutated hardware once for generation 2, then used read-only verification for generation 3; it did not repeat the stop mutation.
+retry_required=true

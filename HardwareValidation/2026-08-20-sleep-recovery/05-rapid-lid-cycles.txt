@@ -1,0 +1,35 @@
+trial=5
+scenario=Three rapid clamshell sleep/wake cycles while AC remains connected and Maintain 80 owns control
+
+[before]
+wall_clock=2026-08-20T13:24:04+0900
+pmset_battery=70%; AC attached; not charging; present=true
+battery_status_csv=70,attached;,enabled,not discharging,80
+maintain_pid_file=76888
+exact_maintain_worker=76888; ppid=1; start=Thu Aug 20 13:23:17 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+ui_screenshot=05-rapid-lid-cycles-before-ui.png
+
+[after]
+wall_clock=2026-08-20T13:32:49+0900
+observed_cycle_count=4
+cycle_1=request generation 6; request 1BF379B2-AD73-4977-A0AA-97970C5E3394; sleep control C5CDD951-EE38-468F-80C2-A45683FD6B1E; wake restore 69F6C052-CE08-4D8A-A9E0-A03351B7E074; worker 82857
+cycle_2=request generation 7; request 656A5469-93BD-4E10-B4DE-5228F2A83357; sleep control DD591B78-F32D-4BDF-AB4F-63882BFDB73A; wake restore B17CE1FC-A959-4F1E-8342-25B6D4333FCA; worker 84090
+cycle_3=request generation 8; request BCCEDCD5-C6DA-4A1A-A13C-12243EE5DE0C; sleep control A188585E-AF2F-4002-ADB2-88E33300C9B0; wake restore C2E162F9-06EF-458F-8929-66F4F14ED87B; worker 85333
+cycle_4=request generation 9; request EFA027E3-0837-4932-BF8D-D867014F1784; sleep control E3E70257-32C8-4FD1-BEC5-BC23954941CF; wake restore A3E27F16-A3B6-4856-A70C-F257D3B50223; worker 87037
+all_sleep_settlements=1 attempt each; 92.6-95.7 ms
+all_sleep_states=charging disabled; discharging false; Maintain worker stopped
+all_wake_states=charging enabled; discharging false; verified Maintain 80; exact worker running
+final_pmset_battery=71%; AC attached; not charging; present=true
+final_iokit=external connected=true; external charge capable=true; charging=false; amperage=0; current capacity=71; max capacity=100
+final_battery_status_csv=71,attached;,enabled,not discharging,80
+final_maintain_pid_file=87037
+final_exact_maintain_worker=87037; ppid=1; start=Thu Aug 20 13:32:15 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+final_exact_maintain_worker_count=1
+ui_screenshot=05-rapid-lid-cycles-after-ui.png
+
+[verdict]
+scenario_result=PASS
+safety_result=PASS
+reason=Four rapid forced sleep/wake generations completed in order. Every sleep disabled charging and stopped the old worker; every wake restored one new verified Maintain 80 worker. No stale completion, duplicate worker, or discharge state was observed.
+charge_note=The visible charge rose from 70% to 71% during awake intervals below the 80% target; this is expected and is not evidence of charging during sleep.

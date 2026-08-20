@@ -433,6 +433,18 @@ PR #19 병합 뒤 Release 앱을 `/Applications`에 다시 설치하고 최초 �
 - 배터리가 이미 Maintain 80%여서 연결 뒤 charging은 의도대로 disabled 상태였다. 양의 충전 전류 전환은 하드웨어를 변경하지 않고 deterministic regression test로 검증했다.
 - 최종 상태는 80%, AC attached, charging disabled, not discharging, exact Maintain 80 worker 1개이며 PID 파일과 PID 3395가 일치했다.
 
+### 0.29 PR #29~#31 sleep charging recovery와 통제된 실기 검증 (2026-08-20)
+
+잠자기 준비 직후의 일시적인 `discharging=true` 관측을 영구 manual failure로 확정해 Maintain worker가 복원되지 않던 근본 경계를 수정했다.
+
+- PR #29는 `charging off` mutation을 한 번만 수행하고 complete disabled tuple을 하나의 absolute deadline 안에서 bounded read-only settlement로 검증한다. transient mismatch는 흡수하고 persistent/ambiguous/deadline/cancellation은 fail-closed 한다.
+- PR #30은 vetoable idle sleep, forced sleep, negotiation cancellation과 powered-on을 typed lifecycle로 분리하고, timeout/invalidation/stop/new request가 owning preparation task를 취소하게 했다. 독립 Boolean을 제거하고 forced failure의 manual recovery context를 wake 뒤에도 보존한다.
+- PR #31은 read-only 상태 재확인과 사용자 승인 Maintain 복원을 분리한다. 복원은 durable ownership, complete status/worker tuple과 fresh independent temperature pre/postflight를 모두 통과해야만 성공 상태를 게시한다. Dashboard와 menu bar는 물리적 AC 연결과 BatteryGuard 제어 복구 필요를 별도 사실로 표시한다.
+- 최종 코드 PR에서 329개 테스트, strict-concurrency warnings-as-errors build-for-testing, Release build와 Analyze가 통과했다.
+- 승인된 실제 Mac 검증에서 idle allow/cancel, 짧고 10분 이상인 lid sleep, 빠른 4회 반복, sleep 중 AC 분리·연결과 forced generation 안정성의 8개 조건을 통과했다. 최종 상태는 80%, AC attached, charging disabled, not discharging, exact Maintain 80 worker 1개와 일치하는 PID file이다.
+- 원자료는 `HardwareValidation/2026-08-20-sleep-recovery/`에 보존한다. 후반 trial의 raw capacity key가 capture filter에서 빠진 한계를 명시하고, normalized capacity, complete CLI tuple, diagnostics, worker identity로 보완하되 누락된 과거 값은 재구성하지 않았다.
+- 갱신된 `main`의 Release 앱을 `/Applications/BatteryGuard.app`에 설치했다. 앱 binary, bundled read-only SMC helper, GPL license, `Info.plist`와 `CodeResources`는 build artifact와 byte-identical이고 deep strict codesign을 통과했다. 임시 `pmset`, Amphetamine과 IOKit veto 환경도 원래 상태로 복원했다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -947,6 +959,7 @@ enum ChargeMode: Equatable {
 22. `[구현·hostile review 보완·자동 검증 완료]` Dashboard, menu bar와 Settings를 공통 pastel surface/ink token 기반으로 재설계하고, 작은 상태 문구의 light/dark 대비를 분리된 semantic ink로 보장한다. 충전 이력은 7일을 보존하되 24시간 viewport를 유지하고 왼쪽 스크롤로 과거를 탐색한다. 7일 전체를 전역 200점으로 압축하지 않고 24시간 구간별 최대 120점을 보존해 기존 15분 heartbeat 해상도를 유지하며, live-edge 추적과 과거 위치 보존을 순수 `BatteryHistoryViewport` 상태로 분리해 회귀 테스트한다. 엄격 동시성·경고 오류화 조건의 289개 테스트, Release build와 Analyze를 모두 통과했다.
 23. `[hostile review 안전 보완·자동 검증 완료]` 정상 종료는 초기화가 확정한 첫 충전 안전 상태를 기다린 뒤 정책을 선택해 초기화 중 Heat Protection 결정을 Maintain으로 덮지 않는다. 초기화, wake와 Heat 복원은 fresh SMC·IOKit 전체 센서 coverage가 성공한 경우에만 자동 충전을 재개하고, 한 센서의 값이 남아 있어도 다른 독립 센서 실패가 있으면 charging-off로 fail closed 한다. `manualIntervention`은 주기적 자동 reconciliation 대상에서 계속 제외하되, 사용자가 실제 CLI를 기록된 Maintain 한도로 복원한 뒤 누르는 read-only 검증 경로와 공통 Dashboard/menu/Settings 복구 UI를 제공한다. 수동 복구도 Heat Protection이 켜져 있으면 fresh complete 온도 검증을 추가로 요구한다. 검증된 Maintain만 실패 상태와 Discharge sleep assertion을 해제하며, 불일치는 external drift로 전환하고 status read 실패는 재시도 가능한 수동 실패를 보존한다. 엄격 동시성·경고 오류화 조건의 296개 테스트, Release build와 Analyze를 모두 통과했다.
 24. `[PR #23 구현·hostile review·자동·실기 검증 완료]` 실제 AC/Battery edge에 100/500/1000/2000ms anchored settlement를 적용하고 routine notification, UI visibility와 watchdog read를 coalesce해 상시 polling 없이 stale 배터리 UI를 해소했다. provider-lag, observer 등록 창, reverse edge, cancellation과 controller 안전 반응을 회귀 테스트로 고정했다. 전체 311개 테스트와 Debug/strict/Release/Analyze가 통과했고, 닫힘·메뉴 열림·Dashboard tracking을 포함한 5회 분리와 5회 연결 실기 trial은 최초 material publish 104~115ms, 평균 109.9ms로 모두 3초 상한을 통과했다. 최종 상태는 exact Maintain 80 worker 1개와 non-discharge다.
+25. `[PR #29~#31 구현·자동·실기 검증 완료]` sleep charging recovery의 one-shot status 판정을 bounded settlement로 교체하고, typed system sleep lifecycle/cancellation ownership과 명시적인 verified Maintain 복구 UI를 도입했다. 최종 329개 테스트와 strict/Release/Analyze gate가 통과했다. 승인된 8개 실제 sleep/wake 조건을 통과했으며 원자료 한계를 포함한 증거를 별도 문서 PR에 보존했다. 최종 설치본은 Release artifact와 byte-identical이고 상태는 Maintain 80, non-discharge, exact worker 1개다.
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -962,6 +975,7 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 - 실제 하드웨어 테스트는 사용자의 명시적 승인 후 수동으로 실행한다.
 - 각 수동 검증 전후에 실제 status를 기록하고 테스트 종료 시 의도한 maintain 상태로 복원한다.
 - 17번의 실제 Mac 검증에서 lid close, vetoable idle sleep, forced sleep, wake, sleep negotiation 중 Quit, Discharge assertion 실패/복구를 완료했다. 검증에서 발견한 diagnostics 우선순위 결함과 회귀 테스트도 완료했다.
+- 25번의 실제 Mac 검증에서 sleep charging recovery 8개 조건과 설치본 동일성을 확인했다. 상세 원자료와 capture 한계는 `HardwareValidation/2026-08-20-sleep-recovery/`에 보존한다.
 
 ## 9. 변경 거절 기준
 
@@ -994,6 +1008,6 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 | Design Review | hostile whole-project review | UI/UX gaps | 1 | issues addressed | pastel fill/ink 대비 분리와 24시간 단위 이력 해상도 보존 |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | not needed | 개인용 로컬 프로젝트이며 확인된 test/file topology 유지보수는 완료됨 |
 
-**VERDICT:** CHECKPOINT 24 AND ITS FOLLOW-UP MAINTENANCE COMPLETE — 전원 연결·분리 settlement 회귀를 포함한 전체 311개 테스트, 엄격 동시성·경고 오류화 build-for-testing, Release build와 Analyze가 최종 병합 `main`에서 통과했다. 친구 설치 패키지는 PR #25, `ChargeController`와 `SMCKit`의 동작 보존 파일 분해는 PR #26과 PR #27로 병합됐다. 이전 고유 브랜치 tip은 patch-equivalent임을 확인하고 archive tag로 보존했으며 `baseline/import`와 `backup/*`는 유지했다. 남은 항목은 친구 Mac에서의 선택적 외부 설치 검증뿐이며 미완료 application code는 없다.
+**VERDICT:** CHECKPOINT 25 AND ITS FOLLOW-UP VALIDATION COMPLETE — sleep charging recovery를 포함한 전체 329개 테스트, 엄격 동시성·경고 오류화 build-for-testing, Release build와 Analyze가 최종 코드 PR에서 통과했다. 승인된 실제 Mac sleep/wake matrix 8개 조건과 최종 설치본 동일성도 확인했다. 친구 설치 패키지는 PR #25, `ChargeController`와 `SMCKit`의 동작 보존 파일 분해는 PR #26과 PR #27로 병합됐다. 이전 고유 브랜치 tip은 patch-equivalent임을 확인하고 archive tag로 보존했으며 `baseline/import`와 `backup/*`는 유지했다. 남은 항목은 친구 Mac에서의 선택적 외부 설치 검증뿐이며 미완료 application code는 없다.
 
 NO UNRESOLVED DECISIONS

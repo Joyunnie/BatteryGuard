@@ -1,0 +1,33 @@
+trial=7
+scenario=Start on battery in verified Maintain 80, enter clamshell sleep, connect AC while asleep, then wake on AC
+
+[before]
+wall_clock=2026-08-20T13:38:58+0900
+pmset_battery=71%; Battery Power; normal battery discharge; no estimate; present=true
+battery_status_csv=71,(no,enabled,not discharging,80
+maintain_pid_file=91430
+exact_maintain_worker=91430; ppid=1; start=Thu Aug 20 13:38:01 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+ui_screenshot=07-connect-ac-asleep-before-ui.png
+
+[after]
+wall_clock=2026-08-20T13:42:51+0900
+power_log_battery_sleep=2026-08-20 13:39:40 +0900; Clamshell Sleep; Battery; charge 71%; 32 seconds
+power_log_ac_connection=2026-08-20 13:40:12 +0900; USB-C_plug DarkWake; AC; charge 71%
+power_log_notification_back_to_sleep=2026-08-20 13:40:57 +0900; AC; charge 71%
+power_log_user_wake=2026-08-20 13:42:23 +0900; user Wake from Deep Idle; lid/UserActivity; AC; charge 71%
+observed_forced_generations=13,14
+generation_13=request 7107E8DC-74CF-4D8C-8DE8-0CBD2BBB5B48; sleep control 17DB6949-2FB9-4B82-9702-43B740A442A1; wake restore 5EC95713-8CDC-471A-A72F-21CAFE12FC54; worker 93264
+generation_14=request D968EF2D-560C-4744-9500-1DDD0A1F8156; sleep control 33976253-0EDE-427F-AF88-A1B7FF037C4B; wake restore 08456004-BA91-4643-97E8-F4D21FE1D3F5; worker 94464
+final_pmset_battery=71%; AC attached; not charging; present=true
+final_iokit=external connected=true; external charge capable=true; charging=false; amperage=0; current capacity=71; max capacity=100
+final_battery_status_csv=71,attached;,enabled,not discharging,80
+final_maintain_pid_file=94464
+final_exact_maintain_worker=94464; ppid=1; start=Thu Aug 20 13:42:23 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+final_exact_maintain_worker_count=1
+ui_screenshot=07-connect-ac-asleep-after-ui.png
+
+[verdict]
+scenario_result=PASS
+safety_result=PASS
+reason=The Mac slept on battery, woke because USB-C power was connected, returned to sleep on AC, and finally woke to exactly one verified Maintain 80 worker with force discharge disabled.

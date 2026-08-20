@@ -1,0 +1,28 @@
+wall_clock=2026-08-20T11:09:37+0900
+capture_kind=pre-install-precondition
+pmset_battery=70%; AC attached; not charging; present=true
+external_connected=true
+external_charge_capable=true
+is_charging=false
+instant_amperage=0
+raw_current_capacity=3872
+raw_max_capacity=5819
+battery_status_csv=70,attached;,disabled,not discharging,80
+maintain_pid_file=missing
+exact_maintain_workers=0
+ownership={"owner":"batteryGuard","lastLimit":80}
+installed_app_sha256=a4f68a4b827471294809a4e827a5616e229ad01275e0c20d07095e7f3d7b3985
+release_app_sha256=f0118673984e9408ccce10758978b1b9382b15e5b8894f2f198e7aba629551c3
+precondition_result=FAIL
+reason=Installed app predates PR #31 and the exact Maintain worker/PID file are missing.
+
+wall_clock=2026-08-20T11:13:47+0900
+capture_kind=post-install-ready-state
+pmset_battery=70%; AC attached; charging; estimated 3:12 remaining; present=true
+battery_status_csv=70,3:12,enabled,not discharging,80
+maintain_pid_file=50874
+exact_maintain_worker=50874; ppid=1; start=Thu Aug 20 11:11:16 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+installed_app_sha256=f0118673984e9408ccce10758978b1b9382b15e5b8894f2f198e7aba629551c3
+release_app_sha256=f0118673984e9408ccce10758978b1b9382b15e5b8894f2f198e7aba629551c3
+precondition_result=PASS
+ui_screenshot=00-ready-ui.png

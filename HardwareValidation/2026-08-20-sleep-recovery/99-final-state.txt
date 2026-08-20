@@ -1,0 +1,46 @@
+capture_kind=final-restored-and-installed-state
+wall_clock=2026-08-20T14:38:57+0900
+
+[battery_and_control]
+pmset_battery=80%; AC attached; not charging; present=true
+iokit_external_connected=true
+iokit_external_charge_capable=true
+iokit_is_charging=false
+iokit_raw_current_capacity=4603
+iokit_raw_max_capacity=5825
+battery_status_csv=80,attached;,disabled,not discharging,80
+maintain_pid_file=12388
+exact_maintain_worker=12388; ppid=1; start=Thu Aug 20 14:06:46 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+ownership={"owner":"batteryGuard","lastLimit":80}
+ui_screenshot=99-final-state-ui.png
+
+[environment_restoration]
+pmset_battery_displaysleep=10
+pmset_battery_sleep=1
+pmset_ac_displaysleep=10
+pmset_ac_sleep=1
+amphetamine_session_active=true
+amphetamine_session_time_remaining=0
+amphetamine_display_sleep_allowed=false
+amphetamine_session_is_trigger=false
+amphetamine_triggers_enabled=false
+amphetamine_closed_display_mode_enabled=true
+temporary_iokit_veto_helper_removed=true
+
+[release_installation]
+release_build_result=PASS; xcodebuild Release succeeded on merged main 38900893827d81ba0b20ec8aeb68e21813749469
+installed_path=/Applications/BatteryGuard.app
+installed_owner=root:wheel
+bundle_short_version=1.0
+bundle_build_version=1
+deep_strict_codesign=PASS for build artifact and installed app
+binary_sha256=a346adebf4d9504d0e775b47c4acd84c72a67d986815144b4a82939103425091
+smc_helper_sha256=a29f2ba2443006b84244c128abcc29e660dc89eab53d4497c3db909d4d0104f2
+smc_license_sha256=ab15fd526bd8dd18a9e77ebc139656bf4d33e97fc7238cd11bf60e2b9b8666c6
+component_comparison=PASS; binary, helper, GPL license, Info.plist, and CodeResources are byte-identical to the final Release artifact
+previous_installed_app_backup=/private/tmp/BatteryGuard-pre-final-20260820-1435/BatteryGuard.app
+
+[verdict]
+final_state=PASS
+reason=BatteryGuard owns verified Maintain 80 with force discharge disabled, exactly one live target worker and a matching PID file. The installed app exactly matches the final Release artifact and the temporary power-management environment has been restored.
