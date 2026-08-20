@@ -200,8 +200,8 @@ extension ChargeController {
         let requestedLimit = effectiveChargeLimit
         let requestedPolicy: ChargeShutdownPolicy
         do {
-            if systemPowerObserver.requiresChargingDisabledForSleepTransition,
-               sleepChargingOffWasRequested {
+            if systemPowerObserver.activeSleepRequest?.kind == .forcedSystemSleep,
+               mode.requiresChargingDisabledForActiveSleepTransition {
                 // A forced systemWillSleep request cannot be rejected. Keep the
                 // already verified charging-off tuple while allowing it to finish.
                 requestedPolicy = .keepChargingDisabled

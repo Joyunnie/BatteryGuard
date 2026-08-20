@@ -1,6 +1,19 @@
 import XCTest
 @testable import BatteryGuard
 
+private func makeSleepRequest(
+    kind: SystemSleepRequestKind,
+    generation: UInt64 = 1,
+    deadline: UInt64 = .max
+) -> SystemSleepRequest {
+    SystemSleepRequest(
+        id: UUID(),
+        generation: generation,
+        kind: kind,
+        deadlineUptimeNanoseconds: deadline
+    )
+}
+
 final class SleepChargingPolicyTests: XCTestCase {
     func testStableOwnedModesRequireChargingOff() {
         let modes: [ChargeMode] = [
@@ -96,24 +109,27 @@ final class SleepChargingPolicyTests: XCTestCase {
 }
 
 final class SleepAcknowledgedOperationTests: XCTestCase {
-    func testTimeoutDecidesExactlyOnceWithoutCancellingSafetyCleanup() async {
+    func testTimeoutDecidesExactlyOnceAndCancelsOwningPreparation() async {
         let decisions = LockedDecisions()
         let operation = SleepAcknowledgedOperation(
             deadlineUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + 20_000_000,
             timeoutDecision: .reject
         ) { decisions.append($0) }
-        let cleanupFinished = LockedFlag()
+        let cancellationObserved = LockedFlag()
         let task = Task {
-            try? await Task.sleep(nanoseconds: 60_000_000)
-            cleanupFinished.setTrue()
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                cancellationObserved.setTrue()
+            }
             operation.finish(.allow)
         }
         operation.setTask(task)
 
         try? await Task.sleep(nanoseconds: 100_000_000)
 
-        XCTAssertTrue(cleanupFinished.value)
-        XCTAssertFalse(task.isCancelled)
+        XCTAssertTrue(cancellationObserved.value)
+        XCTAssertTrue(task.isCancelled)
         XCTAssertEqual(decisions.values, [.reject])
     }
 
@@ -130,17 +146,31 @@ final class SleepAcknowledgedOperationTests: XCTestCase {
         XCTAssertEqual(decisions.values, [.allow])
     }
 
-    func testInvalidationResolvesTheRequestedDecisionExactlyOnce() {
+    func testInvalidationCancelsOwnerAndResolvesTheRequestedDecisionExactlyOnce() async {
         let decisions = LockedDecisions()
         let operation = SleepAcknowledgedOperation(
             deadlineUptimeNanoseconds: UInt64.max,
             timeoutDecision: .allow
         ) { decisions.append($0) }
 
+        let cancellationObserved = LockedFlag()
+        let task = Task {
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                cancellationObserved.setTrue()
+            }
+            operation.finish(.allow)
+        }
+        operation.setTask(task)
         operation.invalidate(resolving: .reject)
         operation.finish(.allow)
 
+        try? await Task.sleep(nanoseconds: 10_000_000)
+
         XCTAssertEqual(decisions.values, [.reject])
+        XCTAssertTrue(task.isCancelled)
+        XCTAssertTrue(cancellationObserved.value)
     }
 }
 
@@ -149,15 +179,23 @@ final class SystemPowerObserverContractTests: XCTestCase {
     func testVetoableIOKitMessageRejectsWhenPreparationFails() async throws {
         let transport = FakeSystemPowerTransport()
         let observer = SystemPowerObserver(transport: transport)
-        try observer.start(willSleep: { _ in false }, didWake: {})
+        var observedRequest: SystemSleepRequest?
+        try observer.start(
+            willSleep: {
+                observedRequest = $0
+                return false
+            },
+            didComplete: { _ in }
+        )
 
         transport.send(messageType: SystemPowerMessage.canSystemSleep, token: 41)
         let resolved = await eventuallyDecision(transport, token: 41)
 
         XCTAssertEqual(resolved, .reject)
-        XCTAssertTrue(observer.requiresChargingDisabledForSleepTransition)
+        XCTAssertEqual(observedRequest?.kind, .vetoableIdleSleep)
+        XCTAssertEqual(observer.activeSleepRequest?.kind, .vetoableIdleSleep)
         transport.send(messageType: SystemPowerMessage.systemWillNotSleep)
-        XCTAssertFalse(observer.requiresChargingDisabledForSleepTransition)
+        XCTAssertNil(observer.activeSleepRequest)
     }
 
     func testForcedSleepAllowsOnlyAfterRunningPreparation() async throws {
@@ -169,7 +207,7 @@ final class SystemPowerObserverContractTests: XCTestCase {
                 preparationRan.setTrue()
                 return false
             },
-            didWake: {}
+            didComplete: { _ in }
         )
 
         transport.send(messageType: SystemPowerMessage.systemWillSleep, token: 42)
@@ -177,9 +215,52 @@ final class SystemPowerObserverContractTests: XCTestCase {
 
         XCTAssertTrue(preparationRan.value)
         XCTAssertEqual(resolved, .allow)
-        XCTAssertTrue(observer.requiresChargingDisabledForSleepTransition)
+        XCTAssertEqual(observer.activeSleepRequest?.kind, .forcedSystemSleep)
         transport.send(messageType: SystemPowerMessage.systemHasPoweredOn)
-        XCTAssertFalse(observer.requiresChargingDisabledForSleepTransition)
+        XCTAssertNil(observer.activeSleepRequest)
+    }
+
+    func testCompletionEventsRemainDistinct() throws {
+        let transport = FakeSystemPowerTransport()
+        let observer = SystemPowerObserver(transport: transport)
+        var completions: [SystemSleepCompletionEvent] = []
+        try observer.start(
+            willSleep: { _ in true },
+            didComplete: { completions.append($0) }
+        )
+
+        transport.send(messageType: SystemPowerMessage.systemWillNotSleep)
+        transport.send(messageType: SystemPowerMessage.systemHasPoweredOn)
+
+        XCTAssertEqual(completions, [.negotiationCancelled, .poweredOn])
+    }
+
+    func testObserverStopCancelsPendingPreparationAndResolvesTokenOnce() async throws {
+        let transport = FakeSystemPowerTransport()
+        let observer = SystemPowerObserver(transport: transport)
+        let cancellationObserved = LockedFlag()
+        try observer.start(
+            willSleep: { _ in
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    cancellationObserved.setTrue()
+                }
+                return true
+            },
+            didComplete: { _ in }
+        )
+
+        transport.send(messageType: SystemPowerMessage.canSystemSleep, token: 44)
+        await Task.yield()
+        observer.stop()
+        try? await Task.sleep(nanoseconds: 10_000_000)
+
+        XCTAssertTrue(cancellationObserved.value)
+        let tokenDecisions = transport.decisions.filter { $0.0 == 44 }
+        XCTAssertEqual(tokenDecisions.count, 1)
+        XCTAssertEqual(tokenDecisions.first?.1, .reject)
+        XCTAssertNil(observer.activeSleepRequest)
     }
 
     private func eventuallyDecision(
@@ -223,10 +304,10 @@ extension ChargeControllerSafetyTests {
             runsSystemPowerObservation: true
         )
         try observer.start(
-            willSleep: { deadline in
-                await controller.prepareForSleep(deadlineUptimeNanoseconds: deadline)
+            willSleep: { request in
+                await controller.prepareForSleep(request: request)
             },
-            didWake: { Task { await controller.reconcileAfterWake() } }
+            didComplete: { _ in Task { await controller.reconcileAfterWake() } }
         )
 
         transport.send(messageType: SystemPowerMessage.canSystemSleep, token: 43)
@@ -238,6 +319,41 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(transport.decisions.first(where: { $0.0 == 43 })?.1, .allow)
         XCTAssertTrue(backend.operations.contains("prepare-system-sleep"))
         XCTAssertTrue(controller.sleepProtectionState.userDescription?.contains("충전을 중지") == true)
+    }
+
+    func testVetoableThenForcedSleepSequenceMutatesHardwareOnlyOnce() async throws {
+        let transport = FakeSystemPowerTransport()
+        let observer = SystemPowerObserver(transport: transport)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .maintaining(limit: 80),
+            systemPowerObserver: observer,
+            runsSystemPowerObservation: true
+        )
+        try observer.start(
+            willSleep: { request in
+                await controller.prepareForSleep(request: request)
+            },
+            didComplete: { event in
+                Task { await controller.handleSystemSleepCompletion(event) }
+            }
+        )
+
+        transport.send(messageType: SystemPowerMessage.canSystemSleep, token: 45)
+        let vetoableResolved = await eventually {
+            transport.decisions.contains { $0.0 == 45 }
+        }
+        XCTAssertTrue(vetoableResolved)
+        transport.send(messageType: SystemPowerMessage.systemWillSleep, token: 46)
+        let forcedResolved = await eventually {
+            transport.decisions.contains { $0.0 == 46 }
+        }
+        XCTAssertTrue(forcedResolved)
+
+        XCTAssertEqual(
+            backend.operations.filter { $0 == "prepare-system-sleep" }.count,
+            1
+        )
+        XCTAssertEqual(observer.activeSleepRequest?.kind, .forcedSystemSleep)
     }
 
     func testPauseStrategyStopsChargingAndWakeRestoresVerifiedMaintain() async {
@@ -275,9 +391,11 @@ extension ChargeControllerSafetyTests {
         let prepared = await controller.prepareForSleep()
 
         XCTAssertFalse(prepared)
-        guard case .failed(_, _, .manualIntervention) = controller.mode else {
+        guard case .failed(_, _, .manualRecovery(let context)) = controller.mode else {
             return XCTFail("unverified charging state must fail closed")
         }
+        XCTAssertEqual(context.origin, .systemSleep(.forcedSystemSleep))
+        XCTAssertEqual(context.target, .restoreMaintain(limit: 80))
         guard case .unavailable = controller.sleepProtectionState else {
             return XCTFail("sleep protection failure must be visible")
         }
@@ -293,9 +411,45 @@ extension ChargeControllerSafetyTests {
         )
 
         XCTAssertFalse(prepared)
-        guard case .failed(_, _, .manualIntervention) = controller.mode else {
+        guard case .failed(_, _, .manualRecovery) = controller.mode else {
             return XCTFail("expired preparation must fail closed")
         }
+    }
+
+    func testForcedSleepFailureWakeRefreshesObservationWithoutAutomaticMaintain() async {
+        let (controller, backend, _, _) = makeSUT(initialMode: .maintaining(limit: 80))
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .enabled,
+                isDischarging: true,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+
+        let prepared = await controller.prepareForSleep(
+            request: makeSleepRequest(kind: .forcedSystemSleep)
+        )
+        XCTAssertFalse(prepared)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        let operationCountBeforeWake = backend.operations.count
+
+        await controller.reconcileAfterWake()
+
+        guard case .failed(_, _, .manualRecovery(let context)) = controller.mode else {
+            return XCTFail("forced sleep failure must remain an explicit recovery state")
+        }
+        XCTAssertEqual(context.target, .restoreMaintain(limit: 80))
+        XCTAssertEqual(context.latestObservedState, .chargingDisabled)
+        XCTAssertFalse(backend.operations.dropFirst(operationCountBeforeWake).contains("maintain:80"))
     }
 
     func testPreparingDischargeForSleepReleasesItsSleepAssertionAfterVerification() async {
@@ -339,16 +493,17 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(backend.operations.contains("disable-charging"))
     }
 
-    func testConcurrentSleepRequestsShareOneSafetyTransition() async {
+    func testDuplicateSleepRequestSharesOneSafetyTransition() async {
         let (controller, backend, _, _) = makeSUT(
             initialMode: .toppingUp(returnLimit: 80)
         )
         backend.setOwnedLongRunningOperation(true)
         backend.setCancelLongRunningDelay(0.05, ignoringCancellation: true)
 
-        async let first = controller.prepareForSleep()
+        let request = makeSleepRequest(kind: .vetoableIdleSleep)
+        async let first = controller.prepareForSleep(request: request)
         try? await Task.sleep(nanoseconds: 10_000_000)
-        async let second = controller.prepareForSleep()
+        async let second = controller.prepareForSleep(request: request)
         let results = await [first, second]
 
         XCTAssertEqual(results, [true, true])
@@ -405,7 +560,7 @@ extension ChargeControllerSafetyTests {
 
     func testForcedSleepPendingDuringShutdownKeepsChargingDisabled() async throws {
         let observer = FakeSystemPowerObserver()
-        observer.requiresChargingDisabledForSleepTransition = true
+        observer.activeSleepRequest = makeSleepRequest(kind: .forcedSystemSleep)
         let previous = RestorableChargeMode.maintaining(limit: 80)
         let (controller, backend, _, _) = makeSUT(
             initialMode: .sleepProtected(previous: previous, charge: 70),
@@ -427,12 +582,12 @@ extension ChargeControllerSafetyTests {
 
         XCTAssertFalse(backend.operations.contains("maintain:80"))
         XCTAssertTrue(backend.operations.contains("disable-charging"))
-        XCTAssertFalse(observer.requiresChargingDisabledForSleepTransition)
+        XCTAssertNil(observer.activeSleepRequest)
     }
 
     func testDisabledSleepStrategyPreservesMaintainDuringIOKitNegotiationShutdown() async throws {
         let observer = FakeSystemPowerObserver()
-        observer.requiresChargingDisabledForSleepTransition = true
+        observer.activeSleepRequest = makeSleepRequest(kind: .forcedSystemSleep)
         let (controller, backend, _, _) = makeSUT(
             initialMode: .maintaining(limit: 80),
             sleepChargingStrategy: .disabled,
@@ -448,7 +603,7 @@ extension ChargeControllerSafetyTests {
 
     func testRejectedDriftIsNotOverwrittenDuringIOKitNegotiationShutdown() async throws {
         let observer = FakeSystemPowerObserver()
-        observer.requiresChargingDisabledForSleepTransition = true
+        observer.activeSleepRequest = makeSleepRequest(kind: .forcedSystemSleep)
         let drift = ChargeMode.externalDrift(
             expected: .maintaining(limit: 80),
             observed: .maintaining(limit: 60)

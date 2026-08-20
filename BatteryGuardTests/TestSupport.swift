@@ -112,38 +112,46 @@ final class FakeLaunchAtLoginService: LaunchAtLoginManaging {
 @MainActor
 final class FakeSystemPowerObserver: SystemPowerObserving {
     var startError: Error?
-    var requiresChargingDisabledForSleepTransition = false
+    var activeSleepRequest: SystemSleepRequest?
     private(set) var didStart = false
     private(set) var didStop = false
-    private var sleepHandler: (@MainActor (UInt64) async -> Bool)?
-    private var wakeHandler: (@MainActor () -> Void)?
+    private var sleepHandler: (@MainActor (SystemSleepRequest) async -> Bool)?
+    private var completionHandler: (@MainActor (SystemSleepCompletionEvent) -> Void)?
 
     func start(
-        willSleep: @escaping @MainActor (UInt64) async -> Bool,
-        didWake: @escaping @MainActor () -> Void
+        willSleep: @escaping @MainActor (SystemSleepRequest) async -> Bool,
+        didComplete: @escaping @MainActor (SystemSleepCompletionEvent) -> Void
     ) throws {
         if let startError { throw startError }
         didStart = true
         sleepHandler = willSleep
-        wakeHandler = didWake
+        completionHandler = didComplete
     }
 
     func stop() {
         didStop = true
         sleepHandler = nil
-        wakeHandler = nil
-        requiresChargingDisabledForSleepTransition = false
+        completionHandler = nil
+        activeSleepRequest = nil
     }
 
     func resolvePendingSleepRequestsForShutdown() {
     }
 
     func sendSleep() async -> Bool {
-        await sleepHandler?(UInt64.max) ?? true
+        let request = SystemSleepRequest(
+            id: UUID(),
+            generation: 1,
+            kind: .forcedSystemSleep,
+            deadlineUptimeNanoseconds: UInt64.max
+        )
+        activeSleepRequest = request
+        return await sleepHandler?(request) ?? true
     }
 
     func sendWake() {
-        wakeHandler?()
+        activeSleepRequest = nil
+        completionHandler?(.poweredOn)
     }
 }
 

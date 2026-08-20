@@ -20,24 +20,29 @@ enum SleepStatusSettlementError: Error, LocalizedError, Equatable, Sendable {
     case cancelled([SleepStatusSettlementObservation])
     case readFailed([SleepStatusSettlementObservation], String)
 
+    var observations: [SleepStatusSettlementObservation] {
+        switch self {
+        case .persistentMismatch(let values),
+             .unsafeWorkerState(let values),
+             .deadlineExceeded(let values),
+             .cancelled(let values),
+             .readFailed(let values, _):
+            return values
+        }
+    }
+
     var errorDescription: String? {
-        let observations: [SleepStatusSettlementObservation]
         let reason: String
         switch self {
-        case .persistentMismatch(let values):
-            observations = values
+        case .persistentMismatch:
             reason = "control state did not settle"
-        case .unsafeWorkerState(let values):
-            observations = values
+        case .unsafeWorkerState:
             reason = "Maintain worker state was ambiguous"
-        case .deadlineExceeded(let values):
-            observations = values
+        case .deadlineExceeded:
             reason = "the end-to-end IOKit acknowledgement deadline expired"
-        case .cancelled(let values):
-            observations = values
+        case .cancelled:
             reason = "verification was cancelled"
-        case .readFailed(let values, let message):
-            observations = values
+        case .readFailed(_, let message):
             reason = "status read failed: \(message)"
         }
         let last = observations.last?.status.diagnosticDescription ?? "no status was observed"

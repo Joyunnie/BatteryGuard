@@ -348,6 +348,32 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertEqual(events.first?.commandID, eventID)
         XCTAssertEqual(events.first?.outcome, .failed)
         XCTAssertEqual(events.first?.message, "legacy failure")
+        XCTAssertNil(events.first?.sleepSettlement)
+    }
+
+    func testSleepSettlementDiagnosticRoundTripsWithoutChangingLegacyContract() throws {
+        let requestID = UUID()
+        let event = DiagnosticEvent(
+            category: .lifecycle,
+            operation: "system sleep completion",
+            sleepSettlement: SleepSettlementDiagnostic(
+                requestID: requestID,
+                requestGeneration: 7,
+                requestKind: .forcedSystemSleep,
+                deadlineUptimeNanoseconds: 123_456,
+                completionEvent: .poweredOn
+            )
+        )
+
+        let decoded = try JSONDecoder().decode(
+            DiagnosticEvent.self,
+            from: JSONEncoder().encode(event)
+        )
+
+        XCTAssertEqual(decoded, event)
+        XCTAssertEqual(decoded.sleepSettlement?.requestID, requestID)
+        XCTAssertEqual(decoded.sleepSettlement?.requestKind, .forcedSystemSleep)
+        XCTAssertEqual(decoded.sleepSettlement?.completionEvent, .poweredOn)
     }
 
     func testOversizedDiagnosticFileIsRejectedWithoutLoadingIt() async throws {

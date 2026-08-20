@@ -64,7 +64,8 @@ enum ChargeShutdownPlanner {
             return .keepChargingDisabled
         case .sleepProtected(let previous, _):
             return .restoreMaintain(previous.maintainLimit)
-        case .failed(_, let message, .manualIntervention):
+        case .failed(_, let message, .manualIntervention),
+             .failed(_, let message, .manualRecovery):
             throw ChargeShutdownPlanningError.manualInterventionRequired(message)
         case .externalDrift(_, let observed):
             switch observed {

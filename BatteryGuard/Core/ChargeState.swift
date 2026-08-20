@@ -236,6 +236,18 @@ enum ChargeMode: Equatable {
         }
     }
 
+    var requiresChargingDisabledForActiveSleepTransition: Bool {
+        switch self {
+        case .sleepProtected, .transitioning(.preparingForSleep):
+            return true
+        case .failed(_, _, .manualRecovery(let context)):
+            if case .systemSleep(.forcedSystemSleep) = context.origin { return true }
+            return false
+        default:
+            return false
+        }
+    }
+
     var diagnosticLabel: String {
         switch self {
         case .idle: return "idle"
@@ -251,18 +263,66 @@ enum ChargeMode: Equatable {
         case .externalDrift(let expected, let observed):
             return "externalDrift(expected:\(expected.diagnosticLabel),observed:\(observed.diagnosticLabel))"
         case .failed(let previous, let message, let disposition):
-            return "failed(previous:\(previous?.diagnosticLabel ?? "none"),disposition:\(disposition.rawValue),message:\(message))"
+            return "failed(previous:\(previous?.diagnosticLabel ?? "none"),disposition:\(disposition.diagnosticLabel),message:\(message))"
         }
     }
 }
 
-enum ChargeFailureDisposition: String, Equatable, Sendable {
+enum ManualRecoveryOrigin: Equatable, Sendable {
+    case systemSleep(SystemSleepRequestKind)
+    case wakeRestore
+    case chargeControl
+
+    var diagnosticLabel: String {
+        switch self {
+        case .systemSleep(let kind): return "systemSleep(\(kind.rawValue))"
+        case .wakeRestore: return "wakeRestore"
+        case .chargeControl: return "chargeControl"
+        }
+    }
+}
+
+enum ManualRecoveryTarget: Equatable, Sendable {
+    case none
+    case restoreMaintain(limit: Int)
+
+    var diagnosticLabel: String {
+        switch self {
+        case .none: return "none"
+        case .restoreMaintain(let limit): return "restoreMaintain(limit:\(limit))"
+        }
+    }
+}
+
+struct ManualRecoveryContext: Equatable, Sendable {
+    let origin: ManualRecoveryOrigin
+    let target: ManualRecoveryTarget
+    let latestObservedState: ObservedChargeMode?
+
+    func updating(observedState: ObservedChargeMode) -> Self {
+        Self(origin: origin, target: target, latestObservedState: observedState)
+    }
+}
+
+enum ChargeFailureDisposition: Equatable, Sendable {
     /// The previous verified tuple may recover through read-only reconciliation.
     case recoverPrevious
     /// Heat Protection owns this failure and may retry its fail-closed transition.
     case heatProtection
     /// Hardware state is uncertain; no automatic recovery policy may reinterpret it.
     case manualIntervention
+    /// Hardware state is uncertain and carries a typed, user-authorized recovery target.
+    case manualRecovery(ManualRecoveryContext)
+
+    var diagnosticLabel: String {
+        switch self {
+        case .recoverPrevious: return "recoverPrevious"
+        case .heatProtection: return "heatProtection"
+        case .manualIntervention: return "manualIntervention"
+        case .manualRecovery(let context):
+            return "manualRecovery(origin:\(context.origin.diagnosticLabel),target:\(context.target.diagnosticLabel),observed:\(context.latestObservedState?.diagnosticLabel ?? "none"))"
+        }
+    }
 }
 
 enum BatteryIssueSource: String, Hashable, Sendable {

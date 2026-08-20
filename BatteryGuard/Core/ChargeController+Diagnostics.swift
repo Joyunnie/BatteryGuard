@@ -83,7 +83,8 @@ extension ChargeController {
         message: String? = nil,
         error: Error? = nil,
         stateBefore: String? = nil,
-        stateAfter: String? = nil
+        stateAfter: String? = nil,
+        sleepSettlement: SleepSettlementDiagnostic? = nil
     ) {
         let event = DiagnosticEvent(
             category: category,
@@ -92,7 +93,8 @@ extension ChargeController {
             outcome: outcome ?? (error == nil ? .succeeded : .failed),
             message: message ?? error?.localizedDescription,
             stateBefore: stateBefore,
-            stateAfter: stateAfter
+            stateAfter: stateAfter,
+            sleepSettlement: sleepSettlement
         )
         diagnostics.submit(event)
     }
