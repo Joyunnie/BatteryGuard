@@ -1,0 +1,21 @@
+trial=8
+scenario=Three or more consecutive forced sleep/wake cycles; verify operation generations and Maintain workers do not accumulate
+execution_reference=05-rapid-lid-cycles.txt and its before/after UI screenshots
+reason_for_shared_execution=Trial 5 generated four real forcedSystemSleep cycles, which is strictly stronger than the three-cycle requirement. Repeating the same hardware mutation sequence solely to create a second evidence file would add battery/process churn without new coverage.
+
+[observed]
+cycle_count=4
+request_generations=6,7,8,9
+request_ids=1BF379B2-AD73-4977-A0AA-97970C5E3394;656A5469-93BD-4E10-B4DE-5228F2A83357;BCCEDCD5-C6DA-4A1A-A13C-12243EE5DE0C;EFA027E3-0837-4932-BF8D-D867014F1784
+wake_worker_pids=82857,84090,85333,87037
+generation_order=strictly increasing
+worker_policy=Each sleep stopped the prior exact worker; each wake created one new verified target-80 worker
+final_exact_worker_count=1
+stale_completion_observed=false
+duplicate_worker_observed=false
+force_discharge_observed=false
+
+[verdict]
+scenario_result=PASS
+safety_result=PASS
+reason=Four consecutive forced generations completed in order with one worker at every stable wake state and one worker at the final state. No operation or process ownership accumulated.

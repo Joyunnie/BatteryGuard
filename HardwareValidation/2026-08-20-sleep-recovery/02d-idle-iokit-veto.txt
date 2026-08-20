@@ -1,0 +1,42 @@
+trial=2-retry-3
+scenario=Cancel one real vetoable idle-sleep request through the documented IOKit IOCancelPowerChange contract and verify BatteryGuard's systemWillNotSleep recovery
+temporary_pmset=displaysleep 1; sleep 1 on AC and battery
+amphetamine_before_trial_session=inactive (saved original: infinite, display sleep prevented, non-trigger)
+test_instrumentation=Temporary ad-hoc-signed /private/tmp helper; registers for system power; cancels only the first kIOMessageCanSystemSleep; always allows kIOMessageSystemWillSleep; exits after kIOMessageSystemWillNotSleep or 180-second timeout; no project file modified
+
+[before]
+wall_clock=2026-08-20T13:49:55+0900
+pmset_battery=72%; AC attached; charging; no estimate; present=true
+battery_status_csv=72,(no,enabled,not discharging,80
+maintain_pid_file=1629
+exact_maintain_worker=1629; ppid=1; start=Thu Aug 20 13:48:11 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+ui_screenshot=02d-idle-iokit-veto-before-ui.png
+
+[after]
+helper_output_1=cancelled_can_system_sleep result=0x0
+helper_output_2=received_system_will_not_sleep
+vetoable_request_timestamp=2026-08-20T04:52:31.339Z
+vetoable_request_id=47C87EA2-6FF3-4B3A-8611-E070C76B69D6
+vetoable_request_generation=17
+sleep_control_operation_id=9B997C52-EE68-4D2A-8EEF-E76A37C7A9D3
+sleep_control_result=charging disabled; discharging false; worker stopped; 1 settlement attempt; 93,057,917 ns
+cancellation_completion_timestamp=2026-08-20T04:52:31.341Z
+cancellation_completion=negotiationCancelled for the same request ID and generation
+cancellation_restore_operation_id=E0219934-4330-4A43-B1A7-628E6D503474
+cancellation_restore_timestamp=2026-08-20T04:52:32.097Z
+cancellation_restore_result=verified Maintain 80; charging enabled; discharging false; exact worker 6700 running
+cancellation_to_verified_restore=approximately 0.76 seconds
+power_log_for_cancelled_request=no Sleep entry; negotiation was cancelled before system sleep
+later_unattended_activity=After the one-shot helper exited, the Mac remained unattended with 1-minute sleep settings and later completed separate idle/clamshell sleep cycles. Those later cycles are not part of the cancellation verdict and all restored safely.
+final_capture_wall_clock=2026-08-20T14:19:54+0900
+final_pmset_battery=77%; AC attached; charging; 1:56 remaining; present=true
+final_battery_status_csv=77,1:56,enabled,not discharging,80
+final_maintain_pid_file=12388
+final_exact_maintain_worker=12388; ppid=1; start=Thu Aug 20 14:06:46 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+final_exact_maintain_worker_count=1
+ui_screenshot=02d-idle-iokit-veto-after-ui.png
+
+[verdict]
+scenario_result=PASS
+safety_result=PASS
+reason=The documented IOKit veto contract produced BatteryGuard's negotiationCancelled completion. BatteryGuard restored verified Maintain 80 in under one second with one exact worker and no force discharge.

@@ -1,0 +1,42 @@
+trial=3-retry
+scenario=AC connected, Maintain 80, close lid for approximately 30 seconds, then open and wake
+pmset=original settings; displaysleep 10; sleep 1
+amphetamine=original infinite session active; closed display mode enabled (lid sleep allowed)
+
+[before]
+wall_clock=2026-08-20T13:19:33+0900
+pmset_battery=70%; AC attached; charging; no estimate; present=true
+iokit=external connected=true; external charge capable=true; charging=true; amperage=746; current capacity=70; max capacity=100
+battery_status_csv=70,(no,enabled,not discharging,80
+maintain_pid_file=74206
+exact_maintain_worker=74206; ppid=1; start=Thu Aug 20 13:18:33 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+ui_screenshot=04-lid-short-retry-before-ui.png
+
+[after]
+wall_clock=2026-08-20T13:23:35+0900
+power_log_sleep=2026-08-20 13:20:20 +0900; Clamshell Sleep; AC; charge 70%
+power_log_darkwake=2026-08-20 13:20:21 +0900; DarkWake; AC; charge 70%; 44 seconds
+power_log_maintenance_sleep=2026-08-20 13:21:05 +0900; Maintenance Sleep; AC; charge 70%; 132 seconds
+power_log_wake=2026-08-20 13:23:17 +0900; user Wake from Deep Idle; lid/UserActivity; AC; charge 70%
+sleep_duration_from_initial_sleep_to_user_wake=2 minutes 57 seconds
+pmset_battery=70%; AC attached; not charging; present=true
+iokit=external connected=true; external charge capable=true; charging=false; amperage=0; current capacity=70; max capacity=100
+battery_status_csv=70,attached;,enabled,not discharging,80
+maintain_pid_file=76888
+exact_maintain_worker=76888; ppid=1; start=Thu Aug 20 13:23:17 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+sleep_request_id=79C0279B-BABD-4131-9F5E-5BCDF22BC804
+sleep_request_generation=5
+sleep_control_operation_id=697EBD11-2D39-4EEF-90A7-5C5C0CB6E2B0
+sleep_control_result=charging disabled; discharging false; Maintain 80 worker stopped
+sleep_control_settlement=1 attempt; 94,305,833 ns
+wake_restore_operation_id=B1AA1D9F-6B43-4A46-A0EF-A0C169BF818A
+wake_restore_result=verified Maintain 80; charging enabled; discharging false; exact worker running
+wake_to_verified_restore=approximately 1.0 second
+ui_screenshot=04-lid-short-retry-after-ui.png
+
+[verdict]
+scenario_result=PASS
+safety_result=PASS
+reason=The Mac completed a sub-10-minute clamshell sleep. BatteryGuard disabled charging before sleep and restored exactly one verified Maintain 80 worker after wake without discharge.

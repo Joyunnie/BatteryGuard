@@ -1,0 +1,38 @@
+trial=2-retry-2
+scenario=Reproducible vetoable idle-sleep cancellation: observe BatteryGuard accepting the request, then inject a bounded user-activity/system-idle assertion
+temporary_pmset=displaysleep 1; sleep 1 on AC and battery
+amphetamine_before_trial_session=inactive (saved original: infinite, display sleep prevented, non-trigger)
+test_instrumentation=Read-only diagnostics watcher at 200 ms cadence; after a new vetoableIdleSleep event, run bounded caffeinate user activity and PreventUserIdleSystemSleep assertions for 10 seconds
+
+[before]
+wall_clock=2026-08-20T13:46:20+0900
+pmset_battery=71%; AC attached; charging; 2:27 remaining; present=true
+battery_status_csv=71,2:27,enabled,not discharging,80
+maintain_pid_file=94464
+exact_maintain_worker=94464; ppid=1; start=Thu Aug 20 13:42:23 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+ui_screenshot=02c-idle-cancel-watcher-before-ui.png
+
+[after]
+wall_clock=2026-08-20T13:48:43+0900
+watcher_detected=2026-08-20T04:48:11.463Z; request 1710019D-ABB2-4A04-A2DB-C19F9C80FBCA; generation 15
+vetoable_sleep_control_operation=AA96D275-9B10-4617-9438-3ED8D24D4599
+vetoable_sleep_control_result=charging disabled; discharging false; worker stopped; 1 settlement attempt; 99,207,084 ns
+following_forced_request=B9305D5C-8E12-435A-ACF8-5526495DDE87; generation 16
+following_forced_result=read-only verification; charging disabled; discharging false; worker stopped; 1 settlement attempt; 98,764,917 ns
+completion_event=poweredOn at 2026-08-20T04:48:11.598Z
+power_log_transitions=none; the system did not enter a logged Sleep state
+wake_restore_operation=3D48643E-D54C-4F36-A7BC-CC334D364C29
+wake_restore_result=verified Maintain 80; charging enabled; discharging false; worker 1629
+final_pmset_battery=72%; AC attached; charging; no estimate; present=true
+final_battery_status_csv=72,(no,enabled,not discharging,80
+final_maintain_pid_file=1629
+final_exact_maintain_worker=1629; ppid=1; start=Thu Aug 20 13:48:11 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+final_exact_maintain_worker_count=1
+ui_screenshot=02c-idle-cancel-watcher-after-ui.png
+
+[verdict]
+scenario_result=PARTIAL
+safety_result=PASS
+reason=The watcher reliably caught the vetoable request and prevented a logged sleep, but macOS had already emitted the following forced request and completed it as poweredOn. BatteryGuard did not receive systemWillNotSleep, so that exact cancellation callback remains unverified.
+important_observation=The vetoable -> forced duplicate sequence again performed only one mutation; the forced generation used read-only verification and the immediate poweredOn completion restored exactly one worker.
+retry_required=true

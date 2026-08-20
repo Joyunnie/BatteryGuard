@@ -1,0 +1,35 @@
+trial=6
+scenario=Start on AC in verified Maintain 80, enter clamshell sleep, disconnect AC while asleep, then wake on battery
+
+[before]
+wall_clock=2026-08-20T13:33:18+0900
+pmset_battery=71%; AC attached; charging; no estimate; present=true
+battery_status_csv=71,(no,enabled,not discharging,80
+maintain_pid_file=87037
+exact_maintain_worker=87037; ppid=1; start=Thu Aug 20 13:32:15 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+ui_screenshot=06-disconnect-ac-asleep-before-ui.png
+
+[after]
+wall_clock=2026-08-20T13:38:25+0900
+observed_sequence=Initial AC clamshell sleep at 13:33:33; additional lid wake/sleep transitions during handling; sleep logged on battery at 13:37:20; final user wake on battery at 13:38:00
+power_log_ac_sleep=2026-08-20 13:33:33 +0900; Clamshell Sleep; AC; charge 71%
+power_log_battery_sleep=2026-08-20 13:37:20 +0900; Clamshell Sleep; Battery; charge 71%; 40 seconds
+power_log_battery_wake=2026-08-20 13:38:00 +0900; user Wake from Deep Idle; Battery; charge 71%
+observed_forced_generations=10,11,12
+generation_10=request 34AE217C-494C-4B3C-B35F-AE7E44B308FD; sleep control F4F9C10B-825B-4898-90D2-9C245DFFD103; wake restore C676EA84-4F21-4C98-B335-36FDCD7BD530; worker 88988
+generation_11=request C097D003-F3B8-4C22-8AE8-B8A0574B57FD; sleep control F55C9B59-4AFF-46A5-8BA2-C2B4AC3ED567; wake restore C2D01C29-F1DB-47A3-A0D8-5D8A5836BC6B; worker 90563
+generation_12=request DC99207F-891D-44E4-8F76-B786F477F986; sleep control FF33B76F-B43A-477A-A47C-378542FD77E1; wake restore BBC70B60-3C53-454B-B3D1-3689FDDF9E98; worker 91430
+final_pmset_battery=71%; Battery Power; macOS reports normal battery discharge; no estimate; present=true
+final_iokit=external connected=false; external charge capable=false; charging=false; amperage=0; current capacity=71; max capacity=100
+final_battery_status_csv=71,(no,enabled,not discharging,80
+final_maintain_pid_file=91430
+final_exact_maintain_worker=91430; ppid=1; start=Thu Aug 20 13:38:01 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+final_exact_maintain_worker_count=1
+ui_screenshot=06-disconnect-ac-asleep-after-ui.png
+
+[verdict]
+scenario_result=PASS
+safety_result=PASS
+reason=The system transitioned from AC sleep to battery sleep while the lid was closed. Every observed forced generation disabled charging and stopped the worker before sleep, and wake restored exactly one Maintain 80 worker without CLI force discharge.
+terminology_note=pmset "discharging" means the Mac is consuming battery power. CLI "not discharging" means forced discharge is disabled; these are expected together on battery power.

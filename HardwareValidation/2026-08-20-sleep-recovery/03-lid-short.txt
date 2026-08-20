@@ -1,0 +1,44 @@
+trial=3
+scenario_intended=AC connected, Maintain 80, close lid for approximately 30 seconds, then open and wake
+scenario_observed=AC connected, Maintain 80, clamshell sleep for 12 minutes 31 seconds; reclassified as the >=10-minute lid-sleep scenario
+pmset=original settings restored; displaysleep 10; sleep 1
+amphetamine=session active; infinite original session; display sleep prevented; closed display mode enabled (lid sleep allowed)
+
+[before]
+wall_clock=2026-08-20T13:04:31+0900
+pmset_battery=70%; AC attached; charging; 3:56 remaining; present=true
+iokit=external connected=true; external charge capable=true; charging=true; amperage=666; current capacity=70; max capacity=100
+battery_status_csv=70,3:56,enabled,not discharging,80
+maintain_pid_file=68116
+exact_maintain_worker=68116; ppid=1; start=Thu Aug 20 13:01:26 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+ui_screenshot=03-lid-short-before-ui.png
+
+[after]
+wall_clock=2026-08-20T13:18:58+0900
+power_log_sleep=2026-08-20 13:06:05 +0900; Clamshell Sleep; AC; charge 70%
+power_log_darkwake=2026-08-20 13:06:06 +0900; DarkWake; AC; charge 70%; 45 seconds
+power_log_maintenance_sleep=2026-08-20 13:06:51 +0900; Maintenance Sleep; AC; charge 70%; 701 seconds
+power_log_wake=2026-08-20 13:18:32 +0900; user Wake from Deep Idle; lid/UserActivity; AC; charge 70%
+sleep_duration_from_initial_sleep_to_user_wake=12 minutes 27 seconds
+pmset_battery=70%; AC attached; not charging; present=true
+iokit=external connected=true; external charge capable=true; charging=false; amperage=0; current capacity=70; max capacity=100
+battery_status_csv=70,attached;,enabled,not discharging,80
+maintain_pid_file=74206
+exact_maintain_worker=74206; ppid=1; start=Thu Aug 20 13:18:33 2026; argv=/bin/bash /usr/local/co.palokaj.battery/battery maintain_synchronous 80
+exact_maintain_worker_count=1
+sleep_request_id=80C5DAB9-4302-49E3-A625-0F65F672B0B5
+sleep_request_generation=4
+sleep_control_operation_id=B74DAA04-4A89-4662-A494-FFA5B79D041B
+sleep_control_result=charging disabled; discharging false; Maintain 80 worker stopped
+sleep_control_settlement=1 attempt; 95,198,625 ns
+wake_restore_operation_id=0CD99D68-A4D4-4054-9664-A50B8E745D11
+wake_restore_result=verified Maintain 80; charging enabled; discharging false; exact worker running
+wake_to_verified_restore=approximately 1.1 seconds
+ui_screenshot=03-lid-short-after-ui.png
+
+[verdict]
+intended_short_scenario_result=NOT_EXECUTED_AS_INTENDED
+reclassified_long_lid_scenario_result=PASS
+safety_result=PASS
+reason=The lid remained closed for more than 10 minutes. Charge stayed at 70%; BatteryGuard disabled charging before sleep and restored one exact Maintain 80 worker immediately after wake.
+short_lid_retry_required=true
