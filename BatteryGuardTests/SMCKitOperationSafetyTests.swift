@@ -3,6 +3,26 @@ import Foundation
 import Darwin
 @testable import BatteryGuard
 
+private final class SettlementTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nowStorage: UInt64
+    private var sleepDeadlinesStorage: [UInt64] = []
+
+    init(now: UInt64 = 0) {
+        nowStorage = now
+    }
+
+    var now: UInt64 { lock.withLock { nowStorage } }
+    var sleepDeadlines: [UInt64] { lock.withLock { sleepDeadlinesStorage } }
+
+    func sleep(until deadline: UInt64) async throws {
+        try Task.checkCancellation()
+        lock.withLock {
+            sleepDeadlinesStorage.append(deadline)
+            nowStorage = deadline
+        }
+    }
+}
 
 final class SMCKitOperationSafetyTests: XCTestCase {
     private func eventually(
@@ -1245,5 +1265,266 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             .split(whereSeparator: \Character.isNewline)
             .map(String.init)
         XCTAssertEqual(writes, ["04", "05"])
+    }
+
+    func testSleepPreparationSettlesTransientDischargeWithoutRepeatingMutation() async throws {
+        let diagnosticDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-diagnostics-\(UUID().uuidString)", isDirectory: true)
+        let statusCount = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-status-count-\(UUID().uuidString)")
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-command-log-\(UUID().uuidString)")
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "status_csv" ]]; then
+              count=$(cat \(shellQuote(statusCount.path)) 2>/dev/null || echo 0)
+              count=$((count + 1))
+              echo "$count" > \(shellQuote(statusCount.path))
+              if [[ "$count" -eq 1 ]]; then
+                echo "80,00:10,disabled,discharging,80"
+              else
+                echo "80,00:10,disabled,not discharging,80"
+              fi
+            fi
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: fixture)
+            try? FileManager.default.removeItem(at: statusCount)
+            try? FileManager.default.removeItem(at: commandLog)
+            try? FileManager.default.removeItem(at: diagnosticDirectory)
+        }
+        let clock = SettlementTestClock(now: 1_000_000_000)
+        let diagnostics = DiagnosticLog(
+            fileURL: diagnosticDirectory.appendingPathComponent("Diagnostics.json"),
+            capacity: 20
+        )
+        let backend = SMCKit(
+            runner: BatteryCommandRunner(diagnostics: diagnostics),
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            sleepStatusSettlementBackoffs: [100_000_000],
+            monotonicNow: { clock.now },
+            monotonicSleepUntil: { try await clock.sleep(until: $0) },
+            diagnostics: diagnostics
+        )
+
+        let status = try await backend.prepareForSystemSleep(
+            deadlineUptimeNanoseconds: 11_000_000_000
+        )
+
+        XCTAssertTrue(status.isVerifiedChargingDisabled)
+        XCTAssertEqual(clock.sleepDeadlines, [1_100_000_000])
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands.filter { $0 == "charging off" }.count, 1)
+        XCTAssertEqual(commands.filter { $0 == "status_csv" }.count, 2)
+        await diagnostics.flushPendingEvents()
+        let events = await diagnostics.recentEvents().filter {
+            $0.operation.contains("status_csv") || $0.operation == "settle sleep charging status"
+        }
+        XCTAssertEqual(events.filter { $0.operation.contains("status_csv") }.count, 2)
+        XCTAssertEqual(events.filter { $0.operation == "settle sleep charging status" }.count, 1)
+        XCTAssertEqual(Set(events.compactMap(\.operationID)).count, 1)
+        XCTAssertTrue(events.allSatisfy { $0.operationID != nil })
+    }
+
+    func testSleepPreparationPersistentMismatchIsBoundedAndTyped() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-persistent-log-\(UUID().uuidString)")
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,discharging,80"
+            fi
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: fixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let clock = SettlementTestClock(now: 2_000_000_000)
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            sleepStatusSettlementBackoffs: [100_000_000, 250_000_000],
+            monotonicNow: { clock.now },
+            monotonicSleepUntil: { try await clock.sleep(until: $0) }
+        )
+
+        do {
+            _ = try await backend.prepareForSystemSleep(
+                deadlineUptimeNanoseconds: 12_000_000_000
+            )
+            XCTFail("Expected persistent mismatch")
+        } catch let error as SleepStatusSettlementError {
+            guard case .persistentMismatch(let observations) = error else {
+                return XCTFail("Expected persistent mismatch, received \(error)")
+            }
+            XCTAssertEqual(observations.count, 3)
+            XCTAssertEqual(observations.map(\.attempt), [1, 2, 3])
+        }
+
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands.filter { $0 == "charging off" }.count, 1)
+        XCTAssertEqual(commands.filter { $0 == "status_csv" }.count, 3)
+    }
+
+    func testSleepVerifierRejectsAmbiguousWorkerWithoutRetryOrMutation() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-ambiguous-log-\(UUID().uuidString)")
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: fixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let clock = SettlementTestClock(now: 3_000_000_000)
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .unknown },
+            executableTrustPolicy: .testFixture,
+            sleepStatusSettlementBackoffs: [100_000_000, 250_000_000],
+            monotonicNow: { clock.now },
+            monotonicSleepUntil: { try await clock.sleep(until: $0) }
+        )
+
+        do {
+            _ = try await backend.verifyChargingDisabledForSystemSleep(
+                deadlineUptimeNanoseconds: 13_000_000_000
+            )
+            XCTFail("Expected unsafe worker state")
+        } catch let error as SleepStatusSettlementError {
+            guard case .unsafeWorkerState(let observations) = error else {
+                return XCTFail("Expected unsafe worker state, received \(error)")
+            }
+            XCTAssertEqual(observations.count, 1)
+        }
+
+        XCTAssertTrue(clock.sleepDeadlines.isEmpty)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["status_csv"])
+    }
+
+    func testSleepVerifierDoesNotStartAnotherReadPastAbsoluteDeadline() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-deadline-log-\(UUID().uuidString)")
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,discharging,80"
+            fi
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: fixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let clock = SettlementTestClock(now: 5_000_000_000)
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            sleepStatusSettlementBackoffs: [1_000_000_000],
+            monotonicNow: { clock.now },
+            monotonicSleepUntil: { try await clock.sleep(until: $0) }
+        )
+
+        do {
+            _ = try await backend.verifyChargingDisabledForSystemSleep(
+                deadlineUptimeNanoseconds: 5_500_000_000
+            )
+            XCTFail("Expected deadline failure")
+        } catch let error as SleepStatusSettlementError {
+            guard case .deadlineExceeded(let observations) = error else {
+                return XCTFail("Expected deadline failure, received \(error)")
+            }
+            XCTAssertEqual(observations.count, 1)
+        }
+
+        XCTAssertTrue(clock.sleepDeadlines.isEmpty)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands.filter { $0 == "charging off" }.count, 0)
+        XCTAssertEqual(commands.filter { $0 == "status_csv" }.count, 1)
+    }
+
+    func testSleepVerifierCancellationStopsBeforeAnotherStatusRead() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-cancel-log-\(UUID().uuidString)")
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "status_csv" ]]; then
+              echo "80,00:10,disabled,discharging,80"
+            fi
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: fixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            sleepStatusSettlementBackoffs: [1_000_000_000],
+            monotonicSleepUntil: { _ in
+                try await Task.sleep(nanoseconds: 10_000_000_000)
+            }
+        )
+
+        let task = Task {
+            try await backend.verifyChargingDisabledForSystemSleep(
+                deadlineUptimeNanoseconds: nil
+            )
+        }
+        let firstReadFinished = await eventually {
+            (try? String(contentsOf: commandLog, encoding: .utf8)
+                .split(whereSeparator: \Character.isNewline)
+                .filter { $0 == "status_csv" }.count) == 1
+        }
+        XCTAssertTrue(firstReadFinished)
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch let error as SleepStatusSettlementError {
+            guard case .cancelled(let observations) = error else {
+                return XCTFail("Expected cancellation, received \(error)")
+            }
+            XCTAssertEqual(observations.count, 1)
+        } catch {
+            XCTFail("Expected typed cancellation, received \(error)")
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands, ["status_csv"])
     }
 }

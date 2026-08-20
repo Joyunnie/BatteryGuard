@@ -202,6 +202,9 @@ protocol ChargeControlBackend: AnyObject, Sendable {
     func prepareForSystemSleep(
         deadlineUptimeNanoseconds: UInt64?
     ) async throws -> BatteryControlStatus
+    func verifyChargingDisabledForSystemSleep(
+        deadlineUptimeNanoseconds: UInt64?
+    ) async throws -> BatteryControlStatus
     func startDischarge(to level: Int) async throws
     func startTopUp(to level: Int) async throws
     func isLongRunningOperationActive() async -> Bool
@@ -226,6 +229,8 @@ protocol ChargeBackend: ChargeControlBackend, BatteryTemperatureBackend, MagSafe
 
 actor SMCKit: ChargeBackend {
     typealias MaintainWorkerProbe = @Sendable (_ pidFilePath: String, _ batteryPath: String) async throws -> MaintainWorkerStatus
+    typealias MonotonicNow = @Sendable () -> UInt64
+    typealias MonotonicSleepUntil = @Sendable (_ deadlineUptimeNanoseconds: UInt64) async throws -> Void
 
     enum ExecutableTrustPolicy: Sendable, Equatable {
         case production
@@ -254,6 +259,9 @@ actor SMCKit: ChargeBackend {
     let smcTemperatureReadTimeout: TimeInterval
     let smcTemperatureTotalBudget: TimeInterval
     let temperatureReaderRetryDelay: TimeInterval
+    let sleepStatusSettlementBackoffs: [UInt64]
+    let monotonicNow: MonotonicNow
+    let monotonicSleepUntil: MonotonicSleepUntil
     let statusCommandTimeout: TimeInterval = 2
     private let longRunningVerificationTimeoutNanoseconds: UInt64 = 3_000_000_000
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
@@ -333,6 +341,19 @@ actor SMCKit: ChargeBackend {
         smcTemperatureReadTimeout: TimeInterval = defaultSMCTemperatureReadTimeout,
         smcTemperatureTotalBudget: TimeInterval = defaultSMCTemperatureTotalBudget,
         temperatureReaderRetryDelay: TimeInterval = defaultTemperatureReaderRetryDelay,
+        sleepStatusSettlementBackoffs: [UInt64] = [
+            100_000_000,
+            250_000_000,
+            500_000_000,
+            1_000_000_000
+        ],
+        monotonicNow: @escaping MonotonicNow = { DispatchTime.now().uptimeNanoseconds },
+        monotonicSleepUntil: @escaping MonotonicSleepUntil = { deadline in
+            let now = DispatchTime.now().uptimeNanoseconds
+            if deadline > now {
+                try await Task.sleep(nanoseconds: deadline - now)
+            }
+        },
         diagnostics: DiagnosticLog = .disabled
     ) {
         self.runner = runner
@@ -356,6 +377,9 @@ actor SMCKit: ChargeBackend {
         self.smcTemperatureReadTimeout = max(0.05, smcTemperatureReadTimeout)
         self.smcTemperatureTotalBudget = max(0.05, smcTemperatureTotalBudget)
         self.temperatureReaderRetryDelay = max(0, temperatureReaderRetryDelay)
+        self.sleepStatusSettlementBackoffs = sleepStatusSettlementBackoffs
+        self.monotonicNow = monotonicNow
+        self.monotonicSleepUntil = monotonicSleepUntil
         self.diagnostics = diagnostics
     }
 
@@ -464,16 +488,9 @@ actor SMCKit: ChargeBackend {
                         deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
                     )
                 )
-                let status = try await readControlStatusUnlocked(
+                let status = try await verifyChargingDisabledUntilSettled(
                     deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
                 )
-                guard status.isVerifiedChargingDisabled else {
-                    throw BatteryError.commandFailed(
-                        "prepare battery for system sleep",
-                        -1,
-                        "status_csv did not confirm fully disabled control: \(status.diagnosticDescription)"
-                    )
-                }
                 await recordVerifiedOperation(
                     "prepare battery for system sleep",
                     before: before,
@@ -656,7 +673,7 @@ actor SMCKit: ChargeBackend {
 
     func ensureSleepPreparationDeadline(_ deadlineUptimeNanoseconds: UInt64?) throws {
         guard let deadlineUptimeNanoseconds else { return }
-        guard DispatchTime.now().uptimeNanoseconds < deadlineUptimeNanoseconds else {
+        guard monotonicNow() < deadlineUptimeNanoseconds else {
             throw BatteryError.commandFailed(
                 "prepare battery for system sleep",
                 -1,
@@ -670,7 +687,7 @@ actor SMCKit: ChargeBackend {
         deadlineUptimeNanoseconds: UInt64?
     ) throws -> TimeInterval {
         guard let deadlineUptimeNanoseconds else { return maximum }
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = monotonicNow()
         guard deadlineUptimeNanoseconds > now else {
             try ensureSleepPreparationDeadline(deadlineUptimeNanoseconds)
             return maximum
