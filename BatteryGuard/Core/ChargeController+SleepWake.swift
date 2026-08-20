@@ -66,7 +66,9 @@ extension ChargeController {
                 sleepChargingOffWasRequested = false
             }
             do {
-                let status = try await backend.readControlStatus()
+                let status = try await backend.verifyChargingDisabledForSystemSleep(
+                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                )
                 guard status.isVerifiedChargingDisabled else {
                     throw BatteryError.commandFailed(
                         "verify sleep protection",

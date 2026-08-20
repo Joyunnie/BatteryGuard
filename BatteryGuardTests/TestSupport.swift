@@ -507,6 +507,17 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         return try await readControlStatus()
     }
 
+    func verifyChargingDisabledForSystemSleep(
+        deadlineUptimeNanoseconds: UInt64?
+    ) async throws -> BatteryControlStatus {
+        try record("verify-system-sleep")
+        if let deadlineUptimeNanoseconds,
+           DispatchTime.now().uptimeNanoseconds >= deadlineUptimeNanoseconds {
+            throw BatteryError.commandFailed("verify system sleep", -1, "deadline exceeded")
+        }
+        return try await readControlStatus()
+    }
+
     func requestCancellation() async throws {
         try record("request-cancellation")
         setLongRunning(false)
