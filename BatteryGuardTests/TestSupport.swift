@@ -208,6 +208,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var ignoresTemperatureReadCancellation = false
     private var ledDelayByRawValue: [UInt8: TimeInterval] = [:]
     private var controlStatusOverride: BatteryControlStatus?
+    private var controlStatusSequence: [BatteryControlStatus] = []
     private var controlStatusDelayValue: TimeInterval = 0
     private var longRunningProbeDelayValue: TimeInterval = 0
     private var cancelLongRunningDelayValue: TimeInterval = 0
@@ -315,6 +316,10 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         lock.withLock { controlStatusOverride = status }
     }
 
+    func enqueueControlStatuses(_ statuses: [BatteryControlStatus]) {
+        lock.withLock { controlStatusSequence.append(contentsOf: statuses) }
+    }
+
     func setControlStatusDelay(_ delay: TimeInterval) {
         lock.withLock { controlStatusDelayValue = delay }
     }
@@ -356,6 +361,9 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
             try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
         return lock.withLock {
+            if !controlStatusSequence.isEmpty {
+                return controlStatusSequence.removeFirst()
+            }
             if let controlStatusOverride { return controlStatusOverride }
             return BatteryControlStatus(
                 charging: chargingStatus,

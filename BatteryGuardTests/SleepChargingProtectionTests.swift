@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import BatteryGuard
 
@@ -450,6 +451,312 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(context.target, .restoreMaintain(limit: 80))
         XCTAssertEqual(context.latestObservedState, .chargingDisabled)
         XCTAssertFalse(backend.operations.dropFirst(operationCountBeforeWake).contains("maintain:80"))
+    }
+
+    func testManualSleepRecoveryRefreshIsReadOnlyAndKeepsTypedTarget() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-manual-recovery-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let diagnostics = DiagnosticLog(
+            fileURL: directory.appendingPathComponent("Diagnostics.json"),
+            capacity: 10
+        )
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: nil
+        )
+        let failed = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "sleep settlement failed",
+            disposition: .manualRecovery(context)
+        )
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: failed,
+            diagnostics: diagnostics
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+
+        await controller.refreshManualRecoveryStatus()
+
+        guard case .failed(_, _, .manualRecovery(let updated)) = controller.mode else {
+            return XCTFail("read-only refresh must keep the typed failure")
+        }
+        XCTAssertEqual(updated.latestObservedState, .chargingDisabled)
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+        let event = await diagnostics.recentEvents().last
+        XCTAssertEqual(event?.operation, "manual recovery status refreshed")
+        XCTAssertEqual(event?.outcome, .drifted)
+        XCTAssertNotNil(event?.operationID)
+    }
+
+    func testExplicitManualSleepRecoveryRestoresVerifiedMaintain() async {
+        let batteryInfo = makeBatteryInfo(charge: 70, isPluggedIn: true, temperature: 30)
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: .chargingDisabled
+        )
+        let (controller, backend, _, _) = makeSUT(
+            batteryInfoOnRead: batteryInfo,
+            initialMode: .failed(
+                previous: .maintaining(limit: 80),
+                message: "sleep settlement failed",
+                disposition: .manualRecovery(context)
+            )
+        )
+        backend.enqueueControlStatuses([
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            ),
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        ])
+        backend.enqueueTemperatures([30, 30])
+
+        controller.restoreMaintainFromManualRecovery()
+        let restored = await eventually { controller.mode == .maintaining(limit: 80) }
+        XCTAssertTrue(restored)
+
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+        XCTAssertEqual(backend.operations.filter { $0 == "read-temperature" }.count, 2)
+    }
+
+    func testExplicitManualSleepRecoveryFailsClosedBeforeMutationWhenPreflightIsUnsafe() async {
+        let batteryInfo = makeBatteryInfo(charge: 70, isPluggedIn: true, temperature: 30)
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: .chargingDisabled
+        )
+        let (controller, backend, _, _) = makeSUT(
+            batteryInfoOnRead: batteryInfo,
+            initialMode: .failed(
+                previous: .maintaining(limit: 80),
+                message: "sleep settlement failed",
+                disposition: .manualRecovery(context)
+            )
+        )
+        backend.setOwnedLongRunningOperation(true)
+
+        controller.restoreMaintainFromManualRecovery()
+        let completed = await eventually { !controller.isCommandPending }
+        XCTAssertTrue(completed)
+
+        guard case .failed(_, _, .manualRecovery) = controller.mode else {
+            return XCTFail("unsafe preflight must remain manually recoverable")
+        }
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
+    func testExplicitManualSleepRecoveryDoesNotMutateWhenIndependentTemperatureFails() async {
+        let batteryInfo = makeBatteryInfo(charge: 70, isPluggedIn: true, temperature: 30)
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: .chargingDisabled
+        )
+        let (controller, backend, _, _) = makeSUT(
+            batteryInfoOnRead: batteryInfo,
+            initialMode: .failed(
+                previous: .maintaining(limit: 80),
+                message: "sleep settlement failed",
+                disposition: .manualRecovery(context)
+            )
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        backend.enqueueTemperatures([nil])
+
+        controller.restoreMaintainFromManualRecovery()
+        let completed = await eventually { !controller.isCommandPending }
+        XCTAssertTrue(completed)
+
+        guard case .failed(_, _, .manualRecovery) = controller.mode else {
+            return XCTFail("sensor failure must keep explicit recovery state")
+        }
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertFalse(controller.safetyTemperatureSnapshot.failures.isEmpty)
+    }
+
+    func testExplicitManualSleepRecoveryReblocksAfterUnsafeTemperaturePostflight() async {
+        let batteryInfo = makeBatteryInfo(charge: 70, isPluggedIn: true, temperature: 30)
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: .chargingDisabled
+        )
+        let (controller, backend, _, _) = makeSUT(
+            batteryInfoOnRead: batteryInfo,
+            initialMode: .failed(
+                previous: .maintaining(limit: 80),
+                message: "sleep settlement failed",
+                disposition: .manualRecovery(context)
+            )
+        )
+        backend.enqueueControlStatuses([
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            ),
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            ),
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        ])
+        backend.enqueueTemperatures([30, 45])
+
+        controller.restoreMaintainFromManualRecovery()
+        let completed = await eventually { !controller.isCommandPending }
+        XCTAssertTrue(completed)
+
+        guard case .failed(_, _, .manualRecovery) = controller.mode else {
+            return XCTFail("unsafe postflight must remain manually recoverable")
+        }
+        XCTAssertTrue(backend.operations.contains("maintain:80"))
+        XCTAssertTrue(backend.operations.contains("disable-charging"))
+    }
+
+    func testExplicitManualSleepRecoveryBlocksDuplicateClicks() async {
+        let batteryInfo = makeBatteryInfo(charge: 70, isPluggedIn: true, temperature: 30)
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: .chargingDisabled
+        )
+        let (controller, backend, _, _) = makeSUT(
+            batteryInfoOnRead: batteryInfo,
+            initialMode: .failed(
+                previous: .maintaining(limit: 80),
+                message: "sleep settlement failed",
+                disposition: .manualRecovery(context)
+            )
+        )
+        backend.maintainDelay = 0.1
+        backend.enqueueControlStatuses([
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        ])
+        backend.enqueueTemperatures([30, 30])
+
+        controller.restoreMaintainFromManualRecovery()
+        controller.restoreMaintainFromManualRecovery()
+
+        let restored = await eventually { controller.mode == .maintaining(limit: 80) }
+        XCTAssertTrue(restored)
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+    }
+
+    func testExplicitManualSleepRecoveryKeepsLatestObservedDriftAfterPostflight() async {
+        let batteryInfo = makeBatteryInfo(charge: 70, isPluggedIn: true, temperature: 30)
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: .chargingDisabled
+        )
+        let (controller, backend, _, _) = makeSUT(
+            batteryInfoOnRead: batteryInfo,
+            initialMode: .failed(
+                previous: .maintaining(limit: 80),
+                message: "sleep settlement failed",
+                disposition: .manualRecovery(context)
+            )
+        )
+        backend.enqueueControlStatuses([
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            ),
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            ),
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        ])
+        backend.enqueueTemperatures([30, 30])
+
+        controller.restoreMaintainFromManualRecovery()
+        let completed = await eventually { !controller.isCommandPending }
+        XCTAssertTrue(completed)
+
+        guard case .failed(_, _, .manualRecovery(let updated)) = controller.mode else {
+            return XCTFail("postflight drift must remain explicit recovery")
+        }
+        XCTAssertEqual(updated.latestObservedState, .chargingDisabled)
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+    }
+
+    func testManualRecoveryPresentationKeepsPhysicalPowerAndControlFailureDistinct() {
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: .chargingDisabled
+        )
+        let (controller, _, monitor, _) = makeSUT(
+            isPluggedIn: true,
+            initialMode: .failed(
+                previous: .maintaining(limit: 80),
+                message: "sleep settlement failed",
+                disposition: .manualRecovery(context)
+            )
+        )
+
+        XCTAssertEqual(controller.primaryChargeStatusTitle, "전원 연결됨 · 충전 제어 복구 필요")
+        XCTAssertEqual(controller.manualRecoveryObservedDescription, "최근 확인 상태: 충전 비활성")
+        XCTAssertTrue(controller.explicitMaintainRecoveryAvailability.isAllowed)
+
+        monitor.batteryInfo = makeBatteryInfo(
+            charge: 70,
+            isPluggedIn: false,
+            temperature: 30
+        )
+        XCTAssertEqual(controller.primaryChargeStatusTitle, "충전 제어 복구 필요")
+        XCTAssertFalse(controller.explicitMaintainRecoveryAvailability.isAllowed)
     }
 
     func testPreparingDischargeForSleepReleasesItsSleepAssertionAfterVerification() async {
