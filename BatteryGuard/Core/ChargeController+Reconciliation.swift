@@ -136,6 +136,255 @@ extension ChargeController {
         }
     }
 
+    func refreshManualRecoveryStatus() async {
+        guard case .failed(
+            let previous,
+            let message,
+            .manualRecovery(let context)
+        ) = mode,
+              manualRecoveryRefreshAvailability.isAllowed else {
+            await retryManualInterventionRecovery()
+            return
+        }
+
+        let failedMode = mode
+        let diagnosticOperationID = UUID()
+        isReconcilingExternalState = true
+        defer { isReconcilingExternalState = false }
+        var observed = context.latestObservedState
+        var statusDescription: String?
+        do {
+            let status = try await DiagnosticContext.$operationID.withValue(
+                diagnosticOperationID
+            ) {
+                try await backend.readControlStatus()
+            }
+            guard mode == failedMode, !isShuttingDown else { return }
+            statusDescription = status.diagnosticDescription
+            observed = ChargeReconciliationPolicy.observedMode(from: status)
+            if case .restoreMaintain(let limit) = context.target,
+               status.isVerifiedMaintain(level: limit) {
+                if settings.heatProtectionEnabled {
+                    let temperature = await DiagnosticContext.$operationID.withValue(
+                        diagnosticOperationID
+                    ) {
+                        await self.readFreshSafetyTemperature()
+                    }
+                    guard mode == failedMode, !isShuttingDown else { return }
+                    guard temperature.permitsAutomaticCharging(
+                        upTo: settings.heatProtectionThreshold
+                    ) else {
+                        throw BatteryError.unsupported(
+                            "독립 온도 센서를 새로 확인할 수 없거나 안전 온도를 벗어났습니다."
+                        )
+                    }
+                }
+                monitor.allowSleep()
+                mode = .maintaining(limit: limit)
+                commandError = nil
+                driftError = nil
+                refreshDisplayedError()
+                await diagnostics.record(
+                    DiagnosticEvent(
+                        category: .control,
+                        operationID: diagnosticOperationID,
+                        operation: "manual recovery status refreshed",
+                        outcome: .succeeded,
+                        message: statusDescription,
+                        stateBefore: failedMode.diagnosticLabel,
+                        stateAfter: mode.diagnosticLabel
+                    )
+                )
+                return
+            }
+        } catch {
+            guard mode == failedMode, !isShuttingDown else { return }
+            let failureObservation = observed
+                ?? .unavailable(error.localizedDescription)
+            mode = .failed(
+                previous: previous,
+                message: message,
+                disposition: .manualRecovery(
+                    context.updating(observedState: failureObservation)
+                )
+            )
+            commandError = "수동 복구 상태를 확인하지 못했습니다: \(error.localizedDescription)"
+            refreshDisplayedError()
+            await diagnostics.record(
+                DiagnosticEvent(
+                    category: .control,
+                    operationID: diagnosticOperationID,
+                    operation: "manual recovery status refreshed",
+                    outcome: .failed,
+                    message: error.localizedDescription,
+                    stateBefore: failedMode.diagnosticLabel,
+                    stateAfter: mode.diagnosticLabel
+                )
+            )
+            return
+        }
+
+        guard mode == failedMode, !isShuttingDown else { return }
+        mode = .failed(
+            previous: previous,
+            message: message,
+            disposition: .manualRecovery(
+                context.updating(
+                    observedState: observed ?? .unavailable("실제 충전 상태를 확인할 수 없습니다.")
+                )
+            )
+        )
+        commandError = "현재 상태는 아직 명시적인 Maintain 복구가 필요합니다."
+        refreshDisplayedError()
+        await diagnostics.record(
+            DiagnosticEvent(
+                category: .control,
+                operationID: diagnosticOperationID,
+                operation: "manual recovery status refreshed",
+                outcome: .drifted,
+                message: statusDescription,
+                stateBefore: failedMode.diagnosticLabel,
+                stateAfter: mode.diagnosticLabel
+            )
+        )
+    }
+
+    func restoreMaintainFromManualRecovery() {
+        guard explicitMaintainRecoveryAvailability.isAllowed,
+              case .failed(let previous, _, .manualRecovery(let context)) = mode,
+              case .restoreMaintain(let requestedLimit) = context.target else {
+            if let denial = explicitMaintainRecoveryAvailability.denialReason {
+                commandError = denial
+                refreshDisplayedError()
+            }
+            return
+        }
+
+        let limit = UserSettings.validatedChargeLimit(requestedLimit)
+        let backend = self.backend
+        let monitor = self.monitor
+        let settings = self.settings
+        _ = runBattery(
+            operation: "restore Maintain \(limit)%",
+            transition: .recoveringMaintain(limit: limit),
+            failureDisposition: .manualRecovery(context),
+            work: { [weak self] in
+                guard let self else { throw CancellationError() }
+                var latestObservedState = context.latestObservedState
+                do {
+                    guard settings.batteryControlEnabled else {
+                        throw BatteryError.unsupported("BatteryGuard 충전 제어 소유권이 없습니다.")
+                    }
+                    guard let freshInfo = monitor.readBatteryInfo(), freshInfo.isPluggedIn else {
+                        throw BatteryError.unsupported("전원 연결 상태를 새로 확인할 수 없습니다.")
+                    }
+                    monitor.batteryInfo = freshInfo
+                    guard !(await backend.isLongRunningOperationActive()) else {
+                        throw BatteryError.unsupported("BatteryGuard 장기 충전 작업이 아직 실행 중입니다.")
+                    }
+                    let preflightStatus = try await backend.readControlStatus()
+                    latestObservedState = ChargeReconciliationPolicy.observedMode(
+                        from: preflightStatus
+                    )
+                    guard preflightStatus.isDischarging == false else {
+                        throw BatteryError.unsupported("방전 상태가 완전히 해제되지 않았습니다.")
+                    }
+                    guard preflightStatus.maintainWorker.isStopped
+                            || preflightStatus.isVerifiedMaintain(level: limit) else {
+                        throw BatteryError.unsupported("Maintain worker 상태가 안전한 복구 조건과 일치하지 않습니다.")
+                    }
+                    let preflightTemperature = await self.readFreshSafetyTemperature(
+                        fallbackInfo: freshInfo
+                    )
+                    try Task.checkCancellation()
+                    guard preflightTemperature.permitsAutomaticCharging(
+                        upTo: settings.heatProtectionThreshold
+                    ) else {
+                        throw BatteryError.unsupported(
+                            "독립 온도 센서 preflight가 완전하고 안전하지 않습니다."
+                        )
+                    }
+
+                    if !preflightStatus.isVerifiedMaintain(level: limit) {
+                        try await backend.applyMaintain(level: limit)
+                    }
+                    try Task.checkCancellation()
+                    let verifiedStatus = try await backend.readControlStatus()
+                    latestObservedState = ChargeReconciliationPolicy.observedMode(
+                        from: verifiedStatus
+                    )
+                    guard verifiedStatus.isVerifiedMaintain(level: limit) else {
+                        throw BatteryError.commandFailed(
+                            "restore Maintain",
+                            -1,
+                            "complete Maintain \(limit)% tuple was not verified"
+                        )
+                    }
+
+                    let postflightTemperature = await self.readFreshSafetyTemperature()
+                    try Task.checkCancellation()
+                    let postflightIsSafe = postflightTemperature.permitsAutomaticCharging(
+                        upTo: settings.heatProtectionThreshold
+                    ) && monitor.batteryInfo?.isPluggedIn == true
+                    guard postflightIsSafe else {
+                        try await backend.disableCharging()
+                        let blockedStatus = try await backend.readControlStatus()
+                        latestObservedState = ChargeReconciliationPolicy.observedMode(
+                            from: blockedStatus
+                        )
+                        guard blockedStatus.isVerifiedChargingDisabled else {
+                            throw BatteryError.commandFailed(
+                                "restore Maintain safety rollback",
+                                -1,
+                                "unsafe postflight and charging-off rollback was not verified"
+                            )
+                        }
+                        throw BatteryError.unsupported(
+                            "복구 후 온도 또는 전원 postflight가 안전하지 않아 충전을 다시 중지했습니다."
+                        )
+                    }
+                    let finalStatus = try await backend.readControlStatus()
+                    latestObservedState = ChargeReconciliationPolicy.observedMode(
+                        from: finalStatus
+                    )
+                    guard finalStatus.isVerifiedMaintain(level: limit) else {
+                        throw BatteryError.commandFailed(
+                            "restore Maintain final verification",
+                            -1,
+                            "complete Maintain \(limit)% tuple changed during postflight"
+                        )
+                    }
+                } catch {
+                    if error is CancellationError { throw error }
+                    throw ManualMaintainRecoveryError(
+                        underlying: error,
+                        latestObservedState: latestObservedState
+                    )
+                }
+            },
+            onSuccess: { [weak self] in
+                guard let self else { return }
+                self.monitor.allowSleep()
+                self.mode = .maintaining(limit: limit)
+            },
+            onFailure: { [weak self] error in
+                guard let self else { return }
+                let updatedContext: ManualRecoveryContext
+                if let recoveryError = error as? ManualMaintainRecoveryError,
+                   let observed = recoveryError.latestObservedState {
+                    updatedContext = context.updating(observedState: observed)
+                } else {
+                    updatedContext = context
+                }
+                self.mode = .failed(
+                    previous: previous,
+                    message: error.localizedDescription,
+                    disposition: .manualRecovery(updatedContext)
+                )
+            }
+        )
+    }
+
     func retryManualInterventionRecovery() async {
         guard case .failed(let previous?, _, .manualIntervention) = mode,
               !isShuttingDown,

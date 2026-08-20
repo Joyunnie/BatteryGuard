@@ -51,7 +51,7 @@ struct MenuBarView: View {
                 }
 
                 PastelStatusPill(
-                    title: controller.currentState.rawValue,
+                    title: controller.primaryChargeStatusTitle,
                     tint: controller.currentState.presentationTint,
                     icon: controller.currentState.presentationIcon
                 )
@@ -233,8 +233,9 @@ struct ChargeRecoveryStatusView: View {
     private struct RecoveryContent {
         let title: String
         let detail: String?
-        let buttonTitle: String
-        let isManualIntervention: Bool
+        let observed: String?
+        let isManualRecovery: Bool
+        let maintainRecoveryLimit: Int?
     }
 
     private var recoveryContent: RecoveryContent? {
@@ -242,16 +243,24 @@ struct ChargeRecoveryStatusView: View {
             return RecoveryContent(
                 title: drift,
                 detail: controller.externalDriftRecoveryDescription,
-                buttonTitle: "다시 확인",
-                isManualIntervention: false
+                observed: nil,
+                isManualRecovery: false,
+                maintainRecoveryLimit: nil
             )
         }
         if let recovery = controller.manualInterventionRecoveryDescription {
+            let recoveryLimit: Int?
+            if case .restoreMaintain(let limit) = controller.manualRecoveryContext?.target {
+                recoveryLimit = limit
+            } else {
+                recoveryLimit = nil
+            }
             return RecoveryContent(
-                title: "수동 복구 확인이 필요합니다",
+                title: controller.manualRecoveryStatusTitle ?? "충전 제어 복구 필요",
                 detail: recovery,
-                buttonTitle: "안전 상태 다시 확인",
-                isManualIntervention: true
+                observed: controller.manualRecoveryObservedDescription,
+                isManualRecovery: true,
+                maintainRecoveryLimit: recoveryLimit
             )
         }
         return nil
@@ -267,20 +276,19 @@ struct ChargeRecoveryStatusView: View {
                         .font(.system(size: compact ? 9.5 : 11))
                         .foregroundStyle(.secondary)
                 }
-                Button {
-                    Task {
-                        if content.isManualIntervention {
-                            await controller.retryManualInterventionRecovery()
-                        } else {
-                            await controller.reconcileExternalState()
-                        }
-                    }
-                } label: {
-                    Label(content.buttonTitle, systemImage: "arrow.clockwise")
+                if let observed = content.observed {
+                    Text(observed)
+                        .font(.system(size: compact ? 9.5 : 11, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(controller.isReconcilingExternalState || controller.isCommandPending)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        recoveryButtons(content)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        recoveryButtons(content)
+                    }
+                }
             }
             .foregroundStyle(BatteryGuardPalette.warning)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -293,6 +301,51 @@ struct ChargeRecoveryStatusView: View {
                 RoundedRectangle(cornerRadius: compact ? 12 : 16, style: .continuous)
                     .stroke(BatteryGuardPalette.warning.opacity(0.20), lineWidth: 1)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func recoveryButtons(_ content: RecoveryContent) -> some View {
+        Button {
+            Task {
+                if content.isManualRecovery {
+                    await controller.refreshManualRecoveryStatus()
+                } else {
+                    await controller.reconcileExternalState()
+                }
+            }
+        } label: {
+            Label("상태 다시 확인", systemImage: "arrow.clockwise")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(
+            content.isManualRecovery
+                ? !controller.manualRecoveryRefreshAvailability.isAllowed
+                : controller.isReconcilingExternalState || controller.isCommandPending
+        )
+        .help(
+            content.isManualRecovery
+                ? controller.manualRecoveryRefreshAvailability.helpText(
+                    fallback: "실제 CLI 상태만 다시 읽습니다."
+                )
+                : "외부 CLI 상태만 다시 읽습니다."
+        )
+
+        if let limit = content.maintainRecoveryLimit {
+            Button {
+                controller.restoreMaintainFromManualRecovery()
+            } label: {
+                Label("Maintain \(limit)% 복원", systemImage: "bolt.badge.checkmark")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(!controller.explicitMaintainRecoveryAvailability.isAllowed)
+            .help(
+                controller.explicitMaintainRecoveryAvailability.helpText(
+                    fallback: "검증 후 Maintain \(limit)%를 명시적으로 복원합니다."
+                )
+            )
         }
     }
 }

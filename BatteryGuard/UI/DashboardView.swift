@@ -106,7 +106,7 @@ struct DashboardView: View {
             Spacer()
 
             PastelStatusPill(
-                title: controller.currentState.rawValue,
+                title: controller.primaryChargeStatusTitle,
                 tint: controller.currentState.presentationTint,
                 icon: controller.currentState.presentationIcon
             )

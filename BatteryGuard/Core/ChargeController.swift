@@ -64,6 +64,15 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    struct ManualMaintainRecoveryError: LocalizedError {
+        let underlying: Error
+        let latestObservedState: ObservedChargeMode?
+
+        var errorDescription: String? {
+            underlying.localizedDescription
+        }
+    }
+
     // Swift requires module access for state shared by extensions in separate
     // files. These remain ChargeController implementation details; callers
     // should use the intent methods and read-only presentation properties.
@@ -226,6 +235,47 @@ final class ChargeController: ObservableObject {
         case .recoverPrevious, .heatProtection:
             return nil
         }
+    }
+    var manualRecoveryContext: ManualRecoveryContext? {
+        guard case .failed(_, _, .manualRecovery(let context)) = mode else { return nil }
+        return context
+    }
+    var manualRecoveryStatusTitle: String? {
+        guard manualInterventionRecoveryDescription != nil else { return nil }
+        return monitor.batteryInfo?.isPluggedIn == true
+            ? "전원 연결됨 · 충전 제어 복구 필요"
+            : "충전 제어 복구 필요"
+    }
+    var primaryChargeStatusTitle: String {
+        manualRecoveryStatusTitle ?? currentState.rawValue
+    }
+    var manualRecoveryObservedDescription: String? {
+        manualRecoveryContext?.latestObservedState.map {
+            "최근 확인 상태: \($0.userDescription)"
+        }
+    }
+    var manualRecoveryRefreshAvailability: ChargeActionAvailability {
+        guard manualInterventionRecoveryDescription != nil else {
+            return .denied("다시 확인할 수동 복구 상태가 없습니다.")
+        }
+        if !isReady { return .denied("초기화가 완료되지 않았습니다.") }
+        if isCommandPending { return .denied("다른 배터리 작업이 진행 중입니다.") }
+        return .allowed
+    }
+    var explicitMaintainRecoveryAvailability: ChargeActionAvailability {
+        guard case .failed(_, _, .manualRecovery(let context)) = mode,
+              case .restoreMaintain = context.target else {
+            return .denied("명시적으로 실행할 Maintain 복구 대상이 없습니다.")
+        }
+        if !isReady { return .denied("초기화가 완료되지 않았습니다.") }
+        if isCommandPending { return .denied("다른 배터리 작업이 진행 중입니다.") }
+        if !settings.batteryControlEnabled {
+            return .denied("BatteryGuard가 충전 제어를 소유하고 있지 않습니다.")
+        }
+        if monitor.batteryInfo?.isPluggedIn != true {
+            return .denied("전원을 연결한 뒤 Maintain 복구를 실행하세요.")
+        }
+        return .allowed
     }
     var isHeatProtectionBlockingControls: Bool {
         switch mode {
