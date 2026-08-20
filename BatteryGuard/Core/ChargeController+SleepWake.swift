@@ -11,12 +11,14 @@ extension ChargeController {
     func setupSleepWakeObservers() throws {
         guard runsSystemPowerObservation else { return }
         try systemPowerObserver.start(
-            willSleep: { [weak self] deadline in
+            willSleep: { [weak self] request in
                 guard let self else { return true }
-                return await self.prepareForSleep(deadlineUptimeNanoseconds: deadline)
+                return await self.prepareForSleep(request: request)
             },
-            didWake: { [weak self] in
-                Task { @MainActor in await self?.reconcileAfterWake() }
+            didComplete: { [weak self] event in
+                Task { @MainActor in
+                    await self?.handleSystemSleepCompletion(event)
+                }
             }
         )
         if let wakeFallbackObserver {
@@ -39,9 +41,26 @@ extension ChargeController {
 
     @discardableResult
     func prepareForSleep(deadlineUptimeNanoseconds: UInt64? = nil) async -> Bool {
-        if let sleepPreparationTask {
+        let request = SystemSleepRequest(
+            id: UUID(),
+            generation: sleepPreparationGeneration &+ 1,
+            kind: .forcedSystemSleep,
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds ?? UInt64.max
+        )
+        return await prepareForSleep(request: request)
+    }
+
+    @discardableResult
+    func prepareForSleep(request: SystemSleepRequest) async -> Bool {
+        if activeControllerSleepRequest?.id == request.id,
+           let sleepPreparationTask {
             return await sleepPreparationTask.value
         }
+        sleepPreparationTask?.cancel()
+        sleepPreparationTask = nil
+        sleepPreparationGeneration &+= 1
+        let controllerGeneration = sleepPreparationGeneration
+        activeControllerSleepRequest = request
         cancelPendingChargeLimit(reason: "Sleep으로 대기 중인 Charge Limit 변경이 취소됐습니다.")
         cancelSMCTemperatureSample(clearCache: true)
         guard !isShuttingDown else { return false }
@@ -54,21 +73,27 @@ extension ChargeController {
         )
         switch action {
         case .allowWithoutMutation:
-            sleepChargingOffWasRequested = false
+            recordSleepLifecycleDiagnostic(
+                request: request,
+                operation: "sleep preparation skipped",
+                outcome: .succeeded
+            )
             return true
         case .rejectWithoutMutation:
-            sleepChargingOffWasRequested = false
+            recordSleepLifecycleDiagnostic(
+                request: request,
+                operation: "sleep preparation rejected",
+                outcome: .failed
+            )
             return false
         case .verifyAlreadyProtected:
-            if case .sleepProtected = mode {
-                sleepChargingOffWasRequested = true
-            } else {
-                sleepChargingOffWasRequested = false
-            }
             do {
                 let status = try await backend.verifyChargingDisabledForSystemSleep(
-                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                    deadlineUptimeNanoseconds: request.deadlineUptimeNanoseconds
                 )
+                guard sleepPreparationGeneration == controllerGeneration,
+                      activeControllerSleepRequest?.id == request.id,
+                      !Task.isCancelled else { return false }
                 guard status.isVerifiedChargingDisabled else {
                     throw BatteryError.commandFailed(
                         "verify sleep protection",
@@ -76,27 +101,42 @@ extension ChargeController {
                         "charging was no longer strictly disabled"
                     )
                 }
+                recordSleepLifecycleDiagnostic(
+                    request: request,
+                    operation: "sleep protection verified",
+                    outcome: .succeeded
+                )
                 return true
             } catch {
+                guard sleepPreparationGeneration == controllerGeneration,
+                      activeControllerSleepRequest?.id == request.id else { return false }
                 sleepProtectionState = .unavailable(error.localizedDescription)
                 commandError = "잠자기 충전 보호 검증 실패: \(error.localizedDescription)"
                 refreshDisplayedError()
+                recordSleepLifecycleDiagnostic(
+                    request: request,
+                    operation: "sleep protection verification",
+                    outcome: error is CancellationError ? .cancelled : .failed,
+                    error: error
+                )
                 return false
             }
         case .stopCharging(let previous):
-            sleepChargingOffWasRequested = true
-            sleepPreparationGeneration &+= 1
-            let generation = sleepPreparationGeneration
             let task = Task { [weak self] in
                 guard let self else { return false }
                 return await self.stopChargingForSleep(
                     previous: previous,
-                    deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
+                    request: request,
+                    controllerGeneration: controllerGeneration
                 )
             }
             sleepPreparationTask = task
-            let prepared = await task.value
-            if sleepPreparationGeneration == generation {
+            let prepared = await withTaskCancellationHandler {
+                await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            if sleepPreparationGeneration == controllerGeneration {
                 sleepPreparationTask = nil
             }
             return prepared
@@ -105,7 +145,8 @@ extension ChargeController {
 
     private func stopChargingForSleep(
         previous: RestorableChargeMode,
-        deadlineUptimeNanoseconds: UInt64?
+        request: SystemSleepRequest,
+        controllerGeneration: UInt64
     ) async -> Bool {
         activeOperationTask?.cancel()
         activeOperationTask = nil
@@ -115,15 +156,20 @@ extension ChargeController {
         mode = .transitioning(.preparingForSleep(previous: previous))
 
         do {
-            guard activeOperationID == operationID, !Task.isCancelled else { return false }
-            let backendDeadline = deadlineUptimeNanoseconds.map { deadline in
-                let acknowledgementReserve: UInt64 = 2_000_000_000
-                return deadline > acknowledgementReserve ? deadline - acknowledgementReserve : 0
-            }
+            guard activeOperationID == operationID,
+                  sleepPreparationGeneration == controllerGeneration,
+                  activeControllerSleepRequest?.id == request.id,
+                  !Task.isCancelled else { return false }
+            let acknowledgementReserve: UInt64 = 2_000_000_000
+            let backendDeadline = request.deadlineUptimeNanoseconds > acknowledgementReserve
+                ? request.deadlineUptimeNanoseconds - acknowledgementReserve
+                : 0
             let status = try await backend.prepareForSystemSleep(
                 deadlineUptimeNanoseconds: backendDeadline
             )
-            guard activeOperationID == operationID else { return false }
+            guard activeOperationID == operationID,
+                  sleepPreparationGeneration == controllerGeneration,
+                  activeControllerSleepRequest?.id == request.id else { return false }
             try Task.checkCancellation()
             guard status.isVerifiedChargingDisabled else {
                 throw BatteryError.commandFailed(
@@ -132,7 +178,9 @@ extension ChargeController {
                     "charging was not strictly verified disabled before sleep"
                 )
             }
-            guard activeOperationID == operationID else { return false }
+            guard activeOperationID == operationID,
+                  sleepPreparationGeneration == controllerGeneration,
+                  activeControllerSleepRequest?.id == request.id else { return false }
             if case .discharging = previous {
                 monitor.allowSleep()
             }
@@ -143,14 +191,31 @@ extension ChargeController {
             commandError = nil
             refreshDisplayedError()
             updateLED()
+            recordSleepLifecycleDiagnostic(
+                request: request,
+                operation: "prepare for sleep",
+                outcome: .succeeded
+            )
             return true
         } catch {
-            guard activeOperationID == operationID else { return false }
+            guard activeOperationID == operationID,
+                  sleepPreparationGeneration == controllerGeneration,
+                  activeControllerSleepRequest?.id == request.id else { return false }
             activeOperationID = nil
+            if error is CancellationError { return false }
+            let observed = (error as? SleepStatusSettlementError)?
+                .observations.last
+                .map { ChargeReconciliationPolicy.observedMode(from: $0.status) }
             mode = .failed(
                 previous: previous,
                 message: error.localizedDescription,
-                disposition: .manualIntervention
+                disposition: .manualRecovery(
+                    ManualRecoveryContext(
+                        origin: .systemSleep(request.kind),
+                        target: .restoreMaintain(limit: previous.maintainLimit),
+                        latestObservedState: observed
+                    )
+                )
             )
             sleepProtectionState = .unavailable(error.localizedDescription)
             commandError = "잠자기 전 충전 중지 실패: \(error.localizedDescription)"
@@ -159,7 +224,8 @@ extension ChargeController {
                 category: .lifecycle,
                 operation: "prepare for sleep",
                 error: error,
-                stateAfter: mode.diagnosticLabel
+                stateAfter: mode.diagnosticLabel,
+                sleepSettlement: request.sleepSettlementDiagnostic
             )
             return false
         }
@@ -168,12 +234,24 @@ extension ChargeController {
     func reconcileAfterWake() async {
         guard !isShuttingDown else { return }
         await finishSleepPreparationIfNeeded()
-        sleepChargingOffWasRequested = false
+        activeControllerSleepRequest = nil
         if let activeOperationTask {
             await activeOperationTask.value
         }
         guard !isShuttingDown else { return }
         cancelSMCTemperatureSample(clearCache: true)
+        if case .failed(
+            let previous,
+            let message,
+            .manualRecovery(let context)
+        ) = mode {
+            await refreshManualSleepFailureObservation(
+                previous: previous,
+                message: message,
+                context: context
+            )
+            return
+        }
         var shouldRestoreSleepProtection = false
         let sleepExpectation: ReconciledChargeExpectation?
         if case .externalDrift(.sleepProtected(let previous), _) = mode {
@@ -265,6 +343,67 @@ extension ChargeController {
         }
     }
 
+    func handleSystemSleepCompletion(_ event: SystemSleepCompletionEvent) async {
+        guard !isShuttingDown else { return }
+        let completedRequest = activeControllerSleepRequest
+        sleepPreparationGeneration &+= 1
+        sleepPreparationTask?.cancel()
+        sleepPreparationTask = nil
+        activeControllerSleepRequest = nil
+        if let completedRequest {
+            recordDiagnostic(
+                category: .lifecycle,
+                operation: "system sleep completion",
+                outcome: .succeeded,
+                sleepSettlement: completedRequest.sleepSettlementDiagnostic(
+                    completionEvent: event
+                )
+            )
+        }
+        switch event {
+        case .negotiationCancelled, .poweredOn:
+            await reconcileAfterWake()
+        }
+    }
+
+    private func refreshManualSleepFailureObservation(
+        previous: RestorableChargeMode?,
+        message: String,
+        context: ManualRecoveryContext
+    ) async {
+        let failedMode = mode
+        let observed: ObservedChargeMode
+        do {
+            let status = try await backend.readControlStatus()
+            observed = ChargeReconciliationPolicy.observedMode(from: status)
+        } catch {
+            observed = .unavailable(error.localizedDescription)
+        }
+        guard !isShuttingDown, mode == failedMode else { return }
+        mode = .failed(
+            previous: previous,
+            message: message,
+            disposition: .manualRecovery(context.updating(observedState: observed))
+        )
+        refreshDisplayedError()
+    }
+
+    private func recordSleepLifecycleDiagnostic(
+        request: SystemSleepRequest,
+        operation: String,
+        outcome: DiagnosticOutcome,
+        error: Error? = nil
+    ) {
+        recordDiagnostic(
+            category: .lifecycle,
+            operation: operation,
+            outcome: outcome,
+            error: error,
+            stateAfter: mode.diagnosticLabel,
+            sleepSettlement: request.sleepSettlementDiagnostic
+        )
+    }
+
     private func reconcileExternalDriftAfterWake(
         expectation: ReconciledChargeExpectation
     ) async {
@@ -345,4 +484,22 @@ extension ChargeController {
         }
     }
 
+}
+
+private extension SystemSleepRequest {
+    var sleepSettlementDiagnostic: SleepSettlementDiagnostic {
+        sleepSettlementDiagnostic(completionEvent: nil)
+    }
+
+    func sleepSettlementDiagnostic(
+        completionEvent: SystemSleepCompletionEvent?
+    ) -> SleepSettlementDiagnostic {
+        SleepSettlementDiagnostic(
+            requestID: id,
+            requestGeneration: generation,
+            requestKind: kind,
+            deadlineUptimeNanoseconds: deadlineUptimeNanoseconds,
+            completionEvent: completionEvent
+        )
+    }
 }

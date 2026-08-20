@@ -211,9 +211,21 @@ final class ChargeController: ObservableObject {
         return "Terminal에서 실제 상태를 BatteryGuard 기대 상태(\(expected.userDescription))로 복원한 뒤 다시 확인하세요."
     }
     var manualInterventionRecoveryDescription: String? {
-        guard case .failed(let previous?, _, .manualIntervention) = mode else { return nil }
-        let expected = manualRecoveryExpectation(for: previous)
-        return "실제 CLI 상태를 \(expected.userDescription)(으)로 복원한 뒤 안전 상태를 다시 확인하세요."
+        guard case .failed(let previous?, _, let disposition) = mode else { return nil }
+        switch disposition {
+        case .manualIntervention:
+            let expected = manualRecoveryExpectation(for: previous)
+            return "실제 CLI 상태를 \(expected.userDescription)(으)로 복원한 뒤 안전 상태를 다시 확인하세요."
+        case .manualRecovery(let context):
+            switch context.target {
+            case .none:
+                return "실제 CLI 상태를 안전하게 복원한 뒤 다시 확인하세요."
+            case .restoreMaintain(let limit):
+                return "현재 상태를 다시 확인한 뒤 Maintain \(limit)% 복구를 명시적으로 실행하세요."
+            }
+        case .recoverPrevious, .heatProtection:
+            return nil
+        }
     }
     var isHeatProtectionBlockingControls: Bool {
         switch mode {
@@ -282,7 +294,7 @@ final class ChargeController: ObservableObject {
     var systemPowerObservationError: String?
     var sleepPreparationGeneration: UInt64 = 0
     var sleepPreparationTask: Task<Bool, Never>?
-    var sleepChargingOffWasRequested = false
+    var activeControllerSleepRequest: SystemSleepRequest?
     var magSafeLED: MagSafeLEDController
 
     init(

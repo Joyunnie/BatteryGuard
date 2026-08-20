@@ -26,6 +26,14 @@ enum DiagnosticContext {
     @TaskLocal static var operationID: UUID?
 }
 
+struct SleepSettlementDiagnostic: Codable, Equatable, Sendable {
+    let requestID: UUID
+    let requestGeneration: UInt64
+    let requestKind: SystemSleepRequestKind
+    let deadlineUptimeNanoseconds: UInt64
+    let completionEvent: SystemSleepCompletionEvent?
+}
+
 struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
     let id: UUID
     let timestamp: Date
@@ -38,6 +46,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
     let message: String?
     let stateBefore: String?
     let stateAfter: String?
+    let sleepSettlement: SleepSettlementDiagnostic?
 
     init(
         id: UUID = UUID(),
@@ -50,7 +59,8 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         outcome: DiagnosticOutcome = .succeeded,
         message: String? = nil,
         stateBefore: String? = nil,
-        stateAfter: String? = nil
+        stateAfter: String? = nil,
+        sleepSettlement: SleepSettlementDiagnostic? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -63,6 +73,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         self.message = message.map(Self.summarize)
         self.stateBefore = stateBefore
         self.stateAfter = stateAfter
+        self.sleepSettlement = sleepSettlement
     }
 
     private static func summarize(_ value: String) -> String {
@@ -82,6 +93,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         case message
         case stateBefore
         case stateAfter
+        case sleepSettlement
         case termination
         case stderrSummary
     }
@@ -95,6 +107,10 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode)
         stateBefore = try container.decodeIfPresent(String.self, forKey: .stateBefore)
         stateAfter = try container.decodeIfPresent(String.self, forKey: .stateAfter)
+        sleepSettlement = try container.decodeIfPresent(
+            SleepSettlementDiagnostic.self,
+            forKey: .sleepSettlement
+        )
 
         let operationIDText = try container.decodeIfPresent(String.self, forKey: .operationID)
         operationID = operationIDText.flatMap(UUID.init(uuidString:))
@@ -124,6 +140,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(message, forKey: .message)
         try container.encodeIfPresent(stateBefore, forKey: .stateBefore)
         try container.encodeIfPresent(stateAfter, forKey: .stateAfter)
+        try container.encodeIfPresent(sleepSettlement, forKey: .sleepSettlement)
     }
 
     private static func outcome(fromLegacyValue value: String?) -> DiagnosticOutcome {
