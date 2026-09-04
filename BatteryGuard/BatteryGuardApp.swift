@@ -244,17 +244,6 @@ struct MenuBarLabel: View {
     }
 
     private var iconName: String {
-        switch controller.currentState {
-        case .charging, .topUp:
-            return "bolt.fill"
-        case .chargingPaused:
-            return "battery.75percent"
-        case .discharging:
-            return "arrow.down.circle.fill"
-        case .notConnected:
-            return "battery.25percent"
-        case .unknown:
-            return "questionmark.circle"
-        }
+        controller.batteryPresentation.menuBarIcon
     }
 }

@@ -249,6 +249,15 @@ final class ChargeController: ObservableObject {
     var primaryChargeStatusTitle: String {
         manualRecoveryStatusTitle ?? currentState.rawValue
     }
+    var batteryPresentation: BatteryPresentation {
+        BatteryPresentation.make(
+            info: monitor.batteryInfo,
+            connection: monitor.powerConnectionObservation,
+            mode: mode,
+            chargeState: currentState,
+            requiresManualRecovery: manualInterventionRecoveryDescription != nil
+        )
+    }
     var manualRecoveryObservedDescription: String? {
         manualRecoveryContext?.latestObservedState.map {
             "최근 확인 상태: \($0.userDescription)"

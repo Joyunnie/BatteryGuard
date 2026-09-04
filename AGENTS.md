@@ -19,9 +19,13 @@
 UI intent -> @MainActor ChargeController -> BatteryCommandRunner actor -> battery CLI
                   ^                              |
 IOKit readings ---+                    result + verified CLI status
+
+Battery flags + IOPS source -> PowerConnectionObservation -> BatteryPresentation -> UI
 ```
 
 - IOKit is the source of truth for measurements; verified CLI status is the source of truth for charge control; UI state is derived from both.
+- Keep physical connection, providing source, charging activity, and verified control policy distinct. Missing battery flags are unknown, IOPS AC confirms connection, and IOPS battery must not erase explicit attached-charger evidence.
+- Derive every menu/Dashboard/menu-bar status from the pure `BatteryPresentation` projection. Presentation-only state must stay outside controller measurements, hardware commands, and LED intent.
 - Represent charge control with one mutually exclusive state enum, not independent booleans.
 - Represent failure recovery with a typed disposition. Only a Heat Protection failure may enter the automatic Heat retry/restore path; an uncertain hardware failure requires explicit recovery.
 - Use operation IDs/generations so stale async completions cannot overwrite newer intent.
@@ -61,6 +65,7 @@ IOKit readings ---+                    result + verified CLI status
 - Do not dump raw IOKit dictionaries or battery identifiers to stdout or diagnostics.
 - Reject nonfinite or physically implausible sensor values before any safety decision.
 - Keep battery measurement delivery notification-driven, suppress identical snapshots, and use only a low-frequency watchdog for missed notifications.
+- Keep power-edge settlement generation-owned and bounded. Coalesce in-flight refresh requests into one same-generation trailing read; reverse edges, stop, and restart must invalidate stale work.
 - While Heat Protection owns battery control, sample the independent SMC source at most every five seconds regardless of the IOKit reading. Prefer the bundled read-only helper that reads `TB0T`, `TB1T`, and `TB2T` through one AppleSMC connection; accept it only with complete key coverage. If unavailable, try the validated external batch contract and then the bounded per-key compatibility fallback. Use one monotonic deadline across the entire helper/batch/per-key pipeline, and keep any partial-key result degraded even when its maximum remains usable for blocking. Surface total sensor failure and never allow one sensor to slow another.
 - Restore from Heat Protection only after fresh preflight and postflight readings succeed without an independent-sensor failure; a surviving value from the other sensor is not sufficient to resume charging.
 - Batch only routine diagnostics. Safety, failure, control, and lifecycle events must flush immediately, including any pending routine context.

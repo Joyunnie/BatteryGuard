@@ -106,9 +106,9 @@ struct DashboardView: View {
             Spacer()
 
             PastelStatusPill(
-                title: controller.primaryChargeStatusTitle,
-                tint: controller.currentState.presentationTint,
-                icon: controller.currentState.presentationIcon
+                title: controller.batteryPresentation.statusTitle,
+                tint: controller.batteryPresentation.tone.presentationTint,
+                icon: controller.batteryPresentation.statusIcon
             )
         }
     }
@@ -127,21 +127,21 @@ struct DashboardView: View {
     }
 
     private var batteryHero: some View {
-        PastelCard(tint: controller.currentState.presentationTint, fillsAvailableHeight: true) {
+        PastelCard(tint: controller.batteryPresentation.tone.presentationTint, fillsAvailableHeight: true) {
             if let info = monitor.batteryInfo {
                 HStack(spacing: 26) {
                     BatteryChargeRing(
                         charge: info.currentCharge,
-                        tint: controller.currentState.presentationTint
+                        tint: controller.batteryPresentation.tone.presentationTint
                     )
                     .frame(width: 150, height: 150)
 
                     VStack(alignment: .leading, spacing: 16) {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text(statusEyebrow(for: info))
+                            Text(controller.batteryPresentation.eyebrow)
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(controller.currentState.presentationTint)
-                            Text(statusHeadline)
+                                .foregroundStyle(controller.batteryPresentation.tone.presentationTint)
+                            Text(controller.batteryPresentation.headline)
                                 .font(.system(size: 21, weight: .bold, design: .rounded))
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -160,10 +160,10 @@ struct DashboardView: View {
                                 tint: BatteryGuardPalette.skyInk
                             )
                             PastelMetricRow(
-                                icon: info.isPluggedIn ? "powerplug.fill" : "powerplug",
+                                icon: controller.batteryPresentation.powerIcon,
                                 label: "전원",
-                                value: info.isPluggedIn ? "연결됨" : "연결 안 됨",
-                                tint: BatteryGuardPalette.mintInk
+                                value: controller.batteryPresentation.powerLabel,
+                                tint: controller.batteryPresentation.tone.presentationTint
                             )
                         }
                     }
@@ -455,29 +455,6 @@ struct DashboardView: View {
             Text(title)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
-        }
-    }
-
-    private func statusEyebrow(for info: BatteryInfo) -> String {
-        info.isPluggedIn ? "전원 연결됨" : "배터리 사용 중"
-    }
-
-    private var statusHeadline: String {
-        switch controller.currentState {
-        case .charging: return "한도까지 충전하고 있어요"
-        case .chargingPaused:
-            switch controller.mode {
-            case .heatBlocked: return "고온으로 충전을 잠시 멈췄어요"
-            case .sleepProtected: return "잠자기 동안 충전을 멈췄어요"
-            case .controlDisabled: return "macOS가 충전 상태를 관리하고 있어요"
-            case .transitioning: return "안전한 충전 상태로 전환 중이에요"
-            case .externalDrift: return "외부에서 바뀐 상태를 확인해 주세요"
-            default: return "설정한 범위를 지키고 있어요"
-            }
-        case .discharging: return "목표까지 안전하게 방전 중이에요"
-        case .topUp: return "추가 충전을 진행하고 있어요"
-        case .notConnected: return "배터리 전원으로 사용 중이에요"
-        case .unknown: return "충전 상태를 확인해 주세요"
         }
     }
 

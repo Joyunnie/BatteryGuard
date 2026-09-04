@@ -88,6 +88,77 @@ final class BatteryValueTests: XCTestCase {
         XCTAssertNil(info.serialNumber)
     }
 
+    func testConnectionEvidencePreservesTrueFalseAndMissingSignals() throws {
+        let connected = try XCTUnwrap(BatteryMonitor.parseBatteryInfo([
+            "CurrentCapacity": 50,
+            "ExternalConnected": false,
+            "ExternalChargeCapable": true,
+            "AppleRawExternalConnected": false
+        ]))
+        let disconnected = try XCTUnwrap(BatteryMonitor.parseBatteryInfo([
+            "CurrentCapacity": 50,
+            "ExternalConnected": false,
+            "ExternalChargeCapable": false,
+            "AppleRawExternalConnected": false
+        ]))
+        let uncertain = try XCTUnwrap(BatteryMonitor.parseBatteryInfo([
+            "CurrentCapacity": 50,
+            "ExternalConnected": false
+        ]))
+        let chargingFallback = try XCTUnwrap(BatteryMonitor.parseBatteryInfo([
+            "CurrentCapacity": 50,
+            "IsCharging": true
+        ]))
+
+        XCTAssertEqual(connected.connectionEvidence, .connected)
+        XCTAssertTrue(connected.isPluggedIn)
+        XCTAssertEqual(disconnected.connectionEvidence, .disconnected)
+        XCTAssertFalse(disconnected.isPluggedIn)
+        XCTAssertEqual(uncertain.connectionEvidence, .uncertain)
+        XCTAssertFalse(uncertain.isPluggedIn)
+        XCTAssertEqual(chargingFallback.connectionEvidence, .connected)
+    }
+
+    func testProvidingSourceConfirmsConnectionWithoutErasingAttachedEvidence() {
+        let attached = makeBatteryInfo(
+            isPluggedIn: true,
+            connectionEvidence: .connected
+        )
+        let explicitlyDetached = makeBatteryInfo(
+            isPluggedIn: false,
+            connectionEvidence: .disconnected
+        )
+
+        XCTAssertEqual(
+            BatteryMonitor.resolvedPowerConnection(info: attached, sourceKind: .battery),
+            .connected
+        )
+        XCTAssertEqual(
+            BatteryMonitor.resolvedPowerConnection(info: explicitlyDetached, sourceKind: .ac),
+            .connected
+        )
+        XCTAssertEqual(
+            BatteryMonitor.resolvedPowerConnection(info: explicitlyDetached, sourceKind: .battery),
+            .disconnected
+        )
+    }
+
+    func testPresentationEvidenceIsExcludedFromControlMeasurement() {
+        let connectedEvidence = makeBatteryInfo(
+            isPluggedIn: true,
+            connectionEvidence: .connected
+        )
+        let uncertainEvidence = makeBatteryInfo(
+            isPluggedIn: true,
+            connectionEvidence: .uncertain
+        )
+
+        XCTAssertEqual(
+            ChargeController.ControlMeasurement(connectedEvidence),
+            ChargeController.ControlMeasurement(uncertainEvidence)
+        )
+    }
+
     func testTemperatureValidationRejectsNonfiniteAndImplausibleValues() {
         XCTAssertNil(BatteryMonitor.validatedTemperature(.nan))
         XCTAssertNil(BatteryMonitor.validatedTemperature(-273.05))
@@ -120,6 +191,41 @@ final class BatteryValueTests: XCTestCase {
 
         XCTAssertEqual(publishedValues.compactMap { $0?.currentCharge }, [70, 71])
         withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
+    func testInitialReadPublishesStableConnectionObservation() {
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(isPluggedIn: false) },
+            runsMonitoringInfrastructure: false,
+            powerSourceKindProvider: { .battery }
+        )
+
+        monitor.startMonitoring()
+
+        XCTAssertEqual(monitor.powerConnectionObservation, .stable(.disconnected))
+        monitor.stopMonitoring()
+    }
+
+    @MainActor
+    func testUnchangedConnectionObservationIsNotRepublished() {
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(isPluggedIn: false) },
+            runsMonitoringInfrastructure: false,
+            powerSourceKindProvider: { .battery }
+        )
+        monitor.startMonitoring()
+        var publications: [PowerConnectionObservation] = []
+        let observation = monitor.$powerConnectionObservation
+            .dropFirst()
+            .sink { publications.append($0) }
+
+        monitor.refreshBatteryInfo()
+        monitor.refreshBatteryInfo()
+
+        XCTAssertTrue(publications.isEmpty)
+        withExtendedLifetime(observation) {}
+        monitor.stopMonitoring()
     }
 
     @MainActor
@@ -194,6 +300,7 @@ final class BatteryValueTests: XCTestCase {
 
         XCTAssertEqual(readCount, 2)
         XCTAssertEqual(monitor.batteryInfo?.isPluggedIn, true)
+        XCTAssertEqual(monitor.powerConnectionObservation, .stable(.connected))
         monitor.stopMonitoring()
         clock.advance(to: 2_000)
         await Task.yield()
@@ -351,6 +458,46 @@ final class BatteryValueTests: XCTestCase {
         XCTAssertEqual(readCount, 5)
         XCTAssertEqual(clock.requestedDeadlines, [100, 500, 1_000, 2_000])
         XCTAssertFalse(monitor.hasActivePowerSourceSettlement)
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(readCount, 6, "coalesced requests must produce one trailing read")
+        monitor.stopMonitoring()
+    }
+
+    @MainActor
+    func testUnresolvedSettlementPublishesUncertainInsteadOfStaleSuccess() async {
+        let clock = ManualBatteryMonitorClock()
+        var shouldFailRead = false
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: {
+                shouldFailRead ? nil : makeBatteryInfo(isPluggedIn: false)
+            },
+            runsMonitoringInfrastructure: false,
+            powerSourceKindProvider: { .battery },
+            transitionOffsetsNanoseconds: [100, 500, 1_000, 2_000],
+            monotonicNow: { clock.now },
+            transitionSleepUntil: { deadline in await clock.sleep(until: deadline) }
+        )
+        monitor.startMonitoring()
+        shouldFailRead = true
+
+        monitor.handlePowerSourceTransitionNotification()
+        await Task.yield()
+        XCTAssertEqual(
+            monitor.powerConnectionObservation,
+            .transitioning(previous: .disconnected)
+        )
+
+        for deadline: UInt64 in [100, 500, 1_000, 2_000] {
+            clock.advance(to: deadline)
+            await Task.yield()
+        }
+
+        XCTAssertEqual(
+            monitor.powerConnectionObservation,
+            .uncertain(previous: .disconnected)
+        )
+        monitor.stopMonitoring()
     }
 
     @MainActor
@@ -376,6 +523,7 @@ final class BatteryValueTests: XCTestCase {
         suppliedInfo = makeBatteryInfo(isPluggedIn: true)
         monitor.handlePowerSourceTransitionNotification()
         await Task.yield()
+        monitor.requestPresentationRefresh()
 
         source = .battery
         suppliedInfo = makeBatteryInfo(isPluggedIn: false)
@@ -390,6 +538,57 @@ final class BatteryValueTests: XCTestCase {
         XCTAssertEqual(readCount, 5)
         XCTAssertEqual(monitor.batteryInfo?.isPluggedIn, false)
         XCTAssertFalse(monitor.hasActivePowerSourceSettlement)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(readCount, 5, "the reverse edge must discard the prior trailing read")
+        monitor.stopMonitoring()
+    }
+
+    @MainActor
+    func testBroadOnlyReverseEdgeStartsANewAnchoredGeneration() async {
+        let clock = ManualBatteryMonitorClock()
+        var source: BatteryPowerSourceKind? = .battery
+        var suppliedInfo = makeBatteryInfo(isPluggedIn: false)
+        var readCount = 0
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: {
+                readCount += 1
+                return suppliedInfo
+            },
+            runsMonitoringInfrastructure: false,
+            powerSourceKindProvider: { source },
+            transitionOffsetsNanoseconds: [100, 500, 1_000, 2_000],
+            monotonicNow: { clock.now },
+            transitionSleepUntil: { deadline in await clock.sleep(until: deadline) }
+        )
+        monitor.startMonitoring()
+
+        source = .ac
+        suppliedInfo = makeBatteryInfo(isPluggedIn: true)
+        monitor.handleBroadPowerSourceNotification()
+        await Task.yield()
+        clock.advance(to: 100)
+        await Task.yield()
+        XCTAssertEqual(monitor.powerConnectionObservation, .stable(.connected))
+
+        source = .battery
+        suppliedInfo = makeBatteryInfo(isPluggedIn: false)
+        monitor.handleBroadPowerSourceNotification()
+        await Task.yield()
+        XCTAssertEqual(
+            monitor.powerConnectionObservation,
+            .transitioning(previous: .connected)
+        )
+
+        for deadline: UInt64 in [200, 600, 1_100, 2_100] {
+            clock.advance(to: deadline)
+            await Task.yield()
+        }
+
+        XCTAssertEqual(clock.requestedDeadlines, [100, 500, 200, 600, 1_100, 2_100])
+        XCTAssertEqual(readCount, 6)
+        XCTAssertEqual(monitor.powerConnectionObservation, .stable(.disconnected))
+        XCTAssertFalse(monitor.hasActivePowerSourceSettlement)
+        monitor.stopMonitoring()
     }
 
     @MainActor
@@ -412,12 +611,14 @@ final class BatteryValueTests: XCTestCase {
         source = .ac
         monitor.handlePowerSourceTransitionNotification()
         await Task.yield()
+        monitor.requestPresentationRefresh()
 
         monitor.stopMonitoring()
         monitor.startMonitoring()
         let readsAfterRestart = readCount
         clock.advance(to: 2_000)
         await Task.yield()
+        try? await Task.sleep(nanoseconds: 200_000_000)
 
         XCTAssertEqual(readCount, readsAfterRestart)
         XCTAssertFalse(monitor.hasActivePowerSourceSettlement)

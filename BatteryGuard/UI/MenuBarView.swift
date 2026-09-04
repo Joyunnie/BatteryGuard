@@ -29,8 +29,8 @@ struct MenuBarView: View {
             if let info = monitor.batteryInfo {
                 PastelBatteryGlyph(
                     charge: info.currentCharge,
-                    isCharging: info.isCharging,
-                    tint: controller.currentState.presentationTint
+                    isCharging: controller.batteryPresentation.showsChargingBolt,
+                    tint: controller.batteryPresentation.tone.presentationTint
                 )
             } else {
                 Image(systemName: "battery.0percent")
@@ -51,9 +51,9 @@ struct MenuBarView: View {
                 }
 
                 PastelStatusPill(
-                    title: controller.primaryChargeStatusTitle,
-                    tint: controller.currentState.presentationTint,
-                    icon: controller.currentState.presentationIcon
+                    title: controller.batteryPresentation.statusTitle,
+                    tint: controller.batteryPresentation.tone.presentationTint,
+                    icon: controller.batteryPresentation.statusIcon
                 )
             }
 
