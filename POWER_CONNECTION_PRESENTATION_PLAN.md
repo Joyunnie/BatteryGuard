@@ -96,7 +96,7 @@ dedicated edge signal
 - Broad, visibility, or same-direction refresh requests received during settlement set one trailing-refresh marker for the current generation.
 - After settlement cleanup, the trailing refresh runs once only if monitoring and transition generations still match.
 - A trailing refresh is a read, not a new settlement and not a hardware command.
-- The 30-second watchdog remains a missed-event fallback and does not run during active settlement.
+- The 30-second watchdog remains a missed-event fallback. During active settlement it performs no independent read and only requests the single generation-scoped trailing refresh.
 - No 5- or 10-second schedule is added without new hardware evidence showing repeatable convergence after two seconds.
 
 ## Presentation Contract
@@ -179,3 +179,16 @@ Completed on 2026-09-04 on `fix/power-connection-presentation`.
 - Added connection-evidence, source-resolution, observation publication/deduplication, transition, unresolved-read, trailing refresh, reverse-edge, restart, presentation-priority, and control-measurement isolation tests.
 - All 344 tests passed with `SWIFT_STRICT_CONCURRENCY=complete` and `SWIFT_TREAT_WARNINGS_AS_ERRORS=YES`. Release build and Debug Analyze passed under the same settings. No real battery CLI, SMC mutation, login-item mutation, production store, app installation, or charge-setting change was used.
 - Physical unplug/replug observation remains a separate read-only hardware trial because it requires deliberate user interaction. It is not an automated acceptance gate and must not mutate charge control.
+
+### Follow-up Remediation Results
+
+Completed on 2026-09-07 on the same PR #33 branch after the full-diff hostile review.
+
+- Split controller safety measurement refreshes from connection-presentation refreshes. The latter now read the current IOPS source and `BatteryInfo` as one bounded attempt; `lastPowerSourceKind` is only an edge baseline.
+- Routed startup, pre-monitor visibility, coalesced broad notifications, registration reconciliation, the 30-second watchdog, settlement offsets, and same-generation trailing work through current evidence. A failed current source read is resolved as unavailable and never replaced by cached AC.
+- Made the final settlement pair authoritative, so an unresolved last attempt publishes `uncertain` instead of preserving an earlier stable candidate; watchdog ticks received in flight coalesce into the same bounded trailing refresh.
+- Coalesced broad notifications before the paired read, so steady-state bursts perform one source read and one battery read rather than one source read per callback.
+- Migrated manual recovery status in MenuBar, Dashboard, and Settings to the same `BatteryPresentation` title, icon, and tone; Settings requests current evidence when shown, and the remaining flag-derived title helpers were removed.
+- Added deterministic missed-callback recovery, pre-monitor lifecycle, provider-read budget, failed-source, registration-failure watchdog, and recovery-title matrix tests. Existing control-measurement isolation, backend safety, LED, burst, reverse-edge, stop/restart, and trailing-generation coverage also passed.
+- All 352 tests passed with strict Swift concurrency and warnings as errors. Release arm64 build and Debug Analyze passed. No real battery CLI, SMC mutation, login-item mutation, production store, installation, or charge-setting change was used.
+- The optional physical unplug/replug observation remains pending and read-only; it is not a merge gate.
