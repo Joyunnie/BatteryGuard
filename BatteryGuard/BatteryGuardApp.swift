@@ -119,6 +119,7 @@ struct BatteryGuardApp: App {
             SettingsView()
                 .environmentObject(UserSettings.shared)
                 .environmentObject(ChargeController.shared)
+                .environmentObject(BatteryMonitor.shared)
                 .frame(minWidth: 720, minHeight: 520)
         }
         .defaultSize(width: 760, height: 560)

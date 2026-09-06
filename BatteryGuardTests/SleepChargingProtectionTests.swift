@@ -731,7 +731,7 @@ extension ChargeControllerSafetyTests {
         XCTAssertFalse(backend.operations.contains("disable-charging"))
     }
 
-    func testManualRecoveryPresentationKeepsPhysicalPowerAndControlFailureDistinct() {
+    func testManualRecoveryPresentationDoesNotInferStablePowerFromBatteryFlagAlone() {
         let context = ManualRecoveryContext(
             origin: .systemSleep(.forcedSystemSleep),
             target: .restoreMaintain(limit: 80),
@@ -746,7 +746,8 @@ extension ChargeControllerSafetyTests {
             )
         )
 
-        XCTAssertEqual(controller.primaryChargeStatusTitle, "전원 연결됨 · 충전 제어 복구 필요")
+        XCTAssertEqual(controller.batteryPresentation.statusTitle, "충전 제어 복구 필요")
+        XCTAssertEqual(controller.batteryPresentation.powerLabel, "알 수 없음")
         XCTAssertEqual(controller.manualRecoveryObservedDescription, "최근 확인 상태: 충전 비활성")
         XCTAssertTrue(controller.explicitMaintainRecoveryAvailability.isAllowed)
 
@@ -755,7 +756,7 @@ extension ChargeControllerSafetyTests {
             isPluggedIn: false,
             temperature: 30
         )
-        XCTAssertEqual(controller.primaryChargeStatusTitle, "충전 제어 복구 필요")
+        XCTAssertEqual(controller.batteryPresentation.statusTitle, "충전 제어 복구 필요")
         XCTAssertFalse(controller.explicitMaintainRecoveryAvailability.isAllowed)
     }
 

@@ -36,6 +36,7 @@ struct SettingsView: View {
 
     @EnvironmentObject private var settings: UserSettings
     @EnvironmentObject private var controller: ChargeController
+    @EnvironmentObject private var monitor: BatteryMonitor
     @State private var selection: Destination = .charge
     @State private var diagnosticLogError: String?
     @State private var batterySettingsOpenError: String?
@@ -90,7 +91,10 @@ struct SettingsView: View {
         } message: {
             Text("먼저 macOS Battery 설정에서 Charge Limit를 꺼야 두 제어 시스템이 충돌하지 않습니다.")
         }
-        .onAppear { settings.refreshLaunchAtLoginStatus() }
+        .onAppear {
+            settings.refreshLaunchAtLoginStatus()
+            monitor.requestPresentationRefresh()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             settings.refreshLaunchAtLoginStatus()
         }
@@ -236,7 +240,10 @@ struct SettingsView: View {
                         PastelNotice(message: denial, kind: .info)
                     }
 
-                    ChargeRecoveryStatusView(controller: controller)
+                    ChargeRecoveryStatusView(
+                        controller: controller,
+                        presentation: controller.batteryPresentation
+                    )
                 }
             }
 

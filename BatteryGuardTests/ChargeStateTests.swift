@@ -89,18 +89,28 @@ final class ChargeStateTests: XCTestCase {
         XCTAssertTrue(topUp.showsChargingBolt)
     }
 
-    func testManualRecoveryOverridesPowerTransitionPresentation() {
-        let presentation = BatteryPresentation.make(
-            info: makeBatteryInfo(),
-            connection: .transitioning(previous: .connected),
-            mode: .maintaining(limit: 80),
-            chargeState: .chargingPaused,
-            requiresManualRecovery: true
-        )
+    func testManualRecoveryUsesOneTransitionAwareTitleContract() {
+        let expectations: [(PowerConnectionObservation, String, String)] = [
+            (.stable(.connected), "전원 연결됨 · 충전 제어 복구 필요", "연결됨"),
+            (.transitioning(previous: .connected), "충전 제어 복구 필요", "확인 중"),
+            (.uncertain(previous: .connected), "충전 제어 복구 필요", "알 수 없음"),
+            (.stable(.disconnected), "충전 제어 복구 필요", "연결 안 됨")
+        ]
 
-        XCTAssertEqual(presentation.statusTitle, "충전 제어 복구 필요")
-        XCTAssertEqual(presentation.tone, .danger)
-        XCTAssertEqual(presentation.powerLabel, "확인 중")
+        for (connection, expectedTitle, expectedPowerLabel) in expectations {
+            let presentation = BatteryPresentation.make(
+                info: makeBatteryInfo(),
+                connection: connection,
+                mode: .maintaining(limit: 80),
+                chargeState: .chargingPaused,
+                requiresManualRecovery: true
+            )
+
+            XCTAssertEqual(presentation.statusTitle, expectedTitle)
+            XCTAssertEqual(presentation.statusIcon, "exclamationmark.triangle.fill")
+            XCTAssertEqual(presentation.tone, .danger)
+            XCTAssertEqual(presentation.powerLabel, expectedPowerLabel)
+        }
     }
 
     func testSafetyModesRemainVisibleDuringPowerObservationChanges() {

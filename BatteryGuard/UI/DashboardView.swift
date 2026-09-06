@@ -117,7 +117,10 @@ struct DashboardView: View {
     private var criticalContext: some View {
         if controller.hasExternalControlDrift
             || controller.manualInterventionRecoveryDescription != nil {
-            ChargeRecoveryStatusView(controller: controller)
+            ChargeRecoveryStatusView(
+                controller: controller,
+                presentation: controller.batteryPresentation
+            )
         } else if let issue = controller.issues.first {
             PastelNotice(
                 message: issue.message,

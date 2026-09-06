@@ -167,7 +167,11 @@ struct MenuBarView: View {
                 )
             }
 
-            ChargeRecoveryStatusView(controller: controller, compact: true)
+            ChargeRecoveryStatusView(
+                controller: controller,
+                presentation: controller.batteryPresentation,
+                compact: true
+            )
 
             if let error = controller.lastError, !controller.hasExternalControlDrift {
                 PastelNotice(message: error, kind: .warning)
@@ -228,10 +232,13 @@ struct MenuBarView: View {
 
 struct ChargeRecoveryStatusView: View {
     @ObservedObject var controller: ChargeController
+    let presentation: BatteryPresentation
     var compact = false
 
     private struct RecoveryContent {
         let title: String
+        let icon: String
+        let tint: Color
         let detail: String?
         let observed: String?
         let isManualRecovery: Bool
@@ -242,6 +249,8 @@ struct ChargeRecoveryStatusView: View {
         if let drift = controller.externalDriftDescription {
             return RecoveryContent(
                 title: drift,
+                icon: "arrow.triangle.2.circlepath",
+                tint: BatteryGuardPalette.warning,
                 detail: controller.externalDriftRecoveryDescription,
                 observed: nil,
                 isManualRecovery: false,
@@ -256,7 +265,9 @@ struct ChargeRecoveryStatusView: View {
                 recoveryLimit = nil
             }
             return RecoveryContent(
-                title: controller.manualRecoveryStatusTitle ?? "충전 제어 복구 필요",
+                title: presentation.statusTitle,
+                icon: presentation.statusIcon,
+                tint: presentation.tone.presentationTint,
                 detail: recovery,
                 observed: controller.manualRecoveryObservedDescription,
                 isManualRecovery: true,
@@ -269,7 +280,7 @@ struct ChargeRecoveryStatusView: View {
     var body: some View {
         if let content = recoveryContent {
             VStack(alignment: .leading, spacing: compact ? 6 : 9) {
-                Label(content.title, systemImage: "arrow.triangle.2.circlepath")
+                Label(content.title, systemImage: content.icon)
                     .font(.system(size: compact ? 10.5 : 12, weight: .semibold))
                 if let detail = content.detail {
                     Text(detail)
@@ -290,16 +301,16 @@ struct ChargeRecoveryStatusView: View {
                     }
                 }
             }
-            .foregroundStyle(BatteryGuardPalette.warning)
+            .foregroundStyle(content.tint)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(compact ? 10 : 14)
             .background(
-                BatteryGuardPalette.warning.opacity(0.10),
+                content.tint.opacity(0.10),
                 in: RoundedRectangle(cornerRadius: compact ? 12 : 16, style: .continuous)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: compact ? 12 : 16, style: .continuous)
-                    .stroke(BatteryGuardPalette.warning.opacity(0.20), lineWidth: 1)
+                    .stroke(content.tint.opacity(0.20), lineWidth: 1)
             }
         }
     }
