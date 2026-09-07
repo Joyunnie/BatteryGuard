@@ -445,6 +445,17 @@ PR #19 병합 뒤 Release 앱을 `/Applications`에 다시 설치하고 최초 �
 - 원자료는 `HardwareValidation/2026-08-20-sleep-recovery/`에 보존한다. 후반 trial의 raw capacity key가 capture filter에서 빠진 한계를 명시하고, normalized capacity, complete CLI tuple, diagnostics, worker identity로 보완하되 누락된 과거 값은 재구성하지 않았다.
 - 갱신된 `main`의 Release 앱을 `/Applications/BatteryGuard.app`에 설치했다. 앱 binary, bundled read-only SMC helper, GPL license, `Info.plist`와 `CodeResources`는 build artifact와 byte-identical이고 deep strict codesign을 통과했다. 임시 `pmset`, Amphetamine과 IOKit veto 환경도 원래 상태로 복원했다.
 
+### 0.30 전원 연결 관측과 표시 상태 분리 (2026-09-04)
+
+충전기 연결 직후 `ExternalConnected`, providing source, `IsCharging`이 서로 다른 시점에 바뀌는 상황을 하나의 Boolean UI 상태로 해석하던 문제를 보완했다.
+
+- AppleSmartBattery의 세 외부 전원 flag를 optional evidence로 보존하고, 명시적 연결·분리·불확실을 구분한다. IOPS AC는 연결을 확정하지만 IOPS battery는 force discharge 중 명시적인 연결 증거를 지우지 않는다.
+- 기존 100/500/1000/2000ms settlement에 `stable`, `transitioning(previous:)`, `uncertain(previous:)` 관측을 추가했다. 동일 generation 중 누락된 UI/broad 요청은 trailing read 하나로 합치며 reverse edge, stop과 restart는 오래된 작업을 폐기한다.
+- 물리 연결, providing source, macOS 충전 동작과 verified control policy를 순수 `BatteryPresentation`으로 조합한다. MenuBar, Dashboard와 menu-bar label은 같은 projection을 사용하며 transition만으로 controller measurement, backend 또는 LED intent가 바뀌지 않는다.
+- 연결됐지만 `IsCharging=false`인 상태를 충전 중으로 표시하지 않는다. Maintain 한도 도달과 한도 미만의 충전 대기를 구분하고, Heat/Sleep/drift/manual failure를 연결 transition보다 우선한다.
+- broad-only fallback의 역방향 edge가 첫 deadline을 잘못 이어 쓰는 결함을 구현 리뷰에서 발견해 새 generation으로 재시작하도록 고쳤다.
+- strict-concurrency complete와 warnings-as-errors에서 전체 344개 테스트, Release build와 Debug Analyze가 통과했다. 실제 CLI/SMC 명령, 앱 설치와 충전 설정 변경은 수행하지 않았다. 물리적 unplug/replug 관측은 사용자 협조가 필요한 별도 read-only 확인으로 남긴다.
+
 ## 1. 프로젝트 전제
 
 BatteryGuard는 공개 배포 제품이 아니라 실제 사용자 한 명이 자신의 Apple Silicon Mac에서 사용하는 로컬 macOS 앱이다. 따라서 공개 배포, 다중 사용자 지원, 범용 하드웨어 지원보다 실제 배터리 제어의 안전성, 정확성, 장애 복구와 장기 유지보수를 우선한다.
@@ -960,6 +971,7 @@ enum ChargeMode: Equatable {
 23. `[hostile review 안전 보완·자동 검증 완료]` 정상 종료는 초기화가 확정한 첫 충전 안전 상태를 기다린 뒤 정책을 선택해 초기화 중 Heat Protection 결정을 Maintain으로 덮지 않는다. 초기화, wake와 Heat 복원은 fresh SMC·IOKit 전체 센서 coverage가 성공한 경우에만 자동 충전을 재개하고, 한 센서의 값이 남아 있어도 다른 독립 센서 실패가 있으면 charging-off로 fail closed 한다. `manualIntervention`은 주기적 자동 reconciliation 대상에서 계속 제외하되, 사용자가 실제 CLI를 기록된 Maintain 한도로 복원한 뒤 누르는 read-only 검증 경로와 공통 Dashboard/menu/Settings 복구 UI를 제공한다. 수동 복구도 Heat Protection이 켜져 있으면 fresh complete 온도 검증을 추가로 요구한다. 검증된 Maintain만 실패 상태와 Discharge sleep assertion을 해제하며, 불일치는 external drift로 전환하고 status read 실패는 재시도 가능한 수동 실패를 보존한다. 엄격 동시성·경고 오류화 조건의 296개 테스트, Release build와 Analyze를 모두 통과했다.
 24. `[PR #23 구현·hostile review·자동·실기 검증 완료]` 실제 AC/Battery edge에 100/500/1000/2000ms anchored settlement를 적용하고 routine notification, UI visibility와 watchdog read를 coalesce해 상시 polling 없이 stale 배터리 UI를 해소했다. provider-lag, observer 등록 창, reverse edge, cancellation과 controller 안전 반응을 회귀 테스트로 고정했다. 전체 311개 테스트와 Debug/strict/Release/Analyze가 통과했고, 닫힘·메뉴 열림·Dashboard tracking을 포함한 5회 분리와 5회 연결 실기 trial은 최초 material publish 104~115ms, 평균 109.9ms로 모두 3초 상한을 통과했다. 최종 상태는 exact Maintain 80 worker 1개와 non-discharge다.
 25. `[PR #29~#31 구현·자동·실기 검증 완료]` sleep charging recovery의 one-shot status 판정을 bounded settlement로 교체하고, typed system sleep lifecycle/cancellation ownership과 명시적인 verified Maintain 복구 UI를 도입했다. 최종 329개 테스트와 strict/Release/Analyze gate가 통과했다. 승인된 8개 실제 sleep/wake 조건을 통과했으며 원자료 한계를 포함한 증거를 별도 문서 PR에 보존했다. 최종 설치본은 Release artifact와 byte-identical이고 상태는 Maintain 80, non-discharge, exact worker 1개다.
+26. `[구현·hostile review 보완·자동 검증 완료]` 물리 연결 evidence와 providing source를 typed observation으로 조합하고, generation-owned settlement/trailing read 및 순수 `BatteryPresentation`으로 세 UI surface를 통일했다. 후속 리뷰에서 캐시된 providing source를 현재 증거로 재사용하던 결함을 제거하고 startup, visibility, coalesced notification, registration reconciliation, watchdog, settlement와 trailing refresh를 current paired snapshot 계약으로 통일했다. 컨트롤러 안전 측정 refresh는 표시 settlement와 분리하고, recovery UI까지 동일 projection으로 이관했다. 전체 352개 테스트와 strict/Release/Analyze gate가 통과했으며 물리적 unplug/replug는 별도 read-only 확인으로 남긴다.
 
 핵심 단계가 `ChargeController`, CLI 실행과 상태 모델을 공유하므로 기본 구현은 순차적으로 진행한다. 모니터링과 이력 개선 중 상태 제어와 겹치지 않는 부분만 명령 실행기와 상태 모델이 안정된 뒤 별도로 진행할 수 있다.
 
@@ -1008,6 +1020,6 @@ xcodebuild -project BatteryGuard.xcodeproj -scheme BatteryGuard -configuration D
 | Design Review | hostile whole-project review | UI/UX gaps | 1 | issues addressed | pastel fill/ink 대비 분리와 24시간 단위 이력 해상도 보존 |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | not needed | 개인용 로컬 프로젝트이며 확인된 test/file topology 유지보수는 완료됨 |
 
-**VERDICT:** CHECKPOINT 25 AND ITS FOLLOW-UP VALIDATION COMPLETE — sleep charging recovery를 포함한 전체 329개 테스트, 엄격 동시성·경고 오류화 build-for-testing, Release build와 Analyze가 최종 코드 PR에서 통과했다. 승인된 실제 Mac sleep/wake matrix 8개 조건과 최종 설치본 동일성도 확인했다. 친구 설치 패키지는 PR #25, `ChargeController`와 `SMCKit`의 동작 보존 파일 분해는 PR #26과 PR #27로 병합됐다. 이전 고유 브랜치 tip은 patch-equivalent임을 확인하고 archive tag로 보존했으며 `baseline/import`와 `backup/*`는 유지했다. 남은 항목은 친구 Mac에서의 선택적 외부 설치 검증뿐이며 미완료 application code는 없다.
+**VERDICT:** CHECKPOINT 26 HOSTILE-REVIEW REMEDIATION COMPLETE — 전원 연결 관측/표시 분리와 current paired snapshot 보완을 포함한 전체 352개 테스트, 엄격 동시성·경고 오류화, Release arm64 build와 Analyze가 통과했다. checkpoint 25의 승인된 실제 Mac sleep/wake matrix와 설치본 동일성 기록은 그대로 유효하다. 이번 checkpoint는 실제 CLI/SMC 명령이나 설치본을 변경하지 않았으며, 남은 것은 사용자 협조가 필요한 선택적 read-only unplug/replug 관측과 친구 Mac 외부 설치 검증뿐이다. 미완료 application code는 없다.
 
 NO UNRESOLVED DECISIONS

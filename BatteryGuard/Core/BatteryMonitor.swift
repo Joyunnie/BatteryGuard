@@ -16,6 +16,7 @@ struct BatteryInfo: Equatable, Sendable {
     let currentCharge: Int           // 현재 충전 퍼센트 (0-100)
     let isCharging: Bool             // 충전 중 여부
     let isPluggedIn: Bool            // 전원 연결 여부
+    let connectionEvidence: PowerConnectionEvidence
     let maxCapacity: Int?            // 최대 용량 (mAh)
     let designCapacity: Int?         // 설계 용량 (mAh)
     let cycleCount: Int?             // 충방전 사이클 수
@@ -35,6 +36,30 @@ enum BatteryPowerSourceKind: Equatable, Sendable {
     case other(String)
 }
 
+enum PowerConnectionEvidence: Equatable, Sendable {
+    case connected
+    case disconnected
+    case uncertain
+}
+
+enum StablePowerConnection: Equatable, Sendable {
+    case connected
+    case disconnected
+}
+
+enum PowerConnectionObservation: Equatable, Sendable {
+    case stable(StablePowerConnection)
+    case transitioning(previous: StablePowerConnection?)
+    case uncertain(previous: StablePowerConnection?)
+
+    var lastConfirmed: StablePowerConnection? {
+        switch self {
+        case .stable(let connection): return connection
+        case .transitioning(let previous), .uncertain(let previous): return previous
+        }
+    }
+}
+
 // MARK: - BatteryMonitor
 /// 배터리 상태를 주기적으로 모니터링하는 클래스
 /// - IOPMPowerSource: macOS 전원 관리 프레임워크. 배터리 상태를 userspace에 노출
@@ -44,6 +69,11 @@ enum BatteryPowerSourceKind: Equatable, Sendable {
 final class BatteryMonitor: ObservableObject {
     static let shared = BatteryMonitor(runsMonitoringInfrastructure: !AppRuntime.isRunningTests)
 
+    private struct FreshPowerSnapshot {
+        let sourceKind: BatteryPowerSourceKind?
+        let batteryInfo: BatteryInfo?
+    }
+
     private static let defaultTransitionOffsetsNanoseconds: [UInt64] = [
         100_000_000,
         500_000_000,
@@ -52,6 +82,7 @@ final class BatteryMonitor: ObservableObject {
     ]
 
     @Published var batteryInfo: BatteryInfo?
+    @Published private(set) var powerConnectionObservation: PowerConnectionObservation
 
     private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "BatteryMonitor")
     private let batteryInfoProvider: (() -> BatteryInfo?)?
@@ -62,6 +93,7 @@ final class BatteryMonitor: ObservableObject {
     private let transitionOffsetsNanoseconds: [UInt64]
     private let monotonicNow: @MainActor () -> UInt64
     private let transitionSleepUntil: @MainActor (UInt64) async -> Void
+    private let notificationRefreshScheduler: @MainActor (DispatchWorkItem) -> Void
     private let registersBroadPowerSourceNotifications: Bool
     private let transitionNotificationRegistrar: ((@escaping @Sendable () -> Void) -> Int32?)?
     private let transitionNotificationCanceller: (Int32) -> Void
@@ -75,6 +107,8 @@ final class BatteryMonitor: ObservableObject {
     private var presentationRefreshResetWork: DispatchWorkItem?
     private var powerSourceNotificationToken: Int32?
     private var powerSourceSettlementTask: Task<Void, Never>?
+    private var pendingSettlementRefreshGeneration: UInt64?
+    private var powerSourceSettlementDirectionIsConfirmed = false
     private var lastPowerSourceKind: BatteryPowerSourceKind?
     private var monitoringGeneration: UInt64 = 0
     private var powerSourceTransitionGeneration: UInt64 = 0
@@ -95,11 +129,15 @@ final class BatteryMonitor: ObservableObject {
             guard deadline > now else { return }
             try? await Task.sleep(nanoseconds: deadline - now)
         },
+        notificationRefreshScheduler: @escaping @MainActor (DispatchWorkItem) -> Void = { work in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+        },
         registersBroadPowerSourceNotifications: Bool = true,
         transitionNotificationRegistrar: ((@escaping @Sendable () -> Void) -> Int32?)? = nil,
         transitionNotificationCanceller: @escaping (Int32) -> Void = { token in
             notify_cancel(token)
-        }
+        },
+        initialPowerConnectionObservation: PowerConnectionObservation = .uncertain(previous: nil)
     ) {
         self.batteryInfoProvider = batteryInfoProvider
         self.runsMonitoringInfrastructure = runsMonitoringInfrastructure
@@ -109,9 +147,11 @@ final class BatteryMonitor: ObservableObject {
         self.transitionOffsetsNanoseconds = transitionOffsetsNanoseconds.sorted()
         self.monotonicNow = monotonicNow
         self.transitionSleepUntil = transitionSleepUntil
+        self.notificationRefreshScheduler = notificationRefreshScheduler
         self.registersBroadPowerSourceNotifications = registersBroadPowerSourceNotifications
         self.transitionNotificationRegistrar = transitionNotificationRegistrar
         self.transitionNotificationCanceller = transitionNotificationCanceller
+        self.powerConnectionObservation = initialPowerConnectionObservation
     }
 
     // MARK: - Helper
@@ -122,6 +162,14 @@ final class BatteryMonitor: ObservableObject {
         if let n = dict[key] as? NSNumber { return n.boolValue }
         if let n = dict[key] as? Int { return n != 0 }
         return defaultVal
+    }
+
+    private nonisolated static func readOptionalBool(_ dict: [String: Any], key: String) -> Bool? {
+        guard dict[key] != nil else { return nil }
+        if let b = dict[key] as? Bool { return b }
+        if let n = dict[key] as? NSNumber { return n.boolValue }
+        if let n = dict[key] as? Int { return n != 0 }
+        return nil
     }
 
     // MARK: - IOKit을 통한 배터리 정보 읽기
@@ -156,6 +204,7 @@ final class BatteryMonitor: ObservableObject {
 
     func readPowerSourceKind() -> BatteryPowerSourceKind? {
         if let powerSourceKindProvider { return powerSourceKindProvider() }
+        guard !AppRuntime.isRunningTests else { return nil }
 
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let unmanagedType = IOPSGetProvidingPowerSourceType(snapshot) else {
@@ -184,11 +233,11 @@ final class BatteryMonitor: ObservableObject {
         let designCapacity = Self.positiveMeasurement(dict["DesignCapacity"] as? Int)
 
         let isCharging = readBool(dict, key: "IsCharging")
-        let externalConnected = readBool(dict, key: "ExternalConnected")
+        let externalConnected = readOptionalBool(dict, key: "ExternalConnected")
         // ExternalConnected는 force discharge 시 CHIE에 의해 false로 보고됨.
         // ExternalChargeCapable / AppleRawExternalConnected는 물리적 연결 상태를 반영.
-        let externalChargeCapable = readBool(dict, key: "ExternalChargeCapable")
-        let rawExternalConnected = readBool(dict, key: "AppleRawExternalConnected")
+        let externalChargeCapable = readOptionalBool(dict, key: "ExternalChargeCapable")
+        let rawExternalConnected = readOptionalBool(dict, key: "AppleRawExternalConnected")
         let cycleCount = Self.nonnegativeMeasurement(dict["CycleCount"] as? Int)
 
         // Temperature: 데시켈빈 (K × 10). 예: 2969 → 296.9K → 23.75°C
@@ -216,13 +265,19 @@ final class BatteryMonitor: ObservableObject {
             health = nil
         }
 
-        // ExternalConnected 외에 ExternalChargeCapable / AppleRawExternalConnected로 보완
-        let pluggedIn = externalConnected || externalChargeCapable || rawExternalConnected || isCharging
+        let connectionEvidence = Self.connectionEvidence(
+            externalConnected: externalConnected,
+            externalChargeCapable: externalChargeCapable,
+            rawExternalConnected: rawExternalConnected,
+            isCharging: isCharging
+        )
+        let pluggedIn = connectionEvidence == .connected
 
         return BatteryInfo(
             currentCharge: currentCharge,
             isCharging: isCharging,
             isPluggedIn: pluggedIn,
+            connectionEvidence: connectionEvidence,
             maxCapacity: rawMaxCapacity,
             designCapacity: designCapacity,
             cycleCount: cycleCount,
@@ -235,6 +290,35 @@ final class BatteryMonitor: ObservableObject {
             isPresent: batteryPresent,
             serialNumber: serialNumber
         )
+    }
+
+    nonisolated static func connectionEvidence(
+        externalConnected: Bool?,
+        externalChargeCapable: Bool?,
+        rawExternalConnected: Bool?,
+        isCharging: Bool
+    ) -> PowerConnectionEvidence {
+        let externalSignals = [externalConnected, externalChargeCapable, rawExternalConnected]
+        if isCharging || externalSignals.contains(where: { $0 == true }) {
+            return .connected
+        }
+        if externalSignals.allSatisfy({ $0 == false }) {
+            return .disconnected
+        }
+        return .uncertain
+    }
+
+    nonisolated static func resolvedPowerConnection(
+        info: BatteryInfo,
+        sourceKind: BatteryPowerSourceKind?
+    ) -> StablePowerConnection? {
+        if info.connectionEvidence == .connected || sourceKind == .ac {
+            return .connected
+        }
+        if info.connectionEvidence == .disconnected, sourceKind == .battery {
+            return .disconnected
+        }
+        return nil
     }
 
     nonisolated static func normalizedAmperage(_ number: NSNumber?) -> Int? {
@@ -282,16 +366,15 @@ final class BatteryMonitor: ObservableObject {
 
         monitoringGeneration &+= 1
         isMonitoring = true
-        lastPowerSourceKind = readPowerSourceKind()
-        refreshBatteryInfo()
+        lastPowerSourceKind = nil
+        refreshPowerConnectionPresentation()
         guard runsMonitoringInfrastructure else { return }
 
         let watchdog = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self,
-                      self.isMonitoring,
-                      self.powerSourceSettlementTask == nil else { return }
-                self.refreshBatteryInfo()
+                      self.isMonitoring else { return }
+                self.performWatchdogRefresh()
             }
         }
         watchdog.tolerance = min(5, max(0, interval * 0.2))
@@ -305,14 +388,95 @@ final class BatteryMonitor: ObservableObject {
         reconcilePowerSourceAfterRegistration()
     }
 
-    /// Reads once and publishes only a material state change. This keeps IOKit
-    /// notifications and the watchdog from producing duplicate UI/control work.
+    /// Refreshes the controller-facing measurement only. Connection presentation
+    /// deliberately uses a paired BatteryInfo/IOPS snapshot through
+    /// `refreshPowerConnectionPresentation()`.
     @discardableResult
     func refreshBatteryInfo() -> Bool {
-        let freshInfo = readBatteryInfo()
+        publishBatteryInfo(readBatteryInfo())
+    }
+
+    @discardableResult
+    private func publishBatteryInfo(_ freshInfo: BatteryInfo?) -> Bool {
         guard freshInfo != batteryInfo else { return false }
         batteryInfo = freshInfo
         return true
+    }
+
+    private func readFreshPowerSnapshot() -> FreshPowerSnapshot {
+        let sourceKind = readPowerSourceKind()
+        let batteryInfo = readBatteryInfo()
+        return FreshPowerSnapshot(sourceKind: sourceKind, batteryInfo: batteryInfo)
+    }
+
+    /// Performs one paired presentation read. Before monitoring starts this is a
+    /// one-shot observation and cannot create settlement or monitoring work.
+    @discardableResult
+    func refreshPowerConnectionPresentation() -> Bool {
+        if powerSourceSettlementTask != nil {
+            markSettlementRefreshPending()
+            return false
+        }
+
+        let snapshot = readFreshPowerSnapshot()
+        return applyFreshPowerSnapshot(snapshot)
+    }
+
+    @discardableResult
+    private func applyFreshPowerSnapshot(_ snapshot: FreshPowerSnapshot) -> Bool {
+        let didPublish = publishBatteryInfo(snapshot.batteryInfo)
+
+        if let observedKind = snapshot.sourceKind {
+            if isMonitoring,
+               let previousKind = lastPowerSourceKind,
+               previousKind != observedKind {
+                lastPowerSourceKind = observedKind
+                logger.notice(
+                    "Presentation refresh detected transition: \(String(describing: previousKind), privacy: .public) -> \(String(describing: observedKind), privacy: .public)"
+                )
+                startPowerSourceSettlement(for: observedKind, directionIsConfirmed: true)
+                return didPublish
+            }
+            lastPowerSourceKind = observedKind
+        }
+
+        updatePowerConnectionObservationIfSettled(
+            using: snapshot.batteryInfo,
+            sourceKind: snapshot.sourceKind
+        )
+        return didPublish
+    }
+
+    /// Narrow testable entry used by the real watchdog timer.
+    func performWatchdogRefresh() {
+        guard isMonitoring else { return }
+        if powerSourceSettlementTask != nil {
+            markSettlementRefreshPending()
+            return
+        }
+        refreshPowerConnectionPresentation()
+    }
+
+    private func updatePowerConnectionObservationIfSettled(
+        using info: BatteryInfo?,
+        sourceKind: BatteryPowerSourceKind?
+    ) {
+        guard powerSourceSettlementTask == nil else { return }
+        let previousConnection = powerConnectionObservation.lastConfirmed
+        guard let info,
+              let connection = Self.resolvedPowerConnection(
+                info: info,
+                sourceKind: sourceKind
+              ) else {
+            publishPowerConnectionObservation(.uncertain(previous: previousConnection))
+            return
+        }
+        publishPowerConnectionObservation(.stable(connection))
+    }
+
+    private func publishPowerConnectionObservation(_ observation: PowerConnectionObservation) {
+        guard observation != powerConnectionObservation else { return }
+        powerConnectionObservation = observation
     }
 
     func stopMonitoring() {
@@ -321,6 +485,8 @@ final class BatteryMonitor: ObservableObject {
         powerSourceTransitionGeneration &+= 1
         powerSourceSettlementTask?.cancel()
         powerSourceSettlementTask = nil
+        pendingSettlementRefreshGeneration = nil
+        powerSourceSettlementDirectionIsConfirmed = false
         timer?.invalidate()
         timer = nil
         notificationRefreshWork?.cancel()
@@ -359,57 +525,38 @@ final class BatteryMonitor: ObservableObject {
     }
 
     func scheduleNotificationRefresh() {
-        guard isMonitoring,
-              notificationRefreshWork == nil,
-              presentationRefreshResetWork == nil,
-              powerSourceSettlementTask == nil else { return }
+        guard isMonitoring else { return }
+        if powerSourceSettlementTask != nil {
+            markSettlementRefreshPending()
+            return
+        }
+        guard notificationRefreshWork == nil,
+              presentationRefreshResetWork == nil else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.notificationRefreshWork = nil
             guard self.isMonitoring else { return }
-            self.refreshBatteryInfo()
+            self.refreshPowerConnectionPresentation()
         }
         notificationRefreshWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+        notificationRefreshScheduler(work)
     }
 
     func handleBroadPowerSourceNotification() {
-        guard isMonitoring else { return }
-        guard let observedKind = readPowerSourceKind() else {
-            scheduleNotificationRefresh()
-            return
-        }
-        guard let previousKind = lastPowerSourceKind else {
-            lastPowerSourceKind = observedKind
-            scheduleNotificationRefresh()
-            return
-        }
-        guard previousKind != observedKind else {
-            scheduleNotificationRefresh()
-            return
-        }
-
-        lastPowerSourceKind = observedKind
-        logger.notice(
-            "Broad power-source notification detected transition: \(String(describing: previousKind), privacy: .public) -> \(String(describing: observedKind), privacy: .public)"
-        )
-        if powerSourceSettlementTask != nil {
-            // A dedicated edge signal may have anchored the task before the
-            // IOPS source snapshot converged. Let that task adopt this value at
-            // its next absolute offset instead of restarting the deadline.
-            return
-        }
-        startPowerSourceSettlement(for: observedKind)
+        scheduleNotificationRefresh()
     }
 
     /// Refreshes synchronously on the first visibility request and coalesces
     /// other requests made during the same main-run-loop turn.
     func requestPresentationRefresh() {
-        guard presentationRefreshResetWork == nil,
-              powerSourceSettlementTask == nil else { return }
+        if powerSourceSettlementTask != nil {
+            markSettlementRefreshPending()
+            return
+        }
+        guard presentationRefreshResetWork == nil else { return }
         notificationRefreshWork?.cancel()
         notificationRefreshWork = nil
-        refreshBatteryInfo()
+        refreshPowerConnectionPresentation()
 
         let work = DispatchWorkItem { [weak self] in
             self?.presentationRefreshResetWork = nil
@@ -422,15 +569,19 @@ final class BatteryMonitor: ObservableObject {
         guard isMonitoring else { return }
         guard let observedKind = readPowerSourceKind() else {
             if let lastPowerSourceKind, powerSourceSettlementTask == nil {
-                startPowerSourceSettlement(for: lastPowerSourceKind)
+                startPowerSourceSettlement(for: lastPowerSourceKind, directionIsConfirmed: false)
             } else {
                 requestPresentationRefresh()
             }
             return
         }
         guard let previousKind = lastPowerSourceKind else {
-            lastPowerSourceKind = observedKind
-            requestPresentationRefresh()
+            applyFreshPowerSnapshot(
+                FreshPowerSnapshot(
+                    sourceKind: observedKind,
+                    batteryInfo: readBatteryInfo()
+                )
+            )
             return
         }
         guard previousKind != observedKind else {
@@ -439,7 +590,9 @@ final class BatteryMonitor: ObservableObject {
             // one anchored settlement alive even when the first source read is
             // still the cached direction. Bursts cannot restart an active run.
             if powerSourceSettlementTask == nil {
-                startPowerSourceSettlement(for: observedKind)
+                startPowerSourceSettlement(for: observedKind, directionIsConfirmed: false)
+            } else {
+                markSettlementRefreshPending()
             }
             return
         }
@@ -448,7 +601,7 @@ final class BatteryMonitor: ObservableObject {
         logger.notice(
             "Power-source transition observed: \(String(describing: previousKind), privacy: .public) -> \(String(describing: observedKind), privacy: .public)"
         )
-        startPowerSourceSettlement(for: observedKind)
+        startPowerSourceSettlement(for: observedKind, directionIsConfirmed: true)
     }
 
     private func registerPowerSourceTransitionNotification() {
@@ -485,19 +638,14 @@ final class BatteryMonitor: ObservableObject {
     }
 
     private func reconcilePowerSourceAfterRegistration() {
-        guard isMonitoring,
-              let observedKind = readPowerSourceKind(),
-              let previousKind = lastPowerSourceKind,
-              previousKind != observedKind else { return }
-
-        lastPowerSourceKind = observedKind
-        logger.notice(
-            "Power-source transition detected across observer registration: \(String(describing: previousKind), privacy: .public) -> \(String(describing: observedKind), privacy: .public)"
-        )
-        startPowerSourceSettlement(for: observedKind)
+        guard isMonitoring else { return }
+        refreshPowerConnectionPresentation()
     }
 
-    private func startPowerSourceSettlement(for initialExpectedKind: BatteryPowerSourceKind) {
+    private func startPowerSourceSettlement(
+        for initialExpectedKind: BatteryPowerSourceKind,
+        directionIsConfirmed: Bool
+    ) {
         powerSourceTransitionGeneration &+= 1
         let transitionGeneration = powerSourceTransitionGeneration
         let currentMonitoringGeneration = monitoringGeneration
@@ -508,14 +656,20 @@ final class BatteryMonitor: ObservableObject {
         presentationRefreshResetWork?.cancel()
         presentationRefreshResetWork = nil
         powerSourceSettlementTask?.cancel()
+        pendingSettlementRefreshGeneration = nil
+        powerSourceSettlementDirectionIsConfirmed = directionIsConfirmed
+        let previousConnection = powerConnectionObservation.lastConfirmed
+        publishPowerConnectionObservation(.transitioning(previous: previousConnection))
 
         powerSourceSettlementTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            var expectedKind = initialExpectedKind
+            var lastConnectionCandidate: StablePowerConnection?
             defer {
-                if self.powerSourceTransitionGeneration == transitionGeneration {
-                    self.powerSourceSettlementTask = nil
-                }
+                self.finishPowerSourceSettlement(
+                    generation: transitionGeneration,
+                    previousConnection: previousConnection,
+                    lastConnectionCandidate: lastConnectionCandidate
+                )
             }
 
             for offset in self.transitionOffsetsNanoseconds {
@@ -527,22 +681,100 @@ final class BatteryMonitor: ObservableObject {
                       self.monitoringGeneration == currentMonitoringGeneration,
                       self.powerSourceTransitionGeneration == transitionGeneration else { return }
 
-                if let observedKind = self.readPowerSourceKind(),
-                   observedKind != expectedKind {
-                    self.logger.notice(
-                        "Power-source snapshot converged during settlement: \(String(describing: expectedKind), privacy: .public) -> \(String(describing: observedKind), privacy: .public)"
-                    )
-                    expectedKind = observedKind
-                    self.lastPowerSourceKind = observedKind
+                let observedKind = self.readPowerSourceKind()
+                if let observedKind,
+                   observedKind != self.lastPowerSourceKind {
+                    let priorKind = self.lastPowerSourceKind ?? initialExpectedKind
+                    if self.powerSourceSettlementDirectionIsConfirmed {
+                        self.logger.notice(
+                            "Power-source snapshot reversed during settlement: \(String(describing: priorKind), privacy: .public) -> \(String(describing: observedKind), privacy: .public)"
+                        )
+                        self.lastPowerSourceKind = observedKind
+                        self.startPowerSourceSettlement(
+                            for: observedKind,
+                            directionIsConfirmed: true
+                        )
+                        return
+                    } else {
+                        self.logger.notice(
+                            "Power-source snapshot converged during settlement: \(String(describing: priorKind), privacy: .public) -> \(String(describing: observedKind), privacy: .public)"
+                        )
+                        self.powerSourceSettlementDirectionIsConfirmed = true
+                        self.lastPowerSourceKind = observedKind
+                    }
                 }
-                let didPublish = self.refreshBatteryInfo()
-                if didPublish, let info = self.batteryInfo {
+                let freshInfo = self.readBatteryInfo()
+                guard !Task.isCancelled,
+                      self.isMonitoring,
+                      self.monitoringGeneration == currentMonitoringGeneration,
+                      self.powerSourceTransitionGeneration == transitionGeneration else { return }
+
+                let didPublish = self.publishBatteryInfo(freshInfo)
+                let candidate = freshInfo.flatMap {
+                    Self.resolvedPowerConnection(info: $0, sourceKind: observedKind)
+                }
+                lastConnectionCandidate = candidate
+                if let candidate {
+                    switch self.powerConnectionObservation {
+                    case .transitioning where candidate == previousConnection:
+                        break
+                    default:
+                        self.publishPowerConnectionObservation(.stable(candidate))
+                    }
+                }
+                if didPublish, let freshInfo {
                     self.logger.notice(
-                        "Power-transition measurement published at offset_ms=\(offset / 1_000_000, privacy: .public), plugged=\(info.isPluggedIn, privacy: .public), charging=\(info.isCharging, privacy: .public)"
+                        "Power-transition measurement published at offset_ms=\(offset / 1_000_000, privacy: .public), plugged=\(freshInfo.isPluggedIn, privacy: .public), charging=\(freshInfo.isCharging, privacy: .public)"
                     )
                 }
             }
         }
+    }
+
+    private func markSettlementRefreshPending() {
+        guard powerSourceSettlementTask != nil else { return }
+        pendingSettlementRefreshGeneration = powerSourceTransitionGeneration
+    }
+
+    private func finishPowerSourceSettlement(
+        generation: UInt64,
+        previousConnection: StablePowerConnection?,
+        lastConnectionCandidate: StablePowerConnection?
+    ) {
+        guard powerSourceTransitionGeneration == generation else { return }
+        powerSourceSettlementTask = nil
+        powerSourceSettlementDirectionIsConfirmed = false
+
+        if let lastConnectionCandidate {
+            publishPowerConnectionObservation(.stable(lastConnectionCandidate))
+        } else {
+            publishPowerConnectionObservation(.uncertain(previous: previousConnection))
+        }
+
+        guard pendingSettlementRefreshGeneration == generation else { return }
+        pendingSettlementRefreshGeneration = nil
+        scheduleTrailingRefresh(
+            monitoringGeneration: monitoringGeneration,
+            transitionGeneration: generation
+        )
+    }
+
+    private func scheduleTrailingRefresh(
+        monitoringGeneration: UInt64,
+        transitionGeneration: UInt64
+    ) {
+        guard isMonitoring, notificationRefreshWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.notificationRefreshWork = nil
+            guard self.isMonitoring,
+                  self.monitoringGeneration == monitoringGeneration,
+                  self.powerSourceTransitionGeneration == transitionGeneration,
+                  self.powerSourceSettlementTask == nil else { return }
+            self.refreshPowerConnectionPresentation()
+        }
+        notificationRefreshWork = work
+        notificationRefreshScheduler(work)
     }
 
     // MARK: - Sleep 제어

@@ -601,6 +601,7 @@ func makeBatteryInfo(
     charge: Int = 80,
     isCharging: Bool = false,
     isPluggedIn: Bool = true,
+    connectionEvidence: PowerConnectionEvidence? = nil,
     temperature: Double? = 30,
     amperage: Int? = -500,
     health: Double? = 90
@@ -609,6 +610,7 @@ func makeBatteryInfo(
         currentCharge: charge,
         isCharging: isCharging,
         isPluggedIn: isPluggedIn,
+        connectionEvidence: connectionEvidence ?? (isPluggedIn ? .connected : .disconnected),
         maxCapacity: 5_000,
         designCapacity: 5_500,
         cycleCount: 100,

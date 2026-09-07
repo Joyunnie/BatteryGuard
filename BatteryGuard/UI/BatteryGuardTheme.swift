@@ -290,25 +290,14 @@ struct PastelNotice: View {
     }
 }
 
-extension ChargeState {
+extension BatteryPresentationTone {
     var presentationTint: Color {
         switch self {
-        case .charging, .topUp: return BatteryGuardPalette.success
-        case .chargingPaused: return BatteryGuardPalette.warning
-        case .discharging: return BatteryGuardPalette.skyInk
-        case .notConnected: return .secondary
-        case .unknown: return BatteryGuardPalette.danger
-        }
-    }
-
-    var presentationIcon: String {
-        switch self {
-        case .charging: return "bolt.fill"
-        case .topUp: return "arrow.up.to.line.compact"
-        case .chargingPaused: return "pause.fill"
-        case .discharging: return "arrow.down.to.line.compact"
-        case .notConnected: return "powerplug.fill"
-        case .unknown: return "questionmark"
+        case .success: return BatteryGuardPalette.success
+        case .warning: return BatteryGuardPalette.warning
+        case .info: return BatteryGuardPalette.skyInk
+        case .neutral: return .secondary
+        case .danger: return BatteryGuardPalette.danger
         }
     }
 }

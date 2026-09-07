@@ -11,6 +11,281 @@ enum ChargeState: String {
     case topUp = "Top Up 중"
 }
 
+enum BatteryPresentationTone: Equatable, Sendable {
+    case success
+    case warning
+    case info
+    case neutral
+    case danger
+}
+
+struct BatteryPresentation: Equatable, Sendable {
+    let statusTitle: String
+    let statusIcon: String
+    let menuBarIcon: String
+    let tone: BatteryPresentationTone
+    let showsChargingBolt: Bool
+    let powerIcon: String
+    let powerLabel: String
+    let eyebrow: String
+    let headline: String
+
+    nonisolated static func make(
+        info: BatteryInfo?,
+        connection: PowerConnectionObservation,
+        mode: ChargeMode,
+        chargeState: ChargeState,
+        requiresManualRecovery: Bool
+    ) -> BatteryPresentation {
+        let power = PowerDescription(connection)
+
+        if requiresManualRecovery {
+            let connectedPrefix = connection == .stable(.connected) ? "전원 연결됨 · " : ""
+            return BatteryPresentation(
+                statusTitle: "\(connectedPrefix)충전 제어 복구 필요",
+                statusIcon: "exclamationmark.triangle.fill",
+                menuBarIcon: "exclamationmark.triangle.fill",
+                tone: .danger,
+                showsChargingBolt: false,
+                powerIcon: power.icon,
+                powerLabel: power.label,
+                eyebrow: power.eyebrow,
+                headline: "실제 충전 제어 상태를 확인해 주세요"
+            )
+        }
+
+        switch mode {
+        case .failed:
+            return makeSafetyPresentation(
+                title: "충전 제어 확인 필요",
+                icon: "exclamationmark.triangle.fill",
+                tone: .danger,
+                headline: "충전 제어 오류를 확인해 주세요",
+                power: power
+            )
+        case .externalDrift:
+            return makeSafetyPresentation(
+                title: "외부 충전 상태 확인 필요",
+                icon: "arrow.triangle.2.circlepath.circle.fill",
+                tone: .warning,
+                headline: "외부에서 바뀐 충전 상태를 확인해 주세요",
+                power: power
+            )
+        case .heatBlocked:
+            return makeSafetyPresentation(
+                title: "고온 보호 중",
+                icon: "thermometer.sun.fill",
+                tone: .warning,
+                headline: "고온으로 충전을 잠시 멈췄어요",
+                power: power
+            )
+        case .sleepProtected:
+            return makeSafetyPresentation(
+                title: "잠자기 충전 보호 중",
+                icon: "moon.fill",
+                tone: .info,
+                headline: "잠자기 동안 충전을 멈췄어요",
+                power: power
+            )
+        default:
+            break
+        }
+
+        switch connection {
+        case .transitioning:
+            return BatteryPresentation(
+                statusTitle: "전원 연결 상태 확인 중",
+                statusIcon: "arrow.triangle.2.circlepath",
+                menuBarIcon: "arrow.triangle.2.circlepath",
+                tone: .info,
+                showsChargingBolt: false,
+                powerIcon: power.icon,
+                powerLabel: power.label,
+                eyebrow: power.eyebrow,
+                headline: "전원 연결 변화를 확인하고 있어요"
+            )
+        case .uncertain:
+            return BatteryPresentation(
+                statusTitle: "전원 연결 상태 확인 필요",
+                statusIcon: "questionmark",
+                menuBarIcon: "questionmark.circle",
+                tone: .warning,
+                showsChargingBolt: false,
+                powerIcon: power.icon,
+                powerLabel: power.label,
+                eyebrow: power.eyebrow,
+                headline: "전원 연결 여부를 확인할 수 없어요"
+            )
+        case .stable:
+            break
+        }
+
+        guard let info else {
+            return BatteryPresentation(
+                statusTitle: "상태 확인 필요",
+                statusIcon: "questionmark",
+                menuBarIcon: "questionmark.circle",
+                tone: .danger,
+                showsChargingBolt: false,
+                powerIcon: power.icon,
+                powerLabel: power.label,
+                eyebrow: power.eyebrow,
+                headline: "배터리 정보를 읽을 수 없어요"
+            )
+        }
+
+        if case .toppingUp = mode {
+            return makeActivityPresentation(
+                title: "Top Up 중",
+                icon: "arrow.up.to.line.compact",
+                menuBarIcon: "bolt.fill",
+                tone: .success,
+                showsChargingBolt: true,
+                headline: "추가 충전을 진행하고 있어요",
+                power: power
+            )
+        }
+        if case .discharging = mode {
+            return makeActivityPresentation(
+                title: "방전 중",
+                icon: "arrow.down.to.line.compact",
+                menuBarIcon: "arrow.down.circle.fill",
+                tone: .info,
+                showsChargingBolt: false,
+                headline: "목표까지 안전하게 방전 중이에요",
+                power: power
+            )
+        }
+        if info.isCharging {
+            return makeActivityPresentation(
+                title: "충전 중",
+                icon: "bolt.fill",
+                menuBarIcon: "bolt.fill",
+                tone: .success,
+                showsChargingBolt: true,
+                headline: "한도까지 충전하고 있어요",
+                power: power
+            )
+        }
+        if connection == .stable(.disconnected) {
+            return makeActivityPresentation(
+                title: ChargeState.notConnected.rawValue,
+                icon: "powerplug",
+                menuBarIcon: "battery.25percent",
+                tone: .neutral,
+                showsChargingBolt: false,
+                headline: "배터리 전원으로 사용 중이에요",
+                power: power
+            )
+        }
+
+        if case .maintaining(let limit) = mode {
+            let isHoldingAtLimit = info.currentCharge >= limit
+            return makeActivityPresentation(
+                title: isHoldingAtLimit ? "충전 한도 유지 중" : "전원 연결됨 · 충전 대기 중",
+                icon: isHoldingAtLimit ? "pause.fill" : "powerplug.fill",
+                menuBarIcon: "battery.75percent",
+                tone: isHoldingAtLimit ? .success : .warning,
+                showsChargingBolt: false,
+                headline: isHoldingAtLimit
+                    ? "설정한 충전 한도를 지키고 있어요"
+                    : "macOS의 충전 시작을 기다리고 있어요",
+                power: power
+            )
+        }
+
+        let headline: String
+        switch mode {
+        case .controlDisabled:
+            headline = "macOS가 충전 상태를 관리하고 있어요"
+        case .transitioning:
+            headline = "안전한 충전 상태로 전환 중이에요"
+        default:
+            headline = chargeState == .unknown
+                ? "충전 상태를 확인해 주세요"
+                : "설정한 범위를 지키고 있어요"
+        }
+        return makeActivityPresentation(
+            title: chargeState.rawValue,
+            icon: chargeState == .unknown ? "questionmark" : "pause.fill",
+            menuBarIcon: chargeState == .unknown ? "questionmark.circle" : "battery.75percent",
+            tone: chargeState == .unknown ? .warning : .info,
+            showsChargingBolt: false,
+            headline: headline,
+            power: power
+        )
+    }
+
+    private nonisolated static func makeSafetyPresentation(
+        title: String,
+        icon: String,
+        tone: BatteryPresentationTone,
+        headline: String,
+        power: PowerDescription
+    ) -> BatteryPresentation {
+        BatteryPresentation(
+            statusTitle: title,
+            statusIcon: icon,
+            menuBarIcon: icon,
+            tone: tone,
+            showsChargingBolt: false,
+            powerIcon: power.icon,
+            powerLabel: power.label,
+            eyebrow: power.eyebrow,
+            headline: headline
+        )
+    }
+
+    private nonisolated static func makeActivityPresentation(
+        title: String,
+        icon: String,
+        menuBarIcon: String,
+        tone: BatteryPresentationTone,
+        showsChargingBolt: Bool,
+        headline: String,
+        power: PowerDescription
+    ) -> BatteryPresentation {
+        BatteryPresentation(
+            statusTitle: title,
+            statusIcon: icon,
+            menuBarIcon: menuBarIcon,
+            tone: tone,
+            showsChargingBolt: showsChargingBolt,
+            powerIcon: power.icon,
+            powerLabel: power.label,
+            eyebrow: power.eyebrow,
+            headline: headline
+        )
+    }
+
+    private struct PowerDescription {
+        let icon: String
+        let label: String
+        let eyebrow: String
+
+        nonisolated init(_ observation: PowerConnectionObservation) {
+            switch observation {
+            case .stable(.connected):
+                icon = "powerplug.fill"
+                label = "연결됨"
+                eyebrow = "전원 연결됨"
+            case .stable(.disconnected):
+                icon = "powerplug"
+                label = "연결 안 됨"
+                eyebrow = "배터리 사용 중"
+            case .transitioning:
+                icon = "arrow.triangle.2.circlepath"
+                label = "확인 중"
+                eyebrow = "전원 연결 확인 중"
+            case .uncertain:
+                icon = "questionmark.circle"
+                label = "알 수 없음"
+                eyebrow = "전원 연결 불명"
+            }
+        }
+    }
+}
+
 enum ReconciliationTrigger: String, Equatable, Sendable {
     case periodic
     case appActivation

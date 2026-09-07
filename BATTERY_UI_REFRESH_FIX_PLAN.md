@@ -102,6 +102,8 @@ UI visibility/activation  -> coalesced single read
 
 routine IOPS 알림, watchdog, UI 표시 요청은 평상시 각각 독립적인 single-read trigger다. 다만 active settlement가 있으면 추가 read를 만들지 않고 가장 가까운 scheduled settlement read가 그 요청을 충족한다.
 
+> 2026-09-07 후속 보완: 이 문단의 “별도 read 없이 충족”은 배터리 측정 publication에 대해서만 유효하다. active settlement 중 요청은 같은 generation의 pending marker로 합쳐지고, settlement 종료 뒤 generation이 여전히 유효하면 현재 `BatteryInfo`와 IOPS source를 함께 읽는 trailing refresh를 최대 한 번 수행한다. 또한 steady-state watchdog, visibility, routine notification, observer-registration reconciliation은 캐시된 source가 아니라 현재 paired snapshot을 사용한다. 자세한 계약과 검증은 `POWER_CONNECTION_REMEDIATION_PLAN.md`를 따른다.
+
 - routine IOPS burst: 100ms coalescing 뒤 한 번 읽기
 - watchdog: 30초마다 한 번 읽기
 - UI visibility/activation: 같은 run-loop turn의 요청을 한 번으로 합치고, active settlement 중이면 별도 read 없이 settlement에 합류

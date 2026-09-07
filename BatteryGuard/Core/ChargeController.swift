@@ -240,14 +240,14 @@ final class ChargeController: ObservableObject {
         guard case .failed(_, _, .manualRecovery(let context)) = mode else { return nil }
         return context
     }
-    var manualRecoveryStatusTitle: String? {
-        guard manualInterventionRecoveryDescription != nil else { return nil }
-        return monitor.batteryInfo?.isPluggedIn == true
-            ? "전원 연결됨 · 충전 제어 복구 필요"
-            : "충전 제어 복구 필요"
-    }
-    var primaryChargeStatusTitle: String {
-        manualRecoveryStatusTitle ?? currentState.rawValue
+    var batteryPresentation: BatteryPresentation {
+        BatteryPresentation.make(
+            info: monitor.batteryInfo,
+            connection: monitor.powerConnectionObservation,
+            mode: mode,
+            chargeState: currentState,
+            requiresManualRecovery: manualInterventionRecoveryDescription != nil
+        )
     }
     var manualRecoveryObservedDescription: String? {
         manualRecoveryContext?.latestObservedState.map {
