@@ -464,6 +464,43 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(controller.lastError?.contains("온도") == true)
     }
 
+    func testManualRecoveryRechecksTupleAfterTemperatureAwait() async {
+        let failed = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "uncertain hardware state",
+            disposition: .manualIntervention
+        )
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            batteryInfoOnRead: makeBatteryInfo(temperature: 30),
+            initialMode: failed
+        )
+        backend.enqueueControlStatuses([
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            ),
+            BatteryControlStatus(
+                charging: .enabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        ])
+        backend.enqueueTemperatureReadDelays([0.05])
+
+        await controller.retryManualInterventionRecovery()
+
+        guard case .externalDrift = controller.mode else {
+            return XCTFail("A tuple changed during temperature verification must remain drift")
+        }
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
     func testShutdownCancellationFailureStopsBeforeAnyRecoveryMutation() async {
         let (controller, backend, monitor, settings) = makeSUT(charge: 90)
         settings.chargeLimit = 80

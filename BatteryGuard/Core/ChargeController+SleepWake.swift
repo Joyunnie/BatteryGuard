@@ -463,6 +463,18 @@ extension ChargeController {
                     updateLED()
                     return
                 }
+                let finalSnapshot = try await readReconciliationSnapshot(for: expectation)
+                guard activeOperationID == reconciliationID, !Task.isCancelled else { return }
+                guard ChargeReconciliationPolicy.status(finalSnapshot, matches: expectation) else {
+                    let observed = ChargeReconciliationPolicy.observedMode(from: finalSnapshot.status)
+                    mode = .externalDrift(expected: expectation, observed: observed)
+                    driftError = "Wake 후 온도 확인 중 외부 CLI 변경 감지: \(observed.userDescription)"
+                    readiness = .ready
+                    activeOperationID = nil
+                    refreshDisplayedError()
+                    updateLED()
+                    return
+                }
             }
 
             if case .maintaining = expectation {

@@ -152,6 +152,7 @@ extension ChargeController {
         }
 
         let failedMode = mode
+        let generation = operationGeneration
         let diagnosticOperationID = UUID()
         isReconcilingExternalState = true
         defer { isReconcilingExternalState = false }
@@ -163,7 +164,9 @@ extension ChargeController {
             ) {
                 try await backend.readControlStatus()
             }
-            guard mode == failedMode, !isShuttingDown else { return }
+            guard mode == failedMode,
+                  operationGeneration == generation,
+                  !isShuttingDown else { return }
             statusDescription = status.diagnosticDescription
             observed = ChargeReconciliationPolicy.observedMode(from: status)
             if case .restoreMaintain(let limit) = context.target,
@@ -174,12 +177,25 @@ extension ChargeController {
                     ) {
                         await self.readFreshSafetyTemperature()
                     }
-                    guard mode == failedMode, !isShuttingDown else { return }
+                    guard mode == failedMode,
+                          operationGeneration == generation,
+                          !isShuttingDown else { return }
                     guard temperature.permitsAutomaticCharging(
                         upTo: settings.heatProtectionThreshold
                     ) else {
                         throw BatteryError.unsupported(
                             "독립 온도 센서를 새로 확인할 수 없거나 안전 온도를 벗어났습니다."
+                        )
+                    }
+                    let finalStatus = try await backend.readControlStatus()
+                    guard mode == failedMode,
+                          operationGeneration == generation,
+                          !isShuttingDown else { return }
+                    observed = ChargeReconciliationPolicy.observedMode(from: finalStatus)
+                    guard finalStatus.isVerifiedMaintain(level: limit) else {
+                        throw BatteryError.commandFailed(
+                            "manual recovery status refresh", -1,
+                            "final Maintain tuple changed during temperature verification"
                         )
                     }
                 }
@@ -202,7 +218,9 @@ extension ChargeController {
                 return
             }
         } catch {
-            guard mode == failedMode, !isShuttingDown else { return }
+            guard mode == failedMode,
+                  operationGeneration == generation,
+                  !isShuttingDown else { return }
             let failureObservation = observed
                 ?? .unavailable(error.localizedDescription)
             mode = .failed(
@@ -228,7 +246,9 @@ extension ChargeController {
             return
         }
 
-        guard mode == failedMode, !isShuttingDown else { return }
+        guard mode == failedMode,
+              operationGeneration == generation,
+              !isShuttingDown else { return }
         mode = .failed(
             previous: previous,
             message: message,
@@ -400,21 +420,34 @@ extension ChargeController {
 
         let failedMode = mode
         let readinessBeforeRecovery = readiness
+        let generation = operationGeneration
         let expectation = manualRecoveryExpectation(for: previous)
         let stateBefore = failedMode.diagnosticLabel
         isReconcilingExternalState = true
         readiness = .reconciling
-        defer { isReconcilingExternalState = false }
+        defer {
+            isReconcilingExternalState = false
+            if readiness == .reconciling,
+               !isShuttingDown,
+               mode == failedMode,
+               operationGeneration == generation {
+                readiness = readinessBeforeRecovery
+            }
+        }
 
         do {
-            let snapshot = try await readReconciliationSnapshot(for: expectation)
-            guard !isShuttingDown, mode == failedMode else { return }
+            var snapshot = try await readReconciliationSnapshot(for: expectation)
+            guard !isShuttingDown,
+                  mode == failedMode,
+                  operationGeneration == generation else { return }
 
             if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
                 if settings.heatProtectionEnabled {
                     let temperature = await readFreshSafetyTemperature()
                     try Task.checkCancellation()
-                    guard !isShuttingDown, mode == failedMode else { return }
+                    guard !isShuttingDown,
+                          mode == failedMode,
+                          operationGeneration == generation else { return }
                     guard temperature.permitsAutomaticCharging(
                         upTo: settings.heatProtectionThreshold
                     ) else {
@@ -422,25 +455,31 @@ extension ChargeController {
                             "독립 온도 센서 전체를 새로 확인할 수 없거나 안전 온도를 벗어나 수동 복구를 승인하지 않았습니다."
                         )
                     }
+                    snapshot = try await readReconciliationSnapshot(for: expectation)
+                    guard !isShuttingDown,
+                          mode == failedMode,
+                          operationGeneration == generation else { return }
                 }
-                if case .maintaining = expectation {
-                    monitor.allowSleep()
-                }
-                mode = expectation.reconciledMode
-                readiness = .ready
-                commandError = nil
-                driftError = nil
-                refreshDisplayedError()
-                await diagnostics.record(
-                    DiagnosticEvent(
-                        category: .control,
-                        operation: "manual recovery verified",
-                        outcome: .succeeded,
-                        stateBefore: stateBefore,
-                        stateAfter: mode.diagnosticLabel
+                if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
+                    if case .maintaining = expectation {
+                        monitor.allowSleep()
+                    }
+                    mode = expectation.reconciledMode
+                    readiness = .ready
+                    commandError = nil
+                    driftError = nil
+                    refreshDisplayedError()
+                    await diagnostics.record(
+                        DiagnosticEvent(
+                            category: .control,
+                            operation: "manual recovery verified",
+                            outcome: .succeeded,
+                            stateBefore: stateBefore,
+                            stateAfter: mode.diagnosticLabel
+                        )
                     )
-                )
-                return
+                    return
+                }
             }
 
             let observed = ChargeReconciliationPolicy.observedMode(from: snapshot.status)
@@ -460,7 +499,9 @@ extension ChargeController {
                 )
             )
         } catch {
-            guard !isShuttingDown, mode == failedMode else { return }
+            guard !isShuttingDown,
+                  mode == failedMode,
+                  operationGeneration == generation else { return }
             readiness = readinessBeforeRecovery
             commandError = "수동 복구 상태를 확인하지 못했습니다: \(error.localizedDescription)"
             refreshDisplayedError()

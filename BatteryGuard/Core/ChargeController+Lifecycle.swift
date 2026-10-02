@@ -363,6 +363,9 @@ extension ChargeController {
             }
         } catch {
             let message = error.localizedDescription
+            if readinessBeforeShutdown == .reconciling {
+                readiness = .failed(message)
+            }
             commandError = message
             refreshDisplayedError()
             await diagnostics.record(
@@ -394,6 +397,8 @@ extension ChargeController {
             isShuttingDown = false
             if case .failed = readinessBeforeShutdown {
                 readiness = readinessBeforeShutdown
+            } else if readinessBeforeShutdown == .reconciling {
+                readiness = .failed(error.localizedDescription)
             } else {
                 readiness = .ready
             }
