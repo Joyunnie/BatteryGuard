@@ -71,7 +71,7 @@ enum HeatProtectionPolicy {
             return HeatProtectionEvaluation(temperature: temperature, action: .none)
         }
         switch input.mode {
-        case .heatBlocked(let blockedPrevious):
+        case .heatBlocked(let blockedPrevious) where retryAllowed:
             return HeatProtectionEvaluation(
                 temperature: temperature,
                 action: .restore(previous: blockedPrevious)

@@ -81,6 +81,26 @@ final class HeatProtectionPolicyTests: XCTestCase {
         )
     }
 
+    func testVerifiedHeatBlockRespectsRestoreCooldown() {
+        let blocked = ChargeMode.heatBlocked(previous: .maintaining(limit: 80))
+        XCTAssertEqual(
+            evaluate(
+                temperature: 30,
+                mode: blocked,
+                retryAfter: now.addingTimeInterval(10)
+            ).action,
+            .none
+        )
+        XCTAssertEqual(
+            evaluate(
+                temperature: 30,
+                mode: blocked,
+                retryAfter: now
+            ).action,
+            .restore(previous: .maintaining(limit: 80))
+        )
+    }
+
     func testFailedStateRestoreRequiresBatteryInfoAndExpiredCooldown() {
         let failed = ChargeMode.failed(
             previous: .maintaining(limit: 75),

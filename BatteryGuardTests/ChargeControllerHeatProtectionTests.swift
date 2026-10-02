@@ -212,6 +212,11 @@ extension ChargeControllerSafetyTests {
             backend.operations.filter { $0 == "disable-charging" }.count,
             2
         )
+        XCTAssertEqual(controller.heatRestoreFailureCount, 1)
+        XCTAssertNotNil(controller.heatProtectionRetryAfter)
+        let restoreCount = backend.operations.filter { $0 == "maintain:80" }.count
+        controller.processBatteryInfo(coolInfo)
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, restoreCount)
     }
 
     func testFailedDischargeRestoreRetainsSleepAssertionWhenReblockFails() async {
@@ -241,7 +246,7 @@ extension ChargeControllerSafetyTests {
         controller.processBatteryInfo(coolInfo)
 
         let failed = await eventually {
-            if case .failed(_, _, .heatProtection) = controller.mode {
+            if case .failed(_, _, .manualIntervention) = controller.mode {
                 return !controller.isCommandPending
             }
             return false
