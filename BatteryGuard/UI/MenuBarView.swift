@@ -326,7 +326,7 @@ struct ChargeRecoveryStatusView: View {
                 }
             }
         } label: {
-            Label("상태 다시 확인", systemImage: "arrow.clockwise")
+            Label(controller.manualRecoveryRefreshTitle, systemImage: "arrow.clockwise")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
