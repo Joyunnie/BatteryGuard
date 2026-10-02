@@ -1,6 +1,6 @@
 # BatteryGuard 장기 복구성 개선 계획
 
-작성: 2026-10-02 · 상태: 실행 중 (2026-10-02 코드 재검토 반영)
+작성: 2026-10-02 · 상태: 코드 구현 및 자동 검증 완료, 실제 하드웨어 검증 대기
 
 ## 1. 목적과 확인된 사실
 
@@ -114,3 +114,13 @@
 - 실제 하드웨어를 기본 테스트가 건드리거나, raw 실패 증거 없이 하드웨어 성공을 선언한다.
 
 완전한 무인 복구는 **검증 가능한 상태**에서만 가능하다. CLI가 계속 응답하지 않거나 process cleanup/ownership이 불명확하면 앱은 안전하게 멈추고 사용자의 명시적 결정을 요청해야 한다. 이 경계는 버그가 아니라 하드웨어 제어 앱의 의도된 안전 한계다.
+
+## 7. 실행 기록 (2026-10-02)
+
+- PR 1 범위: 초기화 실패의 typed 복구 context, read-only 상태 재검증, `previous == nil`에서도 접근 가능한 재시도, 비차단 오류 UI, 인프라 재구성 후 readiness 전환. 이 PR의 독립 strict-concurrency 전체 테스트 통과.
+- PR 2 범위: 단일 명령 뒤 bounded status settlement, preflight와 잠자기 확인의 일시 timeout 재시도, operation-correlated typed 진단. 진단 필드는 검증 구현과 함께 두어 이 PR만으로 실패 증거를 남긴다.
+- PR 3 범위: 수동 복구와 wake의 온도 `await` 뒤 최종 tuple 재검증, generation 확인, shutdown 경합의 readiness 복원.
+- PR 4 범위: 검증된 Heat 재차단에 bounded backoff, 불확실한 복원 실패는 수동 개입으로 분류.
+- PR 5 범위: 실패한 이력 저장소의 낮은 빈도 재열기 및 데이터 보존.
+- 전체 변경에서 strict-concurrency warnings-as-errors XCTest, Release build, Debug Analyze, strict build-for-testing 통과. 기본 테스트는 fixture/fake/in-memory 설정으로 실행했으며 실제 배터리 CLI 명령은 실행하지 않았다.
+- 미완료: 실제 충전기·잠자기·온도 조건을 이용하는 통제된 하드웨어 시나리오와 시간/전력 원자료 수집. 사용자와 함께 현재 상태를 확인한 뒤 별도 승인된 단계로 진행한다. 이 기록 전에는 실기기 검증 완료나 무인 복구의 절대 보장을 주장하지 않는다.
