@@ -464,6 +464,9 @@ struct DashboardView: View {
     @MainActor
     private func refreshHistory() async {
         let history = BatteryHistory.shared
+        if case .failed = history.readiness {
+            history.retryLoad()
+        }
         let records = await history.loadRecentHistory()
         historyViewport.refresh(now: Date())
         historyRecords = records

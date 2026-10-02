@@ -258,6 +258,25 @@ final class BatteryHistoryTests: XCTestCase {
         XCTAssertTrue(history.fetchRecentHistory().isEmpty)
     }
 
+    func testPersistentHistoryLoadCanRecoverAfterDirectoryBecomesAvailable() async throws {
+        let blockingFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-history-retry-\(UUID().uuidString)")
+        try Data("not a directory".utf8).write(to: blockingFile)
+        defer { try? FileManager.default.removeItem(at: blockingFile) }
+        let history = BatteryHistory(storeURL: blockingFile.appendingPathComponent("history.sqlite"))
+        guard case .failed = await history.waitUntilReady() else {
+            return XCTFail("Expected the initial directory failure")
+        }
+
+        try FileManager.default.removeItem(at: blockingFile)
+        history.retryLoad()
+
+        let recoveredReadiness = await history.waitUntilReady()
+        XCTAssertEqual(recoveredReadiness, .ready)
+        XCTAssertTrue(history.record(chargePercent: 70, chargeLimit: 80))
+        XCTAssertEqual(history.fetchRecentHistory().count, 1)
+    }
+
     func testSaveAndFetchFailuresAreExposedAndLogged() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-history-log-\(UUID().uuidString)", isDirectory: true)

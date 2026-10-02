@@ -177,6 +177,33 @@ final class BatteryHistory {
         container.persistentStoreDescriptions = [description]
         container.viewContext.automaticallyMergesChangesFromParent = true
 
+        if case .failed = readiness { return }
+        loadStore()
+    }
+
+    func retryLoad() {
+        guard case .failed = readiness else { return }
+        readiness = .loading
+        if !inMemory,
+           let url = container.persistentStoreDescriptions.first?.url {
+            do {
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                setReadinessFailure("이력 저장 폴더를 만들지 못했습니다: \(error.localizedDescription)")
+                return
+            }
+        }
+        if !container.persistentStoreCoordinator.persistentStores.isEmpty {
+            finishSuccessfulLoad()
+        } else {
+            loadStore()
+        }
+    }
+
+    private func loadStore() {
         container.loadPersistentStores { [weak self] _, error in
             let errorMessage = error?.localizedDescription
             Task { @MainActor [weak self] in
@@ -190,14 +217,18 @@ final class BatteryHistory {
                     self.reportDiagnostic(message, operation: "load history store")
                     return
                 }
-                self.readiness = .ready
-                self.resolveReadinessWaiters()
-                let pendingRecords = self.pendingRecords
-                self.pendingRecords.removeAll()
-                for pending in pendingRecords {
-                    self.record(chargePercent: pending.chargePercent, chargeLimit: pending.chargeLimit)
-                }
+                self.finishSuccessfulLoad()
             }
+        }
+    }
+
+    private func finishSuccessfulLoad() {
+        readiness = .ready
+        resolveReadinessWaiters()
+        let pending = pendingRecords
+        pendingRecords.removeAll()
+        for record in pending {
+            self.record(chargePercent: record.chargePercent, chargeLimit: record.chargeLimit)
         }
     }
 
