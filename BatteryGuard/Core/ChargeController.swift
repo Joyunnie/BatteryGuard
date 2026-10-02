@@ -73,6 +73,12 @@ final class ChargeController: ObservableObject {
         }
     }
 
+    enum InitializationFailureContext {
+        case retryInitialization
+        case verifyControl(ReconciledChargeExpectation, BatteryControlOwnership)
+        case inspectHardware
+    }
+
     // Swift requires module access for state shared by extensions in separate
     // files. These remain ChargeController implementation details; callers
     // should use the intent methods and read-only presentation properties.
@@ -220,6 +226,17 @@ final class ChargeController: ObservableObject {
         return "Terminal에서 실제 상태를 BatteryGuard 기대 상태(\(expected.userDescription))로 복원한 뒤 다시 확인하세요."
     }
     var manualInterventionRecoveryDescription: String? {
+        if case .failed = readiness,
+           let initializationFailureContext {
+            switch initializationFailureContext {
+            case .verifyControl:
+                return "초기 제어 명령 뒤 상태 확인이 실패했습니다. 하드웨어를 변경하지 않고 다시 확인할 수 있습니다."
+            case .retryInitialization:
+                return "초기화가 완료되지 않았습니다. 원인을 확인한 뒤 초기화를 다시 시도할 수 있습니다."
+            case .inspectHardware:
+                return "초기 제어 명령 결과가 불확실합니다. 하드웨어 상태를 점검해야 합니다."
+            }
+        }
         guard case .failed(let previous?, _, let disposition) = mode else { return nil }
         switch disposition {
         case .manualIntervention:
@@ -258,9 +275,23 @@ final class ChargeController: ObservableObject {
         guard manualInterventionRecoveryDescription != nil else {
             return .denied("다시 확인할 수동 복구 상태가 없습니다.")
         }
-        if !isReady { return .denied("초기화가 완료되지 않았습니다.") }
+        if case .inspectHardware = initializationFailureContext {
+            return .denied("명령 실패 결과가 불확실합니다. 실제 하드웨어 상태를 먼저 점검하세요.")
+        }
+        if !isReady, case .failed = readiness {
+            // Failed initialization owns its own read-only verification path.
+        } else if !isReady {
+            return .denied("초기화가 진행 중입니다.")
+        }
         if isCommandPending { return .denied("다른 배터리 작업이 진행 중입니다.") }
         return .allowed
+    }
+    var manualRecoveryRefreshTitle: String {
+        if let initializationFailureContext,
+           case .retryInitialization = initializationFailureContext {
+            return "초기화 다시 시도"
+        }
+        return "상태 다시 확인"
     }
     var explicitMaintainRecoveryAvailability: ChargeActionAvailability {
         guard case .failed(_, _, .manualRecovery(let context)) = mode,
@@ -323,6 +354,7 @@ final class ChargeController: ObservableObject {
     var chargeLimitDebounceWork: DispatchWorkItem?
     var isShuttingDown = false
     var initializationInProgress = false
+    var initializationFailureContext: InitializationFailureContext?
     var initializationCompletionWaiters: [CheckedContinuation<Void, Never>] = []
     var backendAvailableForShutdown: Bool
     var initializationHardwareMutationAttempted: Bool

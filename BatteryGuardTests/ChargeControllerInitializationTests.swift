@@ -133,6 +133,111 @@ extension ChargeControllerSafetyTests {
         XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("top-up") }))
     }
 
+    func testTransientInitialMaintainFailureUsesReadOnlyVerification() async throws {
+        let backend = FakeChargeBackend()
+        backend.failNext("maintain", error: BatteryError.commandTimedOut("battery maintain 80"))
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 80) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        try await controller.initialize()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+        XCTAssertGreaterThanOrEqual(backend.operations.filter { $0 == "read-status" }.count, 2)
+    }
+
+    func testFailedInitializationWithoutPreviousModeExposesRetry() async {
+        let backend = FakeChargeBackend()
+        backend.failNext("open")
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 80) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        do { try await controller.initialize() } catch {}
+        XCTAssertNotNil(controller.manualInterventionRecoveryDescription)
+        XCTAssertTrue(controller.manualRecoveryRefreshAvailability.isAllowed)
+        XCTAssertEqual(controller.manualRecoveryRefreshTitle, "초기화 다시 시도")
+
+        await controller.refreshManualRecoveryStatus()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+    }
+
+    func testFailedPostMutationInitializationRetriesWithoutAnotherMutation() async {
+        let backend = FakeChargeBackend()
+        backend.failNext("maintain", error: BatteryError.commandTimedOut("battery maintain 80"))
+        let inconsistent = BatteryControlStatus(
+            charging: .disabled,
+            isDischarging: false,
+            maintainLevel: nil,
+            maintainWorker: .stopped
+        )
+        backend.setControlStatus(inconsistent)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 80) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        do { try await controller.initialize() } catch {}
+        guard case .failed = controller.readiness else {
+            return XCTFail("Expected failed readiness")
+        }
+        XCTAssertTrue(controller.manualRecoveryRefreshAvailability.isAllowed)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 8_080, target: 80)
+            )
+        )
+
+        await controller.refreshManualRecoveryStatus()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+    }
+
+    func testFailedWakeRecoveryDoesNotRestartInitialization() async {
+        let failedMode = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "wake status timed out",
+            disposition: .manualIntervention
+        )
+        let (controller, backend, _, _) = makeSUT(
+            initialReadiness: .failed("wake status timed out"),
+            initialMode: failedMode
+        )
+
+        await controller.refreshManualRecoveryStatus()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertFalse(backend.operations.contains("open"))
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+    }
+
     func testPreflightFailureCanShutdownWithoutCallingUnavailableBackendAgain() async throws {
         let backend = FakeChargeBackend()
         backend.failNext("open")

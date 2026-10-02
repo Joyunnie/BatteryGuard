@@ -137,6 +137,10 @@ extension ChargeController {
     }
 
     func refreshManualRecoveryStatus() async {
+        if initializationFailureContext != nil, case .failed = readiness {
+            await retryFailedInitialization()
+            return
+        }
         guard case .failed(
             let previous,
             let message,

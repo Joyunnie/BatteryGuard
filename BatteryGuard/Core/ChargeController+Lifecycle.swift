@@ -15,6 +15,9 @@ extension ChargeController {
         }
         initializationInProgress = true
         defer { finishInitializationLifecycle() }
+        initializationFailureContext = nil
+        var recoveryExpectation: ReconciledChargeExpectation?
+        let recoveryOwnership = settings.batteryControlOwnership
         readiness = .initializing
         mode = .idle
         do {
@@ -22,7 +25,7 @@ extension ChargeController {
             try await backend.open()
             backendAvailableForShutdown = true
             readiness = .reconciling
-            let observedStatus = try await backend.readControlStatus()
+            let observedStatus = try await readInitialStatusWithTransientRetry()
             monitor.startMonitoring()
 
             let desiredLimit = UserSettings.validatedChargeLimit(settings.chargeLimit)
@@ -74,17 +77,20 @@ extension ChargeController {
                     let temperature = await readFreshSafetyTemperature(fallbackInfo: info)
                     guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
                     if temperature.permitsAutomaticCharging(upTo: settings.heatProtectionThreshold) {
+                        recoveryExpectation = .maintaining(limit: desiredLimit)
                         initializationHardwareMutationAttempted = true
                         try await backend.applyMaintain(level: desiredLimit)
                         mode = .maintaining(limit: desiredLimit)
                         settings.chargeLimit = desiredLimit
                     } else {
+                        recoveryExpectation = .chargingDisabled(previous: previous)
                         initializationHardwareMutationAttempted = true
                         try await backend.cancelLongRunningOperation()
                         try await backend.disableCharging()
                         mode = .heatBlocked(previous: previous)
                     }
                 } else {
+                    recoveryExpectation = .maintaining(limit: desiredLimit)
                     initializationHardwareMutationAttempted = true
                     try await backend.applyMaintain(level: desiredLimit)
                     mode = .maintaining(limit: desiredLimit)
@@ -92,34 +98,34 @@ extension ChargeController {
                 }
             }
 
-            guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
-            startBatteryInfoObservation()
-            readiness = .ready
-            synchronizeLongRunningMonitoring()
-            updateDisplayState()
-            do {
-                try setupSleepWakeObservers()
-            } catch {
-                systemPowerObservationError = error.localizedDescription
-                setupWakeFallbackObserver()
-                sleepProtectionState = settings.sleepChargingStrategy == .disabled
-                    ? .inactive
-                    : .unavailable(error.localizedDescription)
-                recordDiagnostic(
-                    category: .lifecycle,
-                    operation: "register system sleep observer",
-                    error: error,
-                    stateAfter: readiness.diagnosticLabel
-                )
-            }
-            startSMCTemperatureLoop()
-            startExternalReconciliation()
-            refreshDisplayedError()
+            try completeInitializationInfrastructure(restartMonitoring: false)
         } catch {
             if !isShuttingDown, !Task.isCancelled {
+                if initializationHardwareMutationAttempted,
+                   let expectation = recoveryExpectation,
+                   case .batteryGuard = settings.batteryControlOwnership,
+                   recoveryOwnership == settings.batteryControlOwnership,
+                   isTransientStatusFailure(error),
+                   await verifyInitialControlReadOnly(
+                    expectation: expectation, ownership: recoveryOwnership
+                   ) {
+                    mode = expectation.reconciledMode
+                    try completeInitializationInfrastructure(restartMonitoring: false)
+                    return
+                }
                 cleanupAfterFailedInitialization()
+                if !initializationHardwareMutationAttempted {
+                    initializationFailureContext = .retryInitialization
+                } else if let recoveryExpectation,
+                          isTransientStatusFailure(error) {
+                    initializationFailureContext = .verifyControl(
+                        recoveryExpectation, recoveryOwnership
+                    )
+                } else {
+                    initializationFailureContext = .inspectHardware
+                }
                 mode = .failed(
-                    previous: mode.restorableMode,
+                    previous: recoveryExpectation?.restorableMode ?? mode.restorableMode,
                     message: error.localizedDescription,
                     disposition: .manualIntervention
                 )
@@ -132,6 +138,147 @@ extension ChargeController {
                 )
             }
             throw error
+        }
+    }
+
+    private func isTransientStatusFailure(_ error: Error) -> Bool {
+        if case BatteryError.commandTimedOut = error { return true }
+        return false
+    }
+
+    private func readInitialStatusWithTransientRetry() async throws -> BatteryControlStatus {
+        for attempt in 0..<3 {
+            do {
+                return try await backend.readControlStatus()
+            } catch {
+                guard isTransientStatusFailure(error), attempt < 2 else { throw error }
+                try await Task.sleep(nanoseconds: attempt == 0 ? 100_000_000 : 250_000_000)
+            }
+        }
+        throw BatteryError.commandTimedOut("initial control status")
+    }
+
+    private func verifyInitialControlReadOnly(
+        expectation: ReconciledChargeExpectation,
+        ownership: BatteryControlOwnership
+    ) async -> Bool {
+        for attempt in 0..<3 {
+            guard !isShuttingDown,
+                  !Task.isCancelled,
+                  ownership == settings.batteryControlOwnership else { return false }
+            do {
+                let snapshot = try await readReconciliationSnapshot(for: expectation)
+                if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
+                    if settings.heatProtectionEnabled,
+                       case .maintaining = expectation {
+                        let temperature = await readFreshSafetyTemperature()
+                        guard temperature.permitsAutomaticCharging(
+                            upTo: settings.heatProtectionThreshold
+                        ) else { return false }
+                        let finalSnapshot = try await readReconciliationSnapshot(for: expectation)
+                        guard ChargeReconciliationPolicy.status(finalSnapshot, matches: expectation) else {
+                            return false
+                        }
+                    }
+                    return !isShuttingDown && !Task.isCancelled
+                        && ownership == settings.batteryControlOwnership
+                }
+                switch snapshot.status.maintainWorker {
+                case .stale, .duplicate, .unknown: return false
+                case .running, .stopped: break
+                }
+            } catch {
+                guard isTransientStatusFailure(error) else { return false }
+            }
+            if attempt < 2 {
+                do {
+                    try await Task.sleep(nanoseconds: attempt == 0 ? 100_000_000 : 250_000_000)
+                } catch { return false }
+            }
+        }
+        return false
+    }
+
+    private func completeInitializationInfrastructure(restartMonitoring: Bool) throws {
+        guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
+        if restartMonitoring { monitor.startMonitoring() }
+        startBatteryInfoObservation()
+        do {
+            try setupSleepWakeObservers()
+        } catch {
+            systemPowerObservationError = error.localizedDescription
+            setupWakeFallbackObserver()
+            sleepProtectionState = settings.sleepChargingStrategy == .disabled
+                ? .inactive
+                : .unavailable(error.localizedDescription)
+            recordDiagnostic(
+                category: .lifecycle,
+                operation: "register system sleep observer",
+                error: error,
+                stateAfter: readiness.diagnosticLabel
+            )
+        }
+        readiness = .ready
+        initializationFailureContext = nil
+        synchronizeLongRunningMonitoring()
+        updateDisplayState()
+        startSMCTemperatureLoop()
+        startExternalReconciliation()
+        refreshDisplayedError()
+    }
+
+    func retryFailedInitialization() async {
+        guard let initializationFailureContext,
+              case .failed = readiness,
+              !initializationInProgress,
+              !isShuttingDown,
+              !isReconcilingExternalState else { return }
+        let expectation: ReconciledChargeExpectation
+        let ownership: BatteryControlOwnership
+        switch initializationFailureContext {
+        case .retryInitialization:
+            do { try await initialize() } catch { /* initialize records the actionable failure */ }
+            return
+        case .inspectHardware:
+            commandError = "초기 제어 명령이 실패했습니다. 자동 복구 대신 실제 상태를 점검해야 합니다."
+            refreshDisplayedError()
+            return
+        case .verifyControl(let expected, let expectedOwner):
+            expectation = expected
+            ownership = expectedOwner
+        }
+        do {
+            try settings.requireDurableBatteryControlOwnership()
+        } catch {
+            commandError = error.localizedDescription
+            refreshDisplayedError()
+            return
+        }
+        guard ownership == settings.batteryControlOwnership else {
+            commandError = "충전 제어 소유권이 바뀌어 자동 복구를 중단했습니다."
+            refreshDisplayedError()
+            return
+        }
+        let failedMode = mode
+        isReconcilingExternalState = true
+        defer { isReconcilingExternalState = false }
+        if await verifyInitialControlReadOnly(expectation: expectation, ownership: ownership) {
+            guard mode == failedMode,
+                  !isShuttingDown,
+                  ownership == settings.batteryControlOwnership else { return }
+            mode = expectation.reconciledMode
+            commandError = nil
+            driftError = nil
+            do {
+                try completeInitializationInfrastructure(restartMonitoring: true)
+            } catch {
+                guard !isShuttingDown else { return }
+                mode = failedMode
+                readiness = .failed(error.localizedDescription)
+            }
+        } else {
+            commandError = "현재 충전 제어 상태를 검증하지 못했습니다. 상태를 다시 확인하거나 외부 변경을 점검하세요."
+            refreshDisplayedError()
         }
     }
 
