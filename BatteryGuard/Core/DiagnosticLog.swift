@@ -34,6 +34,13 @@ struct SleepSettlementDiagnostic: Codable, Equatable, Sendable {
     let completionEvent: SystemSleepCompletionEvent?
 }
 
+struct ControlVerificationDiagnostic: Codable, Equatable, Sendable {
+    let target: String
+    let attempts: Int
+    let elapsedNanoseconds: UInt64
+    let lastStatus: String?
+}
+
 struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
     let id: UUID
     let timestamp: Date
@@ -47,6 +54,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
     let stateBefore: String?
     let stateAfter: String?
     let sleepSettlement: SleepSettlementDiagnostic?
+    let controlVerification: ControlVerificationDiagnostic?
 
     init(
         id: UUID = UUID(),
@@ -60,7 +68,8 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         message: String? = nil,
         stateBefore: String? = nil,
         stateAfter: String? = nil,
-        sleepSettlement: SleepSettlementDiagnostic? = nil
+        sleepSettlement: SleepSettlementDiagnostic? = nil,
+        controlVerification: ControlVerificationDiagnostic? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -74,6 +83,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         self.stateBefore = stateBefore
         self.stateAfter = stateAfter
         self.sleepSettlement = sleepSettlement
+        self.controlVerification = controlVerification
     }
 
     private static func summarize(_ value: String) -> String {
@@ -94,6 +104,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         case stateBefore
         case stateAfter
         case sleepSettlement
+        case controlVerification
         case termination
         case stderrSummary
     }
@@ -110,6 +121,10 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         sleepSettlement = try container.decodeIfPresent(
             SleepSettlementDiagnostic.self,
             forKey: .sleepSettlement
+        )
+        controlVerification = try container.decodeIfPresent(
+            ControlVerificationDiagnostic.self,
+            forKey: .controlVerification
         )
 
         let operationIDText = try container.decodeIfPresent(String.self, forKey: .operationID)
@@ -141,6 +156,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(stateBefore, forKey: .stateBefore)
         try container.encodeIfPresent(stateAfter, forKey: .stateAfter)
         try container.encodeIfPresent(sleepSettlement, forKey: .sleepSettlement)
+        try container.encodeIfPresent(controlVerification, forKey: .controlVerification)
     }
 
     private static func outcome(fromLegacyValue value: String?) -> DiagnosticOutcome {

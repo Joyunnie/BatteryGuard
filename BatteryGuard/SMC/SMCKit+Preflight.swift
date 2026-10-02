@@ -43,7 +43,7 @@ extension SMCKit {
         }
 
         try await validateBatteryCLIVersionUnlocked()
-        _ = try await readControlStatusUnlocked()
+        _ = try await readControlStatusUntilSettled(target: "preflight") { _ in true }
         print("[SMCKit] battery CLI and SMC binary ready")
     }
 
