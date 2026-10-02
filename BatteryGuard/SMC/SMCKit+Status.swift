@@ -53,6 +53,126 @@ enum SleepStatusSettlementError: Error, LocalizedError, Equatable, Sendable {
 extension SMCKit {
     // MARK: - Status
 
+    func readControlStatusUntilSettled(
+        target: String,
+        deadlineUptimeNanoseconds requestedDeadline: UInt64? = nil,
+        matches: (BatteryControlStatus) -> Bool
+    ) async throws -> BatteryControlStatus {
+        let operationID = DiagnosticContext.operationID ?? UUID()
+        return try await DiagnosticContext.$operationID.withValue(operationID) {
+        let startedAt = monotonicNow()
+        let deadline: UInt64
+        if let requestedDeadline {
+            deadline = requestedDeadline
+        } else {
+            let end = monotonicNow().addingReportingOverflow(6_000_000_000)
+            deadline = end.overflow ? UInt64.max : end.partialValue
+        }
+        let backoffs: [UInt64] = [100_000_000, 250_000_000]
+        var lastStatus: BatteryControlStatus?
+        var attempts = 0
+        do {
+        for attempt in 0...backoffs.count {
+            try Task.checkCancellation()
+            guard monotonicNow() < deadline else {
+                if let lastStatus {
+                    await recordControlVerification(
+                        target: target, attempts: attempts,
+                        startedAt: startedAt, lastStatus: lastStatus,
+                        outcome: .failed
+                    )
+                    return lastStatus
+                }
+                throw BatteryError.commandTimedOut("status_csv verification deadline")
+            }
+            attempts += 1
+            do {
+                let status = try await readControlStatusUnlocked(
+                    deadlineUptimeNanoseconds: deadline
+                )
+                if matches(status) {
+                    if attempts > 1 {
+                        await recordControlVerification(
+                            target: target, attempts: attempts,
+                            startedAt: startedAt, lastStatus: status,
+                            outcome: .succeeded
+                        )
+                    }
+                    return status
+                }
+                lastStatus = status
+                switch status.maintainWorker {
+                case .stale, .duplicate, .unknown:
+                    await recordControlVerification(
+                        target: target, attempts: attempts,
+                        startedAt: startedAt, lastStatus: status,
+                        outcome: .failed
+                    )
+                    return status
+                case .running, .stopped: break
+                }
+            } catch {
+                guard case BatteryError.commandTimedOut = error,
+                      attempt < backoffs.count else { throw error }
+            }
+            guard attempt < backoffs.count else { break }
+            let next = monotonicNow().addingReportingOverflow(backoffs[attempt])
+            guard !next.overflow, next.partialValue < deadline else {
+                if let lastStatus {
+                    await recordControlVerification(
+                        target: target, attempts: attempts,
+                        startedAt: startedAt, lastStatus: lastStatus,
+                        outcome: .failed
+                    )
+                    return lastStatus
+                }
+                throw BatteryError.commandTimedOut("status_csv verification deadline")
+            }
+            try await monotonicSleepUntil(next.partialValue)
+        }
+        if let lastStatus {
+            await recordControlVerification(
+                target: target, attempts: attempts,
+                startedAt: startedAt, lastStatus: lastStatus,
+                outcome: .failed
+            )
+            return lastStatus
+        }
+        throw BatteryError.commandTimedOut("status_csv verification deadline")
+        } catch {
+            await recordControlVerification(
+                target: target, attempts: attempts,
+                startedAt: startedAt, lastStatus: lastStatus,
+                outcome: error is CancellationError ? .cancelled : .failed
+            )
+            throw error
+        }
+        }
+    }
+
+    private func recordControlVerification(
+        target: String,
+        attempts: Int,
+        startedAt: UInt64,
+        lastStatus: BatteryControlStatus?,
+        outcome: DiagnosticOutcome
+    ) async {
+        let current = monotonicNow()
+        await diagnostics.record(
+            DiagnosticEvent(
+                category: .control,
+                operation: "settle control status",
+                outcome: outcome,
+                controlVerification: ControlVerificationDiagnostic(
+                    target: target,
+                    attempts: attempts,
+                    elapsedNanoseconds: current >= startedAt ? current - startedAt : 0,
+                    lastStatus: lastStatus?.diagnosticDescription
+                )
+            )
+        )
+    }
+
     func readControlStatus() async throws -> BatteryControlStatus {
         try await withGate(controlGate) {
             try await readControlStatusUnlocked()
@@ -158,7 +278,7 @@ extension SMCKit {
                 throw SleepStatusSettlementError.deadlineExceeded(observations)
             }
 
-            let status: BatteryControlStatus
+            let status: BatteryControlStatus?
             do {
                 status = try await readControlStatusUnlocked(
                     deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
@@ -173,31 +293,38 @@ extension SMCKit {
                 if case BatteryError.commandCancelled = error {
                     throw SleepStatusSettlementError.cancelled(observations)
                 }
-                throw SleepStatusSettlementError.readFailed(
-                    observations,
-                    error.localizedDescription
-                )
+                if case BatteryError.commandTimedOut = error,
+                   attempt <= sleepStatusSettlementBackoffs.count {
+                    status = nil
+                } else {
+                    throw SleepStatusSettlementError.readFailed(
+                        observations,
+                        error.localizedDescription
+                    )
+                }
             }
             let now = monotonicNow()
-            observations.append(
-                SleepStatusSettlementObservation(
-                    attempt: attempt,
-                    elapsedNanoseconds: now >= startedAt ? now - startedAt : 0,
-                    status: status
+            if let status {
+                observations.append(
+                    SleepStatusSettlementObservation(
+                        attempt: attempt,
+                        elapsedNanoseconds: now >= startedAt ? now - startedAt : 0,
+                        status: status
+                    )
                 )
-            )
 
-            if status.isVerifiedChargingDisabled {
-                return SleepStatusSettlementResult(
-                    status: status,
-                    observations: observations
-                )
-            }
-            switch status.maintainWorker {
-            case .stale, .duplicate, .unknown:
-                throw SleepStatusSettlementError.unsafeWorkerState(observations)
-            case .running, .stopped:
-                break
+                if status.isVerifiedChargingDisabled {
+                    return SleepStatusSettlementResult(
+                        status: status,
+                        observations: observations
+                    )
+                }
+                switch status.maintainWorker {
+                case .stale, .duplicate, .unknown:
+                    throw SleepStatusSettlementError.unsafeWorkerState(observations)
+                case .running, .stopped:
+                    break
+                }
             }
 
             guard attempt <= sleepStatusSettlementBackoffs.count else {

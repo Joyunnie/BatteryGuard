@@ -1192,6 +1192,57 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         }
     }
 
+    func testMaintainStatusTimeoutRetriesReadWithoutRepeatingMutation() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-maintain-settlement-log-\(UUID().uuidString)")
+        let statusCount = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-maintain-settlement-count-\(UUID().uuidString)")
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "status_csv" ]]; then
+              count=$(cat \(shellQuote(statusCount.path)) 2>/dev/null || echo 0)
+              count=$((count + 1))
+              echo "$count" > \(shellQuote(statusCount.path))
+              if [[ "$count" -eq 1 ]]; then sleep 0.5; fi
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        defer {
+            for url in [fixture, commandLog, statusCount]
+                where FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        let diagnostics = DiagnosticLog(fileURL: nil, capacity: 20)
+        let backend = SMCKit(
+            runner: BatteryCommandRunner(diagnostics: diagnostics),
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .running(pid: 4_242, target: 80) },
+            executableTrustPolicy: .testFixture,
+            statusCommandTimeout: 0.2,
+            diagnostics: diagnostics
+        )
+
+        try await backend.applyMaintain(level: 80)
+
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+        XCTAssertEqual(commands.filter { $0 == "maintain 80" }.count, 1)
+        XCTAssertEqual(commands.filter { $0 == "status_csv" }.count, 2)
+        await diagnostics.flushPendingEvents()
+        let events = await diagnostics.recentEvents()
+        let settlement = events.first { $0.operation == "settle control status" }
+        XCTAssertEqual(settlement?.controlVerification?.attempts, 2)
+        XCTAssertEqual(settlement?.controlVerification?.target, "maintain 80")
+        XCTAssertEqual(settlement?.operationID, events.first {
+            $0.operation == "maintain 80" && $0.category == .control
+        }?.operationID)
+    }
+
     func testMaintainFailurePreservesStderrWhenStdoutIsDiscarded() async throws {
         let fixture = try makeExecutableFixture(
             """
@@ -1331,6 +1382,50 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         XCTAssertEqual(events.filter { $0.operation == "settle sleep charging status" }.count, 1)
         XCTAssertEqual(Set(events.compactMap(\.operationID)).count, 1)
         XCTAssertTrue(events.allSatisfy { $0.operationID != nil })
+    }
+
+    func testSleepPreparationRetriesACompletedStatusTimeoutWithinItsDeadline() async throws {
+        let statusCount = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-timeout-count-\(UUID().uuidString)")
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-timeout-log-\(UUID().uuidString)")
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "status_csv" ]]; then
+              count=$(cat \(shellQuote(statusCount.path)) 2>/dev/null || echo 0)
+              count=$((count + 1))
+              echo "$count" > \(shellQuote(statusCount.path))
+              if [[ "$count" -eq 1 ]]; then sleep 0.5; fi
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        defer {
+            for url in [fixture, statusCount, commandLog]
+                where FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            statusCommandTimeout: 0.2,
+            sleepStatusSettlementBackoffs: [100_000_000]
+        )
+        let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+
+        let status = try await backend.prepareForSystemSleep(
+            deadlineUptimeNanoseconds: deadline
+        )
+
+        XCTAssertTrue(status.isVerifiedChargingDisabled)
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \.isNewline).map(String.init)
+        XCTAssertEqual(commands.filter { $0 == "charging off" }.count, 1)
+        XCTAssertEqual(commands.filter { $0 == "status_csv" }.count, 2)
     }
 
     func testSleepPreparationPersistentMismatchIsBoundedAndTyped() async throws {

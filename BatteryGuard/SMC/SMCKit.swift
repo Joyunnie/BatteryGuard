@@ -262,7 +262,7 @@ actor SMCKit: ChargeBackend {
     let sleepStatusSettlementBackoffs: [UInt64]
     let monotonicNow: MonotonicNow
     let monotonicSleepUntil: MonotonicSleepUntil
-    let statusCommandTimeout: TimeInterval = 2
+    let statusCommandTimeout: TimeInterval
     private let longRunningVerificationTimeoutNanoseconds: UInt64 = 3_000_000_000
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
     private let longRunningOperationTimeout: TimeInterval = 12 * 60 * 60
@@ -341,6 +341,7 @@ actor SMCKit: ChargeBackend {
         smcTemperatureReadTimeout: TimeInterval = defaultSMCTemperatureReadTimeout,
         smcTemperatureTotalBudget: TimeInterval = defaultSMCTemperatureTotalBudget,
         temperatureReaderRetryDelay: TimeInterval = defaultTemperatureReaderRetryDelay,
+        statusCommandTimeout: TimeInterval = 2,
         sleepStatusSettlementBackoffs: [UInt64] = [
             100_000_000,
             250_000_000,
@@ -377,6 +378,7 @@ actor SMCKit: ChargeBackend {
         self.smcTemperatureReadTimeout = max(0.05, smcTemperatureReadTimeout)
         self.smcTemperatureTotalBudget = max(0.05, smcTemperatureTotalBudget)
         self.temperatureReaderRetryDelay = max(0, temperatureReaderRetryDelay)
+        self.statusCommandTimeout = max(0.05, statusCommandTimeout)
         self.sleepStatusSettlementBackoffs = sleepStatusSettlementBackoffs
         self.monotonicNow = monotonicNow
         self.monotonicSleepUntil = monotonicSleepUntil
@@ -410,7 +412,9 @@ actor SMCKit: ChargeBackend {
             descendantPolicy: .allowPersistentProcessGroup
         )
 
-        let status = try await readControlStatusUnlocked()
+        let status = try await readControlStatusUntilSettled(target: "maintain \(level)") {
+            $0.isVerifiedMaintain(level: level)
+        }
         guard status.isVerifiedMaintain(level: level) else {
             do {
                 try await terminateMaintainWorkersUnlocked()
@@ -438,7 +442,9 @@ actor SMCKit: ChargeBackend {
                 _ = try await runner.cancelLongRunning()
                 try await terminateMaintainWorkersUnlocked()
                 _ = try await batteryCommand(["maintain", "stop"])
-                let status = try await readControlStatusUnlocked()
+                let status = try await readControlStatusUntilSettled(target: "release control") {
+                    $0.isVerifiedControlReleased
+                }
                 guard status.isVerifiedControlReleased else {
                     throw BatteryError.commandFailed(
                         "release BatteryGuard control",
@@ -505,7 +511,9 @@ actor SMCKit: ChargeBackend {
         let before = await readPreOperationStatus()
         try await terminateMaintainWorkersUnlocked()
         _ = try await batteryCommand(["charging", "off"])
-        let status = try await readControlStatusUnlocked()
+        let status = try await readControlStatusUntilSettled(target: "charging off") {
+            $0.isVerifiedChargingDisabled
+        }
         guard status.isVerifiedChargingDisabled else {
             throw BatteryError.commandFailed(
                 "battery charging off",
