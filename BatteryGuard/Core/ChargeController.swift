@@ -317,6 +317,8 @@ final class ChargeController: ObservableObject {
             if case .restoringHeat = transition { return true }
         case .failed(_, _, .heatProtection):
             return true
+        case .failed(_, _, .manualIntervention) where settings.heatProtectionEnabled:
+            return true
         default:
             break
         }
@@ -371,6 +373,7 @@ final class ChargeController: ObservableObject {
     var lastSMCTemperatureSampleStartedAt: Date?
     var sampleAfterHeatEnableGeneration: UInt64?
     var heatProtectionRetryAfter: Date?
+    var heatRestoreFailureCount = 0
     var ledIntent: MagSafeLEDIntent?
     var ledGeneration: UInt64 = 0
     var systemPowerObservationError: String?

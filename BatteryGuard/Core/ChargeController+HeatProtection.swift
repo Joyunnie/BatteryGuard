@@ -181,6 +181,7 @@ extension ChargeController {
             onSuccess: { [weak self] in
                 guard let self else { return }
                 self.heatProtectionRetryAfter = nil
+                self.heatRestoreFailureCount = 0
                 self.monitor.allowSleep()
                 self.mode = .heatBlocked(previous: previous)
                 if self.sampleAfterHeatEnableGeneration == self.smcTemperatureSampleGeneration {
@@ -273,6 +274,7 @@ extension ChargeController {
             onSuccess: { [weak self] in
                 guard let self else { return }
                 self.heatProtectionRetryAfter = nil
+                self.heatRestoreFailureCount = 0
                 self.mode = Self.mode(from: previous)
             },
             onFailure: { [weak self] error in
@@ -281,12 +283,16 @@ extension ChargeController {
                     self.monitor.allowSleep()
                 }
                 if error is HeatRestoreReblockedError {
+                    let delays: [TimeInterval] = [10, 20, 40, 80, 160, 300]
+                    let index = min(self.heatRestoreFailureCount, delays.count - 1)
+                    self.heatRestoreFailureCount = min(self.heatRestoreFailureCount + 1, delays.count)
+                    self.heatProtectionRetryAfter = self.now().addingTimeInterval(delays[index])
                     self.mode = .heatBlocked(previous: previous)
                 } else {
                     self.mode = .failed(
                         previous: previous,
                         message: error.localizedDescription,
-                        disposition: .heatProtection
+                        disposition: .manualIntervention
                     )
                 }
             }
