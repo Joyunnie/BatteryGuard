@@ -262,7 +262,9 @@ actor SMCKit: ChargeBackend {
     let sleepStatusSettlementBackoffs: [UInt64]
     let monotonicNow: MonotonicNow
     let monotonicSleepUntil: MonotonicSleepUntil
-    let statusCommandTimeout: TimeInterval
+    /// Total wall-clock budget for status execution, process-group cleanup, and reap.
+    /// `BatteryCommandRunner` deliberately reserves part of this budget for teardown.
+    let statusCommandTotalTimeout: TimeInterval
     private let longRunningVerificationTimeoutNanoseconds: UInt64 = 3_000_000_000
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
     private let longRunningOperationTimeout: TimeInterval = 12 * 60 * 60
@@ -341,7 +343,7 @@ actor SMCKit: ChargeBackend {
         smcTemperatureReadTimeout: TimeInterval = defaultSMCTemperatureReadTimeout,
         smcTemperatureTotalBudget: TimeInterval = defaultSMCTemperatureTotalBudget,
         temperatureReaderRetryDelay: TimeInterval = defaultTemperatureReaderRetryDelay,
-        statusCommandTimeout: TimeInterval = 2,
+        statusCommandTotalTimeout: TimeInterval = 2,
         sleepStatusSettlementBackoffs: [UInt64] = [
             100_000_000,
             250_000_000,
@@ -378,7 +380,7 @@ actor SMCKit: ChargeBackend {
         self.smcTemperatureReadTimeout = max(0.05, smcTemperatureReadTimeout)
         self.smcTemperatureTotalBudget = max(0.05, smcTemperatureTotalBudget)
         self.temperatureReaderRetryDelay = max(0, temperatureReaderRetryDelay)
-        self.statusCommandTimeout = max(0.05, statusCommandTimeout)
+        self.statusCommandTotalTimeout = max(0.05, statusCommandTotalTimeout)
         self.sleepStatusSettlementBackoffs = sleepStatusSettlementBackoffs
         self.monotonicNow = monotonicNow
         self.monotonicSleepUntil = monotonicSleepUntil

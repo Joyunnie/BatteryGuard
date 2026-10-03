@@ -1,6 +1,6 @@
 # BatteryGuard 현재 코드 수정 계획
 
-작성: 2026-10-04 · 기준: `main` `9c00130` (PR #41 병합 후) · 상태: PR 1·2 병합, PR 3 구현·검증 완료, PR 4 대기
+작성: 2026-10-04 · 기준: `main` `ecd039a` (PR #42 병합 후) · 상태: PR 1–3 병합, PR 4 구현·검증 완료
 
 ## 1. 목표와 판단 근거
 
@@ -11,7 +11,7 @@
 | 높음 | `ChargeController+Operations.swift`의 Top Up, `ChargeController.swift`의 명시적 Maintain 복구 허용, `ChargeController+Reconciliation.swift`의 복구 pre/postflight가 `BatteryInfo.isPluggedIn`을 사용한다. `BatteryMonitor.resolvedPowerConnection`은 battery flag와 현재 IOPS를 결합한다. | 사용자 작업의 연결 판단이 UI의 paired observation과 달라질 수 있다. 수정한다. |
 | 높음 | 임시 `Diagnostics.json`을 쓰는 일부 테스트가 controller/진단 작업을 종료·flush하기 전에 디렉터리를 삭제한다. 직전 전체 테스트에서 삭제된 파일로의 비동기 쓰기 오류가 관찰됐다. | 테스트 fixture 수명이 실제로 새고 있다. 수정한다. |
 | 중간 | Settings 소유권 카드가 `isBatteryControlDisabled == false`이면 실패·수동 복구 상태에서도 “BatteryGuard가 충전 제어 중”이라고 표시한다. | 소유권과 정상 제어를 혼동시키는 문구다. 표시를 보정한다. |
-| 검증 후 결정 | `statusCommandTimeout = 2`는 runner의 실행·TERM/KILL·회수를 포함한 총 예산이다. `terminationDeadlines`는 그중 최대 1초를 정리에 예약한다. | 의도된 총 시간 상한이다. 정상 status 지연 분포와 1.2–1.8초 fixture 결과 없이 runner를 바꾸지 않는다. |
+| 검증 후 결정 | `statusCommandTotalTimeout = 2`는 runner의 실행·TERM/KILL·회수를 포함한 총 예산이다. `terminationDeadlines`는 그중 최대 1초를 정리에 예약한다. | 의도된 총 시간 상한이다. 정상 status 지연 분포와 1.2–1.8초 fixture 결과 없이 runner를 바꾸지 않는다. |
 | 낮음 | sleep completion 진단은 request ID를 상세 필드에 넣지만 최상위 `operationID`는 비워 둔다. | 관찰성의 작은 결손이다. 함께 수정한다. |
 | 선택 | 일부 sleep/wake 테스트가 고정 지연으로 순서를 만든다. | 실기기 결함의 증거는 아니다. 핵심 역방향 경합 테스트만 명시적 barrier로 보강한다. |
 
@@ -50,7 +50,7 @@
 1. 임시 실행 파일이 `status_csv` 호출 후 1.2초, 1.5초, 1.8초에 정상 종료하는 테스트를 추가한다. 현재 2초 설정에서 실제 종료 시점, 반환 종류, 자식·프로세스 그룹 회수를 기록한다. 지연·TERM 무시 fixture도 전체 상한과 cleanup failure를 검증한다.
 2. 앱의 기존 진단 기록이나 통제된 read-only 측정으로 실제 `status_csv` 지연 분포를 확인한다. 상태 조회 횟수와 측정 조건을 함께 남긴다. 새 하드웨어 mutation은 측정을 위해 실행하지 않는다.
 3. 정상적인 status 호출이 약 1초를 넘어서 잘리는 증거가 있으면 execution budget과 cleanup budget을 별도 이름으로 모델링하고, 각 호출처의 전체 deadline(특히 sleep acknowledgement)을 보존한다. 재시도 횟수나 전체 deadline을 근거 없이 늘리지 않는다.
-4. 그런 증거가 없으면 runner 동작은 유지하고 `statusCommandTimeout`의 총 예산 의미를 이름/주석/테스트에서 명확히 한다.
+4. 그런 증거가 없으면 runner 동작은 유지하고 `statusCommandTotalTimeout`의 총 예산 의미를 이름/주석/테스트에서 명확히 한다.
 
 **병합 조건:** 정상 응답 허용 시간과 총 회수 상한이 테스트로 구분되고, timeout 뒤 자식 또는 descendant가 남지 않는다. 결과가 측정 전 가설과 다르면 코드 변경 범위를 축소한다.
 
@@ -69,5 +69,6 @@
 
 - PR #40 (`10481f3`): Top Up과 명시적 Maintain 복구가 현재 paired battery/IOPS 관측을 공유하도록 통일했다. 전체 XCTest 374개와 Release/Analyze/strict build가 통과했다.
 - PR #41 (`9c00130`): 진단 fixture를 flush 후 정리하고, 핵심 Wake/Sleep/Heat/종료 경합 테스트를 고정 지연 대신 명시적 operation barrier로 바꾸었다. 전체 XCTest 374개가 통과했다.
-- PR 3: Settings 제어권 표시와 sleep 진단 correlation을 수정했다. strict 전체 XCTest 378개, Release build, Debug Analyze가 통과했다.
-- PR 4와 최종 자동/실기기 검증은 남아 있다.
+- PR #42 (`ecd039a`): Settings 제어권 표시와 sleep 진단 correlation을 수정했다. strict 전체 XCTest 378개, Release build, Debug Analyze가 통과했다.
+- PR 4 측정: 실제 `/usr/local/co.palokaj.battery/battery status_csv`를 20회 읽기 전용으로 실행한 실시간은 0.06–0.08초였다. 2초 총 예산 fixture에서 0.8초 응답은 성공했고, 1.2·1.5·1.8초 응답은 의도대로 cleanup 예약 구간에서 timeout되었다. 각 호출은 2.25초 이내에 반환했고 자식 PID가 모두 회수됨을 확인했다. 정상 CLI 지연이 1초를 넘는 증거가 없으므로 runner 예산은 늘리지 않고 설정 이름만 `statusCommandTotalTimeout`으로 명확히 했다.
+- PR 4 변경을 포함한 최종 자동 검증에서 strict 전체 XCTest 380개, Release build, Debug Analyze가 통과했다. PR 4 병합과 별도 통제된 실기기 검증이 남아 있다.
