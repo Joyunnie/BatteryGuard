@@ -1222,7 +1222,7 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             batteryPath: fixture.path,
             maintainWorkerProbe: { _, _ in .running(pid: 4_242, target: 80) },
             executableTrustPolicy: .testFixture,
-            statusCommandTimeout: 0.2,
+            statusCommandTotalTimeout: 0.2,
             diagnostics: diagnostics
         )
 
@@ -1241,6 +1241,80 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         XCTAssertEqual(settlement?.operationID, events.first {
             $0.operation == "maintain 80" && $0.category == .control
         }?.operationID)
+    }
+
+    func testStatusTotalTimeoutAllowsAResponseInsideTheExecutionWindow() async throws {
+        let fixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            if [[ "$1" == "status_csv" ]]; then
+              sleep 0.8
+              echo "80,00:10,disabled,not discharging,80"
+            fi
+            """
+        )
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let backend = SMCKit(
+            batteryPath: fixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture,
+            statusCommandTotalTimeout: 2
+        )
+
+        let status = try await backend.readControlStatus()
+
+        XCTAssertEqual(status.charging, .disabled)
+        XCTAssertEqual(status.isDischarging, false)
+        XCTAssertEqual(status.maintainWorker, .stopped)
+    }
+
+    func testStatusTotalTimeoutReservesCleanupForSlowNormalExits() async throws {
+        for delay in [1.2, 1.5, 1.8] {
+            let childPIDFile = FileManager.default.temporaryDirectory
+                .appendingPathComponent("batteryguard-status-timeout-child-\(UUID().uuidString).pid")
+            let fixture = try makeExecutableFixture(
+                """
+                #!/bin/bash
+                if [[ "$1" == "status_csv" ]]; then
+                  sleep \(delay) &
+                  child=$!
+                  echo "$child" > \(shellQuote(childPIDFile.path))
+                  wait "$child"
+                  echo "80,00:10,disabled,not discharging,80"
+                fi
+                """
+            )
+            defer {
+                try? FileManager.default.removeItem(at: fixture)
+                try? FileManager.default.removeItem(at: childPIDFile)
+            }
+            let backend = SMCKit(
+                batteryPath: fixture.path,
+                maintainWorkerProbe: { _, _ in .stopped },
+                executableTrustPolicy: .testFixture,
+                statusCommandTotalTimeout: 2
+            )
+            let startedAt = DispatchTime.now().uptimeNanoseconds
+
+            do {
+                _ = try await backend.readControlStatus()
+                XCTFail("Expected a \(delay)-second status command to exceed the reserved execution window")
+            } catch let error as BatteryError {
+                guard case .commandTimedOut(let command) = error else {
+                    return XCTFail("Expected a timeout for delay \(delay), received \(error)")
+                }
+                XCTAssertEqual(command, "battery status_csv")
+            }
+
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
+            XCTAssertLessThan(elapsed, 2.25, "cleanup must remain inside the two-second total budget")
+            let childPID = try XCTUnwrap(Int32(
+                String(contentsOf: childPIDFile, encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            ))
+            XCTAssertEqual(Darwin.kill(childPID, 0), -1)
+            XCTAssertEqual(errno, ESRCH)
+        }
     }
 
     func testMaintainFailurePreservesStderrWhenStdoutIsDiscarded() async throws {
@@ -1412,7 +1486,7 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             batteryPath: fixture.path,
             maintainWorkerProbe: { _, _ in .stopped },
             executableTrustPolicy: .testFixture,
-            statusCommandTimeout: 0.2,
+            statusCommandTotalTimeout: 0.2,
             sleepStatusSettlementBackoffs: [100_000_000]
         )
         let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000

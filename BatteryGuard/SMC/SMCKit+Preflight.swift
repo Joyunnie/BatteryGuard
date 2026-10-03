@@ -157,7 +157,7 @@ extension SMCKit {
             arguments: [batteryPath, "version"],
             environment: batteryEnvironment,
             label: "battery version",
-            timeout: statusCommandTimeout
+            timeout: statusCommandTotalTimeout
         )
         guard let version = Self.parseSemanticVersion(result.stdout),
               version == [1, 3, 4] else {

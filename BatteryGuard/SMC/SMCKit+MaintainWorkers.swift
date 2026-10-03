@@ -285,7 +285,7 @@ extension SMCKit {
             arguments: ["-fl", escapedPath],
             label: "inspect battery CLI processes",
             timeout: try boundedSleepPreparationTimeout(
-                maximum: statusCommandTimeout,
+                maximum: statusCommandTotalTimeout,
                 deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
             ),
             allowedExitCodes: [0, 1]
@@ -317,7 +317,7 @@ extension SMCKit {
             ],
             label: "verify battery CLI process identities",
             timeout: try boundedSleepPreparationTimeout(
-                maximum: statusCommandTimeout,
+                maximum: statusCommandTotalTimeout,
                 deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
             ),
             allowedExitCodes: [0, 1]

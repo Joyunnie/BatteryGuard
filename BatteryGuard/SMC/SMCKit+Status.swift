@@ -185,7 +185,7 @@ extension SMCKit {
         let result = try await batteryCommand(
             ["status_csv"],
             timeout: try boundedSleepPreparationTimeout(
-                maximum: statusCommandTimeout,
+                maximum: statusCommandTotalTimeout,
                 deadlineUptimeNanoseconds: deadlineUptimeNanoseconds
             )
         )
