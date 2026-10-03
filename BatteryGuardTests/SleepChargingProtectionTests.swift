@@ -526,6 +526,7 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(event?.operation, "manual recovery status refreshed")
         XCTAssertEqual(event?.outcome, .drifted)
         XCTAssertNotNil(event?.operationID)
+        await diagnostics.flushPendingEvents()
     }
 
     func testExplicitManualSleepRecoveryRestoresVerifiedMaintain() async {
@@ -861,11 +862,15 @@ extension ChargeControllerSafetyTests {
             initialMode: .toppingUp(returnLimit: 80)
         )
         backend.setOwnedLongRunningOperation(true)
-        backend.setCancelLongRunningDelay(0.08, ignoringCancellation: true)
+        let sleepGate = TestOperationGate()
+        backend.setOperationGate(sleepGate, for: "prepare-system-sleep")
 
         let sleepTask = Task { await controller.prepareForSleep() }
-        try? await Task.sleep(nanoseconds: 10_000_000)
-        await controller.reconcileAfterWake()
+        await sleepGate.waitUntilEntered()
+        let wakeTask = Task { await controller.reconcileAfterWake() }
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        await sleepGate.release()
+        await wakeTask.value
         _ = await sleepTask.value
 
         XCTAssertEqual(controller.mode, .maintaining(limit: 80))
@@ -894,17 +899,22 @@ extension ChargeControllerSafetyTests {
                 maintainWorker: .stopped
             )
         )
-        backend.enqueueTemperatureReadDelays([0.2], ignoringCancellation: true)
+        let temperatureGate = TestOperationGate()
+        backend.setOperationGate(temperatureGate, for: "read-temperature")
         let temperatureBefore = controller.safetyTemperatureSnapshot
         let infoBefore = controller.monitor.batteryInfo
 
         let wake = Task { await controller.reconcileAfterWake() }
-        let readingTemperature = await eventually {
-            backend.operations.contains("read-temperature")
-        }
-        XCTAssertTrue(readingTemperature)
+        await temperatureGate.waitUntilEntered()
+        let wakeGeneration = controller.wakeReconciliationGeneration
 
-        let prepared = await controller.prepareForSleep()
+        let sleep = Task { await controller.prepareForSleep() }
+        let wakeWasInvalidated = await eventually {
+            controller.wakeReconciliationGeneration > wakeGeneration
+        }
+        XCTAssertTrue(wakeWasInvalidated)
+        await temperatureGate.release()
+        let prepared = await sleep.value
         await wake.value
 
         XCTAssertTrue(prepared)
@@ -928,15 +938,20 @@ extension ChargeControllerSafetyTests {
                 maintainWorker: .stopped
             )
         )
-        backend.maintainDelay = 0.2
+        let maintainGate = TestOperationGate()
+        backend.setOperationGate(maintainGate, for: "maintain")
 
         let wake = Task { await controller.reconcileAfterWake() }
-        let startedMaintain = await eventually {
-            backend.operations.contains("maintain:80")
-        }
-        XCTAssertTrue(startedMaintain)
+        await maintainGate.waitUntilEntered()
+        let wakeGeneration = controller.wakeReconciliationGeneration
 
-        let prepared = await controller.prepareForSleep()
+        let sleep = Task { await controller.prepareForSleep() }
+        let wakeWasInvalidated = await eventually {
+            controller.wakeReconciliationGeneration > wakeGeneration
+        }
+        XCTAssertTrue(wakeWasInvalidated)
+        await maintainGate.release()
+        let prepared = await sleep.value
         await wake.value
 
         XCTAssertTrue(prepared)
@@ -957,12 +972,19 @@ extension ChargeControllerSafetyTests {
             disposition: .manualRecovery(context)
         )
         let (controller, backend, _, _) = makeSUT(initialMode: failedMode)
-        backend.setControlStatusDelay(0.2, ignoringCancellation: true)
+        let statusGate = TestOperationGate()
+        backend.setOperationGate(statusGate, for: "read-status")
 
         let wake = Task { await controller.reconcileAfterWake() }
-        let statusReadStarted = await eventually { backend.operations.contains("read-status") }
-        XCTAssertTrue(statusReadStarted)
-        let prepared = await controller.prepareForSleep()
+        await statusGate.waitUntilEntered()
+        let wakeGeneration = controller.wakeReconciliationGeneration
+        let sleep = Task { await controller.prepareForSleep() }
+        let wakeWasInvalidated = await eventually {
+            controller.wakeReconciliationGeneration > wakeGeneration
+        }
+        XCTAssertTrue(wakeWasInvalidated)
+        await statusGate.release()
+        let prepared = await sleep.value
         await wake.value
 
         XCTAssertFalse(prepared)
@@ -973,15 +995,14 @@ extension ChargeControllerSafetyTests {
         let (controller, backend, _, _) = makeSUT(
             initialMode: .toppingUp(returnLimit: 80)
         )
-        backend.setCancelLongRunningDelay(0.08, ignoringCancellation: true)
+        let sleepGate = TestOperationGate()
+        backend.setOperationGate(sleepGate, for: "prepare-system-sleep")
 
         let sleepTask = Task { await controller.prepareForSleep() }
-        let preparationStarted = await eventually {
-            backend.operations.contains("prepare-system-sleep")
-        }
-        XCTAssertTrue(preparationStarted)
+        await sleepGate.waitUntilEntered()
         let shutdownTask = Task { try await controller.shutdown() }
-        await Task.yield()
+        let shutdownClaimedLifecycle = await eventually { controller.isShuttingDown }
+        XCTAssertTrue(shutdownClaimedLifecycle)
 
         await controller.reconcileAfterWake()
         do {
@@ -991,6 +1012,7 @@ extension ChargeControllerSafetyTests {
             // Expected: the first shutdown owns the lifecycle before its first await.
         }
 
+        await sleepGate.release()
         _ = await sleepTask.value
         try await shutdownTask.value
         XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)

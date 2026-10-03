@@ -380,20 +380,21 @@ extension ChargeControllerSafetyTests {
         let initiallyProtected = await eventually { controller.heatProtectionTriggered }
         XCTAssertTrue(initiallyProtected)
 
-        backend.maintainDelay = 0.25
+        let maintainGate = TestOperationGate()
+        backend.setOperationGate(maintainGate, for: "maintain")
         backend.temperature = 37
         let coolInfo = makeBatteryInfo(temperature: 37)
         infoSource.set(coolInfo)
         monitor.batteryInfo = coolInfo
         controller.processBatteryInfo(coolInfo)
-        let restoreStarted = await eventually { backend.operations.contains("maintain:80") }
-        XCTAssertTrue(restoreStarted)
+        await maintainGate.waitUntilEntered()
 
         backend.temperature = 45
         let hotAgain = makeBatteryInfo(temperature: 45)
         infoSource.set(hotAgain)
         monitor.batteryInfo = hotAgain
         controller.processBatteryInfo(hotAgain)
+        await maintainGate.release()
 
         let reblocked = await eventually {
             controller.heatProtectionTriggered && !controller.isCommandPending
@@ -444,6 +445,7 @@ extension ChargeControllerSafetyTests {
         XCTAssertTrue(events.contains {
             $0.operation == "apply Charge Limit" && $0.outcome == .superseded
         })
+        await log.flushPendingEvents()
     }
 
     func testUnsafePostflightTemperatureReblocksInsteadOfPublishingRestoredMode() async {
@@ -628,6 +630,7 @@ extension ChargeControllerSafetyTests {
             if !recorded { try await Task.sleep(nanoseconds: 10_000_000) }
         }
         XCTAssertTrue(recorded)
+        await log.flushPendingEvents()
     }
 
 }
