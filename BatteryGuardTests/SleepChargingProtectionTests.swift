@@ -937,6 +937,30 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(controller.readiness, .ready)
     }
 
+    func testNewSleepDiscardsLateManualFailureObservationFromWake() async {
+        let context = ManualRecoveryContext(
+            origin: .systemSleep(.forcedSystemSleep),
+            target: .restoreMaintain(limit: 80),
+            latestObservedState: nil
+        )
+        let failedMode = ChargeMode.failed(
+            previous: .maintaining(limit: 80),
+            message: "sleep verification failed",
+            disposition: .manualRecovery(context)
+        )
+        let (controller, backend, _, _) = makeSUT(initialMode: failedMode)
+        backend.setControlStatusDelay(0.2, ignoringCancellation: true)
+
+        let wake = Task { await controller.reconcileAfterWake() }
+        let statusReadStarted = await eventually { backend.operations.contains("read-status") }
+        XCTAssertTrue(statusReadStarted)
+        let prepared = await controller.prepareForSleep()
+        await wake.value
+
+        XCTAssertFalse(prepared)
+        XCTAssertEqual(controller.mode, failedMode)
+    }
+
     func testShutdownClaimsLifecycleBeforeWaitingForSleepCleanup() async throws {
         let (controller, backend, _, _) = makeSUT(
             initialMode: .toppingUp(returnLimit: 80)

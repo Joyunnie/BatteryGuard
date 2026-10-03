@@ -309,7 +309,8 @@ extension ChargeController {
             await refreshManualSleepFailureObservation(
                 previous: previous,
                 message: message,
-                context: context
+                context: context,
+                wakeGeneration: generation
             )
             return
         }
@@ -434,7 +435,8 @@ extension ChargeController {
     private func refreshManualSleepFailureObservation(
         previous: RestorableChargeMode?,
         message: String,
-        context: ManualRecoveryContext
+        context: ManualRecoveryContext,
+        wakeGeneration: UInt64
     ) async {
         let failedMode = mode
         let observed: ObservedChargeMode
@@ -444,7 +446,10 @@ extension ChargeController {
         } catch {
             observed = .unavailable(error.localizedDescription)
         }
-        guard !isShuttingDown, mode == failedMode else { return }
+        guard !isShuttingDown,
+              !Task.isCancelled,
+              wakeReconciliationGeneration == wakeGeneration,
+              mode == failedMode else { return }
         mode = .failed(
             previous: previous,
             message: message,

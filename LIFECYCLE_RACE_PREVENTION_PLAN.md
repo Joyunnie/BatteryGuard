@@ -108,9 +108,9 @@ Fake backend는 각 `await` 지점에서 멈추고 순서를 바꿀 수 있어�
 
 ## 6. 실행 기록 (2026-10-04)
 
-- PR 1의 별도 lease 구조체는 도입하지 않았다. 기존 `operationGeneration`/`activeOperationID`를 mutation 소유권으로 유지하고 Wake에 generation과 소유 Task를 추가했다. 재Sleep은 첫 await 전에 Wake를 취소·무효화하고, backend의 bounded cancellation/charging-off 검증을 거친다. 이는 새 병렬 소유권 체계를 만드는 것보다 기존 runner와 같은 안전 경계를 사용한다. Wake 온도 읽기 중 재Sleep 및 Maintain 시작 중 재Sleep 회귀 테스트를 추가했다.
+- PR 1의 별도 lease 구조체는 도입하지 않았다. 기존 `operationGeneration`/`activeOperationID`를 mutation 소유권으로 유지하고 Wake에 generation과 소유 Task를 추가했다. 재Sleep은 첫 await 전에 Wake를 취소·무효화하고, backend의 bounded cancellation/charging-off 검증을 거친다. 이는 새 병렬 소유권 체계를 만드는 것보다 기존 runner와 같은 안전 경계를 사용한다. Wake 온도 읽기 중 재Sleep, Maintain 시작 중 재Sleep, 수동 복구 실패 관측 중 재Sleep의 회귀 테스트를 추가했다.
 - PR 2는 fresh 온도 읽기를 불변 결과로 만들고, 호출처가 현재 작업·취소·소유권을 검증한 뒤 캐시·`BatteryInfo`·UI 오류를 commit하도록 바꿨다. stale 읽기의 공유 상태 불변성을 테스트한다. 현재 IOKit 읽기가 실패하면 이전 `fallbackInfo`는 표시용으로만 남기고 자동 충전 재개 승인은 거부한다.
 - PR 3은 오류를 typed origin, semantic operation ID 또는 관측 generation으로 구분한다. Sleep·Wake·Heat·수동 복구·일반 명령의 성공은 자신의 오류만 해제하며, 완전한 tuple을 검증한 명시적 복구만 제어 실패 전체를 해제한다.
 - PR 4는 `IsCharging` 누락/비정상 값을 `nil`로 보존하고 연결 상태와 분리하여 불명으로 표시한다. PR 5는 pending 이력의 수집 시각을 저장하고, SQLite fixture와 진단 queue를 닫거나 flush한 뒤 삭제한다.
-- 자동 검증: 전체 XCTest 371개 통과, strict-concurrency warnings-as-errors build-for-testing, Release build, Debug Analyze 통과. 검증은 fake backend·격리 store·defaults를 사용했고 실제 CLI 명령은 실행하지 않았다. 수동 시계 기반 power-settlement 테스트 두 개에서 발견된 `Task.yield()` 스케줄링 경합도 deadline 등록과 최종 상태를 기다리도록 수정했고, 각각 10회 반복 검증했다.
+- 자동 검증: 전체 XCTest 372개 통과, strict-concurrency warnings-as-errors build-for-testing, Release build, Debug Analyze 통과. 검증은 fake backend·격리 store·defaults를 사용했고 실제 CLI 명령은 실행하지 않았다. 수동 시계 기반 power-settlement 테스트 두 개에서 발견된 `Task.yield()` 스케줄링 경합도 deadline 등록과 최종 상태를 기다리도록 수정했고, 각각 10회 반복 검증했다.
 - **남은 게이트:** 리뷰 가능한 PR 경계 확정 및 병합; 별도 통제된 실제 Mac Sleep/Wake 검증과 종료 상태 복원. 자동 테스트 통과만으로 실기기 충전 제어 경합이 완전히 해결됐다고 선언하지 않는다.

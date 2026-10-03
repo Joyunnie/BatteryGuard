@@ -210,6 +210,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var controlStatusOverride: BatteryControlStatus?
     private var controlStatusSequence: [BatteryControlStatus] = []
     private var controlStatusDelayValue: TimeInterval = 0
+    private var ignoresControlStatusReadCancellation = false
     private var longRunningProbeDelayValue: TimeInterval = 0
     private var cancelLongRunningDelayValue: TimeInterval = 0
     private var ignoresCancelLongRunningCancellation = false
@@ -320,8 +321,14 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         lock.withLock { controlStatusSequence.append(contentsOf: statuses) }
     }
 
-    func setControlStatusDelay(_ delay: TimeInterval) {
-        lock.withLock { controlStatusDelayValue = delay }
+    func setControlStatusDelay(
+        _ delay: TimeInterval,
+        ignoringCancellation: Bool = false
+    ) {
+        lock.withLock {
+            controlStatusDelayValue = delay
+            ignoresControlStatusReadCancellation = ignoringCancellation
+        }
     }
 
     func setOwnedLongRunningOperation(
@@ -356,9 +363,17 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func readControlStatus() async throws -> BatteryControlStatus {
         try record("read-status")
-        let delay = lock.withLock { controlStatusDelayValue }
-        if delay > 0 {
-            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        let delay = lock.withLock {
+            (controlStatusDelayValue, ignoresControlStatusReadCancellation)
+        }
+        if delay.0 > 0 {
+            if delay.1 {
+                await Task.detached {
+                    try? await Task.sleep(nanoseconds: UInt64(delay.0 * 1_000_000_000))
+                }.value
+            } else {
+                try await Task.sleep(nanoseconds: UInt64(delay.0 * 1_000_000_000))
+            }
         }
         return lock.withLock {
             if !controlStatusSequence.isEmpty {

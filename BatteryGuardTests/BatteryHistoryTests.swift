@@ -290,6 +290,7 @@ final class BatteryHistoryTests: XCTestCase {
         XCTAssertEqual(recoveredReadiness, .ready)
         XCTAssertTrue(history.record(chargePercent: 70, chargeLimit: 80))
         XCTAssertEqual(history.fetchRecentHistory().count, 1)
+        try history.closeStoreForTests()
     }
 
     func testSaveAndFetchFailuresAreExposedAndLogged() async throws {
