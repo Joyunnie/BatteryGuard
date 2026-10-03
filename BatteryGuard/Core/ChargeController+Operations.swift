@@ -255,7 +255,9 @@ extension ChargeController {
 
     func startTopUp() {
         guard canStartExclusiveAction(named: "Top Up") else { return }
-        guard let info = monitor.batteryInfo, info.isPluggedIn else {
+        let power = monitor.refreshCurrentPowerObservation()
+        guard power.connection == .stable(.connected),
+              let info = power.batteryInfo else {
             commandError = "전원 연결과 배터리 상태를 확인할 수 없어 Top Up을 시작하지 않았습니다."
             refreshDisplayedError()
             return

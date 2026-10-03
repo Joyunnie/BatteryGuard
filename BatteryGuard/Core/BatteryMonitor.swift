@@ -69,6 +69,11 @@ enum PowerConnectionObservation: Equatable, Sendable {
 final class BatteryMonitor: ObservableObject {
     static let shared = BatteryMonitor(runsMonitoringInfrastructure: !AppRuntime.isRunningTests)
 
+    struct CurrentPowerObservation: Equatable, Sendable {
+        let batteryInfo: BatteryInfo?
+        let connection: PowerConnectionObservation
+    }
+
     private struct FreshPowerSnapshot {
         let sourceKind: BatteryPowerSourceKind?
         let batteryInfo: BatteryInfo?
@@ -422,6 +427,27 @@ final class BatteryMonitor: ObservableObject {
 
         let snapshot = readFreshPowerSnapshot()
         return applyFreshPowerSnapshot(snapshot)
+    }
+
+    /// Reads and publishes one paired BatteryInfo/IOPS observation for a
+    /// controller action. A power edge already being settled, or one detected
+    /// by this read, remains transitioning and cannot authorize an AC-only
+    /// hardware mutation.
+    func refreshCurrentPowerObservation() -> CurrentPowerObservation {
+        if powerSourceSettlementTask != nil {
+            markSettlementRefreshPending()
+            return CurrentPowerObservation(
+                batteryInfo: batteryInfo,
+                connection: powerConnectionObservation
+            )
+        }
+
+        let snapshot = readFreshPowerSnapshot()
+        _ = applyFreshPowerSnapshot(snapshot)
+        return CurrentPowerObservation(
+            batteryInfo: batteryInfo,
+            connection: powerConnectionObservation
+        )
     }
 
     @discardableResult

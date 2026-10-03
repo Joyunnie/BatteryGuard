@@ -700,4 +700,49 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
     }
 
+    func testTopUpUsesCurrentIOPSACWhenBatteryConnectionFlagIsUncertain() async {
+        let freshInfo = makeBatteryInfo(
+            charge: 70,
+            isPluggedIn: false,
+            connectionEvidence: .uncertain
+        )
+        let (controller, backend, _, _) = makeSUT(
+            charge: 70,
+            isPluggedIn: false,
+            batteryInfoProvider: { freshInfo },
+            powerSourceKindProvider: { .ac },
+            initialPowerConnectionObservation: .uncertain(previous: nil)
+        )
+
+        controller.startTopUp()
+
+        let started = await eventually { controller.isTopUpActive }
+        XCTAssertTrue(started)
+        XCTAssertTrue(backend.operations.contains("top-up:100"))
+    }
+
+    func testTopUpRejectsAnUnresolvedCurrentPowerPair() {
+        let freshInfo = makeBatteryInfo(
+            charge: 70,
+            isPluggedIn: false,
+            connectionEvidence: .uncertain
+        )
+        let (controller, backend, _, _) = makeSUT(
+            charge: 70,
+            isPluggedIn: false,
+            batteryInfoProvider: { freshInfo },
+            powerSourceKindProvider: { nil },
+            initialPowerConnectionObservation: .stable(.connected)
+        )
+
+        controller.startTopUp()
+
+        XCTAssertFalse(controller.isTopUpActive)
+        XCTAssertFalse(backend.operations.contains("top-up:100"))
+        XCTAssertEqual(
+            controller.lastError,
+            "전원 연결과 배터리 상태를 확인할 수 없어 Top Up을 시작하지 않았습니다."
+        )
+    }
+
 }

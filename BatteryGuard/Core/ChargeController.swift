@@ -309,7 +309,7 @@ final class ChargeController: ObservableObject {
         if !settings.batteryControlEnabled {
             return .denied("BatteryGuard가 충전 제어를 소유하고 있지 않습니다.")
         }
-        if monitor.batteryInfo?.isPluggedIn != true {
+        if monitor.powerConnectionObservation != .stable(.connected) {
             return .denied("전원을 연결한 뒤 Maintain 복구를 실행하세요.")
         }
         return .allowed

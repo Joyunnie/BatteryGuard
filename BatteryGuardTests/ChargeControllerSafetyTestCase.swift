@@ -12,6 +12,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
         isPluggedIn: Bool = true,
         batteryInfoOnRead: BatteryInfo? = nil,
         batteryInfoProvider: (() -> BatteryInfo?)? = nil,
+        powerSourceKindProvider: @escaping () -> BatteryPowerSourceKind? = { .ac },
+        initialPowerConnectionObservation: PowerConnectionObservation = .stable(.connected),
         initialReadiness: ChargeControllerReadiness = .ready,
         initialMode: ChargeMode? = nil,
         sleepChargingStrategy: SleepChargingStrategy = .pauseOnSleep,
@@ -28,18 +30,21 @@ final class ChargeControllerSafetyTests: XCTestCase {
     ) -> (ChargeController, FakeChargeBackend, BatteryMonitor, UserSettings) {
         let backend = FakeChargeBackend()
         backend.temperature = temperature.map(Float.init)
-        let monitor = BatteryMonitor(
-            batteryInfoProvider: batteryInfoProvider ?? { batteryInfoOnRead },
-            runsMonitoringInfrastructure: false,
-            preventSleepHandler: preventSleepHandler,
-            allowSleepHandler: allowSleepHandler
-        )
-        monitor.batteryInfo = makeBatteryInfo(
+        let initialInfo = makeBatteryInfo(
             charge: charge,
             isCharging: isCharging,
             isPluggedIn: isPluggedIn,
             temperature: temperature
         )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: batteryInfoProvider ?? { batteryInfoOnRead ?? initialInfo },
+            runsMonitoringInfrastructure: false,
+            preventSleepHandler: preventSleepHandler,
+            allowSleepHandler: allowSleepHandler,
+            powerSourceKindProvider: powerSourceKindProvider,
+            initialPowerConnectionObservation: initialPowerConnectionObservation
+        )
+        monitor.batteryInfo = initialInfo
         let settings = UserSettings(
             defaults: makeTestDefaults(),
             launchAtLoginService: FakeLaunchAtLoginService()
