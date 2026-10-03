@@ -187,6 +187,100 @@ final class ChargeStateTests: XCTestCase {
         XCTAssertEqual(presentation.tone, .neutral)
     }
 
+    func testControlOwnershipPresentationShowsVerifiedBatteryGuardControl() {
+        let presentation = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.connected),
+            mode: .maintaining(limit: 80),
+            chargeState: .chargingPaused,
+            requiresManualRecovery: false,
+            ownership: .batteryGuard(lastLimit: 80),
+            readiness: .ready
+        )
+
+        XCTAssertEqual(presentation.controlOwnership.title, "BatteryGuard가 충전 제어 중")
+        XCTAssertEqual(presentation.controlOwnership.icon, "checkmark.shield.fill")
+        XCTAssertEqual(presentation.controlOwnership.tone, .success)
+    }
+
+    func testControlOwnershipPresentationDoesNotCallFailuresHealthy() {
+        let failed = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.connected),
+            mode: .failed(previous: .maintaining(limit: 80), message: "failure", disposition: .manualIntervention),
+            chargeState: .unknown,
+            requiresManualRecovery: false,
+            ownership: .batteryGuard(lastLimit: 80),
+            readiness: .ready
+        )
+        let manualRecovery = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.connected),
+            mode: .maintaining(limit: 80),
+            chargeState: .unknown,
+            requiresManualRecovery: true,
+            ownership: .batteryGuard(lastLimit: 80),
+            readiness: .ready
+        )
+        let initializationFailure = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.connected),
+            mode: .idle,
+            chargeState: .unknown,
+            requiresManualRecovery: false,
+            ownership: .batteryGuard(lastLimit: 80),
+            readiness: .failed("failure")
+        )
+
+        XCTAssertEqual(failed.controlOwnership.tone, .danger)
+        XCTAssertEqual(manualRecovery.controlOwnership.tone, .danger)
+        XCTAssertEqual(initializationFailure.controlOwnership.title, "BatteryGuard 초기화 오류 · 복구 필요")
+    }
+
+    func testControlOwnershipPresentationDistinguishesDriftReleaseAndSystemOwnership() {
+        let drift = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.connected),
+            mode: .externalDrift(expected: .maintaining(limit: 80), observed: .chargingDisabled),
+            chargeState: .unknown,
+            requiresManualRecovery: false,
+            ownership: .batteryGuard(lastLimit: 80)
+        )
+        let releasing = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.connected),
+            mode: .transitioning(.releasingControl(previous: .maintaining(limit: 80))),
+            chargeState: .unknown,
+            requiresManualRecovery: false,
+            ownership: .releasing(lastLimit: 80)
+        )
+        let system = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.connected),
+            mode: .controlDisabled(lastLimit: 80),
+            chargeState: .chargingPaused,
+            requiresManualRecovery: false,
+            ownership: .system(lastLimit: 80)
+        )
+        let failedRelease = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.connected),
+            mode: .externalDrift(expected: .controlReleasing(lastLimit: 80), observed: .chargingDisabled),
+            chargeState: .unknown,
+            requiresManualRecovery: false,
+            ownership: .releasing(lastLimit: 80)
+        )
+
+        XCTAssertEqual(drift.controlOwnership.title, "BatteryGuard 제어 불일치 · 확인 필요")
+        XCTAssertEqual(drift.controlOwnership.tone, .warning)
+        XCTAssertEqual(releasing.controlOwnership.title, "macOS 제어로 전환 중")
+        XCTAssertEqual(releasing.controlOwnership.tone, .warning)
+        XCTAssertEqual(failedRelease.controlOwnership.title, "macOS 제어 전환 미완료 · 복구 필요")
+        XCTAssertEqual(failedRelease.controlOwnership.tone, .danger)
+        XCTAssertEqual(system.controlOwnership.title, "macOS 제어, BatteryGuard 모니터링 전용")
+        XCTAssertEqual(system.controlOwnership.tone, .info)
+    }
+
     func testIssueRegistryOrdersBySeverityThenRecency() {
         var registry = BatteryIssueRegistry()
         let start = Date(timeIntervalSince1970: 100)

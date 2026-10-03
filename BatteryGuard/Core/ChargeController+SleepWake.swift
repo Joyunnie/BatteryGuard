@@ -419,6 +419,7 @@ extension ChargeController {
         if let completedRequest {
             recordDiagnostic(
                 category: .lifecycle,
+                operationID: completedRequest.id,
                 operation: "system sleep completion",
                 outcome: .succeeded,
                 sleepSettlement: completedRequest.sleepSettlementDiagnostic(

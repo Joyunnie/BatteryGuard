@@ -19,6 +19,99 @@ enum BatteryPresentationTone: Equatable, Sendable {
     case danger
 }
 
+struct ControlOwnershipPresentation: Equatable, Sendable {
+    let title: String
+    let icon: String
+    let tone: BatteryPresentationTone
+
+    nonisolated static func make(
+        ownership: BatteryControlOwnership,
+        mode: ChargeMode,
+        readiness: ChargeControllerReadiness,
+        requiresManualRecovery: Bool
+    ) -> ControlOwnershipPresentation {
+        switch ownership {
+        case .system:
+            return ControlOwnershipPresentation(
+                title: "macOS 제어, BatteryGuard 모니터링 전용",
+                icon: "eye.fill",
+                tone: .info
+            )
+        case .releasing:
+            if case .failed = readiness {
+                return releaseRecoveryRequiredPresentation
+            }
+            switch mode {
+            case .failed, .externalDrift:
+                return releaseRecoveryRequiredPresentation
+            default:
+                break
+            }
+            return ControlOwnershipPresentation(
+                title: "macOS 제어로 전환 중",
+                icon: "arrow.triangle.2.circlepath",
+                tone: .warning
+            )
+        case .batteryGuard:
+            break
+        }
+
+        if case .failed = readiness {
+            return recoveryRequiredPresentation("초기화 오류")
+        }
+        if requiresManualRecovery {
+            return recoveryRequiredPresentation("제어 오류")
+        }
+
+        switch mode {
+        case .failed:
+            return recoveryRequiredPresentation("제어 오류")
+        case .externalDrift:
+            return ControlOwnershipPresentation(
+                title: "BatteryGuard 제어 불일치 · 확인 필요",
+                icon: "arrow.triangle.2.circlepath.circle.fill",
+                tone: .warning
+            )
+        case .transitioning:
+            return ControlOwnershipPresentation(
+                title: "BatteryGuard 충전 제어 변경 중",
+                icon: "arrow.triangle.2.circlepath",
+                tone: .info
+            )
+        case .controlDisabled, .idle:
+            return ControlOwnershipPresentation(
+                title: "BatteryGuard 제어 상태 확인 필요",
+                icon: "exclamationmark.triangle.fill",
+                tone: .danger
+            )
+        case .maintaining, .toppingUp, .discharging, .heatBlocked, .sleepProtected:
+            return ControlOwnershipPresentation(
+                title: "BatteryGuard가 충전 제어 중",
+                icon: "checkmark.shield.fill",
+                tone: .success
+            )
+        }
+    }
+
+    private nonisolated static func recoveryRequiredPresentation(
+        _ reason: String
+    ) -> ControlOwnershipPresentation {
+        ControlOwnershipPresentation(
+            title: "BatteryGuard \(reason) · 복구 필요",
+            icon: "exclamationmark.triangle.fill",
+            tone: .danger
+        )
+    }
+
+    private nonisolated static var releaseRecoveryRequiredPresentation: ControlOwnershipPresentation {
+        ControlOwnershipPresentation(
+            title: "macOS 제어 전환 미완료 · 복구 필요",
+            icon: "exclamationmark.triangle.fill",
+            tone: .danger
+        )
+    }
+}
+
 struct BatteryPresentation: Equatable, Sendable {
     let statusTitle: String
     let statusIcon: String
@@ -29,15 +122,24 @@ struct BatteryPresentation: Equatable, Sendable {
     let powerLabel: String
     let eyebrow: String
     let headline: String
+    let controlOwnership: ControlOwnershipPresentation
 
     nonisolated static func make(
         info: BatteryInfo?,
         connection: PowerConnectionObservation,
         mode: ChargeMode,
         chargeState: ChargeState,
-        requiresManualRecovery: Bool
+        requiresManualRecovery: Bool,
+        ownership: BatteryControlOwnership = .batteryGuard(lastLimit: 80),
+        readiness: ChargeControllerReadiness = .ready
     ) -> BatteryPresentation {
         let power = PowerDescription(connection)
+        let controlOwnership = ControlOwnershipPresentation.make(
+            ownership: ownership,
+            mode: mode,
+            readiness: readiness,
+            requiresManualRecovery: requiresManualRecovery
+        )
 
         if requiresManualRecovery {
             let connectedPrefix = connection == .stable(.connected) ? "전원 연결됨 · " : ""
@@ -50,7 +152,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 powerIcon: power.icon,
                 powerLabel: power.label,
                 eyebrow: power.eyebrow,
-                headline: "실제 충전 제어 상태를 확인해 주세요"
+                headline: "실제 충전 제어 상태를 확인해 주세요",
+                controlOwnership: controlOwnership
             )
         }
 
@@ -61,7 +164,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 icon: "exclamationmark.triangle.fill",
                 tone: .danger,
                 headline: "충전 제어 오류를 확인해 주세요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         case .externalDrift:
             return makeSafetyPresentation(
@@ -69,7 +173,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 icon: "arrow.triangle.2.circlepath.circle.fill",
                 tone: .warning,
                 headline: "외부에서 바뀐 충전 상태를 확인해 주세요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         case .heatBlocked:
             return makeSafetyPresentation(
@@ -77,7 +182,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 icon: "thermometer.sun.fill",
                 tone: .warning,
                 headline: "고온으로 충전을 잠시 멈췄어요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         case .sleepProtected:
             return makeSafetyPresentation(
@@ -85,7 +191,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 icon: "moon.fill",
                 tone: .info,
                 headline: "잠자기 동안 충전을 멈췄어요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         default:
             break
@@ -102,7 +209,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 powerIcon: power.icon,
                 powerLabel: power.label,
                 eyebrow: power.eyebrow,
-                headline: "전원 연결 변화를 확인하고 있어요"
+                headline: "전원 연결 변화를 확인하고 있어요",
+                controlOwnership: controlOwnership
             )
         case .uncertain:
             return BatteryPresentation(
@@ -114,7 +222,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 powerIcon: power.icon,
                 powerLabel: power.label,
                 eyebrow: power.eyebrow,
-                headline: "전원 연결 여부를 확인할 수 없어요"
+                headline: "전원 연결 여부를 확인할 수 없어요",
+                controlOwnership: controlOwnership
             )
         case .stable:
             break
@@ -130,7 +239,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 powerIcon: power.icon,
                 powerLabel: power.label,
                 eyebrow: power.eyebrow,
-                headline: "배터리 정보를 읽을 수 없어요"
+                headline: "배터리 정보를 읽을 수 없어요",
+                controlOwnership: controlOwnership
             )
         }
 
@@ -142,7 +252,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 tone: .success,
                 showsChargingBolt: true,
                 headline: "추가 충전을 진행하고 있어요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         }
         if case .discharging = mode {
@@ -153,7 +264,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 tone: .info,
                 showsChargingBolt: false,
                 headline: "목표까지 안전하게 방전 중이에요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         }
         if info.isCharging == true {
@@ -164,7 +276,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 tone: .success,
                 showsChargingBolt: true,
                 headline: "한도까지 충전하고 있어요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         }
         if connection == .stable(.disconnected) {
@@ -175,7 +288,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 tone: .neutral,
                 showsChargingBolt: false,
                 headline: "배터리 전원으로 사용 중이에요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         }
 
@@ -187,7 +301,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 tone: .warning,
                 showsChargingBolt: false,
                 headline: "전원은 연결됐지만 충전 활동을 확인할 수 없어요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         }
 
@@ -202,7 +317,8 @@ struct BatteryPresentation: Equatable, Sendable {
                 headline: isHoldingAtLimit
                     ? "설정한 충전 한도를 지키고 있어요"
                     : "macOS의 충전 시작을 기다리고 있어요",
-                power: power
+                power: power,
+                controlOwnership: controlOwnership
             )
         }
 
@@ -224,7 +340,8 @@ struct BatteryPresentation: Equatable, Sendable {
             tone: chargeState == .unknown ? .warning : .info,
             showsChargingBolt: false,
             headline: headline,
-            power: power
+            power: power,
+            controlOwnership: controlOwnership
         )
     }
 
@@ -233,7 +350,8 @@ struct BatteryPresentation: Equatable, Sendable {
         icon: String,
         tone: BatteryPresentationTone,
         headline: String,
-        power: PowerDescription
+        power: PowerDescription,
+        controlOwnership: ControlOwnershipPresentation
     ) -> BatteryPresentation {
         BatteryPresentation(
             statusTitle: title,
@@ -244,7 +362,8 @@ struct BatteryPresentation: Equatable, Sendable {
             powerIcon: power.icon,
             powerLabel: power.label,
             eyebrow: power.eyebrow,
-            headline: headline
+            headline: headline,
+            controlOwnership: controlOwnership
         )
     }
 
@@ -255,7 +374,8 @@ struct BatteryPresentation: Equatable, Sendable {
         tone: BatteryPresentationTone,
         showsChargingBolt: Bool,
         headline: String,
-        power: PowerDescription
+        power: PowerDescription,
+        controlOwnership: ControlOwnershipPresentation
     ) -> BatteryPresentation {
         BatteryPresentation(
             statusTitle: title,
@@ -266,7 +386,8 @@ struct BatteryPresentation: Equatable, Sendable {
             powerIcon: power.icon,
             powerLabel: power.label,
             eyebrow: power.eyebrow,
-            headline: headline
+            headline: headline,
+            controlOwnership: controlOwnership
         )
     }
 

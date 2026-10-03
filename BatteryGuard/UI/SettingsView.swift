@@ -257,21 +257,20 @@ struct SettingsView: View {
     }
 
     private var controlOwnershipCard: some View {
-        PastelCard(tint: controller.isBatteryControlDisabled ? BatteryGuardPalette.sky : BatteryGuardPalette.mint) {
+        let ownership = controller.batteryPresentation.controlOwnership
+        return PastelCard(tint: ownership.tone.presentationTint) {
             VStack(alignment: .leading, spacing: 14) {
                 PastelSectionHeader(
                     "충전 제어 소유권",
                     subtitle: "macOS와 BatteryGuard 중 하나만 충전을 제어해야 합니다.",
-                    icon: controller.isBatteryControlDisabled ? "eye.fill" : "checkmark.shield.fill",
-                    tint: controller.isBatteryControlDisabled ? BatteryGuardPalette.sky : BatteryGuardPalette.success
+                    icon: ownership.icon,
+                    tint: ownership.tone.presentationTint
                 )
 
                 PastelStatusPill(
-                    title: controller.isBatteryControlDisabled
-                        ? "macOS 제어, BatteryGuard 모니터링 전용"
-                        : "BatteryGuard가 충전 제어 중",
-                    tint: controller.isBatteryControlDisabled ? BatteryGuardPalette.skyInk : BatteryGuardPalette.success,
-                    icon: controller.isBatteryControlDisabled ? "eye.fill" : "checkmark.shield.fill"
+                    title: ownership.title,
+                    tint: ownership.tone.presentationTint,
+                    icon: ownership.icon
                 )
 
                 Text("BatteryGuard의 Maintain, Top Up, Discharge, Heat Protection과 macOS Charge Limit를 동시에 사용하지 마세요. 단순 제한만 필요하면 BatteryGuard 제어를 끈 뒤 macOS 배터리 설정에서 Charge Limit를 사용하세요. macOS Charge Limit는 Tahoe 26.4 이상 Apple Silicon Mac에서 제공됩니다.")
