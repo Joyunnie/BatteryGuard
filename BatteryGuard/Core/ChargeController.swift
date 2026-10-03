@@ -269,7 +269,9 @@ final class ChargeController: ObservableObject {
             connection: monitor.powerConnectionObservation,
             mode: mode,
             chargeState: currentState,
-            requiresManualRecovery: manualInterventionRecoveryDescription != nil
+            requiresManualRecovery: manualInterventionRecoveryDescription != nil,
+            ownership: settings.batteryControlOwnership,
+            readiness: readiness
         )
     }
     var manualRecoveryObservedDescription: String? {

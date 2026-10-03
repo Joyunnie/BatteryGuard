@@ -1,6 +1,6 @@
 # BatteryGuard 현재 코드 수정 계획
 
-작성: 2026-10-04 · 기준: `main` `34663c7` (PR #39 병합 후) · 상태: 계획 수립, 구현 전
+작성: 2026-10-04 · 기준: `main` `9c00130` (PR #41 병합 후) · 상태: PR 1·2 병합, PR 3 구현·검증 완료, PR 4 대기
 
 ## 1. 목표와 판단 근거
 
@@ -64,3 +64,10 @@
 ## 4. 현재 범위 밖
 
 단일 `ControlOperationLease` 도입, runner/SMCKit의 파일 분할, Core Data queue 이전, 새 snapshot epoch 체계, installer·배포 자동화는 이번 결함의 직접 수정 조건이 아니다. 새 lifecycle 결함이 재현되거나 프로파일링에서 UI stall이 확인될 때 별도 증거와 계획으로 다룬다.
+
+## 5. 실행 기록
+
+- PR #40 (`10481f3`): Top Up과 명시적 Maintain 복구가 현재 paired battery/IOPS 관측을 공유하도록 통일했다. 전체 XCTest 374개와 Release/Analyze/strict build가 통과했다.
+- PR #41 (`9c00130`): 진단 fixture를 flush 후 정리하고, 핵심 Wake/Sleep/Heat/종료 경합 테스트를 고정 지연 대신 명시적 operation barrier로 바꾸었다. 전체 XCTest 374개가 통과했다.
+- PR 3: Settings 제어권 표시와 sleep 진단 correlation을 수정했다. strict 전체 XCTest 378개, Release build, Debug Analyze가 통과했다.
+- PR 4와 최종 자동/실기기 검증은 남아 있다.

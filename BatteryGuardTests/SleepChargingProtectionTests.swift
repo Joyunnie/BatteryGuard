@@ -387,6 +387,37 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(observer.activeSleepRequest?.kind, .forcedSystemSleep)
     }
 
+    func testSleepCompletionDiagnosticUsesRequestAsTopLevelOperationID() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-sleep-correlation-\(UUID().uuidString)")
+        let diagnostics = DiagnosticLog(
+            fileURL: directory.appendingPathComponent("Diagnostics.json"),
+            capacity: 20
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (controller, _, _, _) = makeSUT(
+            initialMode: .maintaining(limit: 80),
+            diagnostics: diagnostics
+        )
+        let request = SystemSleepRequest(
+            id: UUID(),
+            generation: 7,
+            kind: .forcedSystemSleep,
+            deadlineUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+        )
+
+        let prepared = await controller.prepareForSleep(request: request)
+        XCTAssertTrue(prepared)
+        await controller.handleSystemSleepCompletion(.poweredOn)
+        await diagnostics.flushPendingEvents()
+
+        let correlatedEvents = await diagnostics.recentEvents().filter {
+            $0.sleepSettlement?.requestID == request.id
+        }
+        XCTAssertFalse(correlatedEvents.isEmpty)
+        XCTAssertTrue(correlatedEvents.allSatisfy { $0.operationID == request.id })
+    }
+
     func testPauseStrategyStopsChargingAndWakeRestoresVerifiedMaintain() async {
         let (controller, backend, _, _) = makeSUT(
             charge: 67,

@@ -1,6 +1,8 @@
 # BatteryGuard 비동기 제어 경합 재발 방지 계획
 
-작성: 2026-10-03 · 기준: `main` (`7b4822a`, PR #38 병합 후) · 갱신: 2026-10-04 · 상태: 코드 구현 및 자동 검증 완료, PR·실기기 검증 대기
+작성: 2026-10-03 · 기준: `main` (`9c00130`, PR #41 병합 후) · 갱신: 2026-10-04 · 상태: PR #39·#40·#41 병합 및 자동 검증 완료, 최신 실기기 검증 대기
+
+> 아래 기존 실기기 원자료는 PR #40·#41 이전에 수집되었으므로 최신 코드의 Sleep/Wake 행동을 입증하지 않는다.
 
 ## 1. 목적과 현재 코드에서 확인한 원인
 
@@ -112,5 +114,5 @@ Fake backend는 각 `await` 지점에서 멈추고 순서를 바꿀 수 있어�
 - PR 2는 fresh 온도 읽기를 불변 결과로 만들고, 호출처가 현재 작업·취소·소유권을 검증한 뒤 캐시·`BatteryInfo`·UI 오류를 commit하도록 바꿨다. stale 읽기의 공유 상태 불변성을 테스트한다. 현재 IOKit 읽기가 실패하면 이전 `fallbackInfo`는 표시용으로만 남기고 자동 충전 재개 승인은 거부한다.
 - PR 3은 오류를 typed origin, semantic operation ID 또는 관측 generation으로 구분한다. Sleep·Wake·Heat·수동 복구·일반 명령의 성공은 자신의 오류만 해제하며, 완전한 tuple을 검증한 명시적 복구만 제어 실패 전체를 해제한다.
 - PR 4는 `IsCharging` 누락/비정상 값을 `nil`로 보존하고 연결 상태와 분리하여 불명으로 표시한다. PR 5는 pending 이력의 수집 시각을 저장하고, SQLite fixture와 진단 queue를 닫거나 flush한 뒤 삭제한다.
-- 자동 검증: 전체 XCTest 372개 통과, strict-concurrency warnings-as-errors build-for-testing, Release build, Debug Analyze 통과. 검증은 fake backend·격리 store·defaults를 사용했고 실제 CLI 명령은 실행하지 않았다. 수동 시계 기반 power-settlement 테스트 두 개에서 발견된 `Task.yield()` 스케줄링 경합도 deadline 등록과 최종 상태를 기다리도록 수정했고, 각각 10회 반복 검증했다.
-- **남은 게이트:** 리뷰 가능한 PR 경계 확정 및 병합; 별도 통제된 실제 Mac Sleep/Wake 검증과 종료 상태 복원. 자동 테스트 통과만으로 실기기 충전 제어 경합이 완전히 해결됐다고 선언하지 않는다.
+- 자동 검증: PR #39에서 전체 XCTest 372개가 통과했고, PR #40·#41 병합 후 374개가 통과했다. strict-concurrency warnings-as-errors build-for-testing, Release build, Debug Analyze도 통과했다. 검증은 fake backend·격리 store·defaults를 사용했고 실제 CLI 명령은 실행하지 않았다. PR #41은 핵심 역방향 경합을 명시적 backend barrier로 전환했다.
+- **남은 게이트:** 리뷰 가능한 PR 경계와 PR #39의 병합은 완료됐다. 최신 `main` 기준의 별도 통제된 실제 Mac Sleep/Wake 검증과 종료 상태 복원은 아직 남았다. 자동 테스트 통과만으로 실기기 충전 제어 경합이 완전히 해결됐다고 선언하지 않는다.
