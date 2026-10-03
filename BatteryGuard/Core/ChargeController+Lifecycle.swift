@@ -75,7 +75,12 @@ extension ChargeController {
                 let previous: RestorableChargeMode = .maintaining(limit: observedLimit ?? desiredLimit)
                 if settings.heatProtectionEnabled {
                     let temperature = await readFreshSafetyTemperature(fallbackInfo: info)
-                    guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
+                    guard !isShuttingDown,
+                          !Task.isCancelled,
+                          settings.batteryControlEnabled else {
+                        throw CancellationError()
+                    }
+                    commitFreshSafetyTemperature(temperature)
                     if temperature.permitsAutomaticCharging(upTo: settings.heatProtectionThreshold) {
                         recoveryExpectation = .maintaining(limit: desiredLimit)
                         initializationHardwareMutationAttempted = true
@@ -172,6 +177,10 @@ extension ChargeController {
                     if settings.heatProtectionEnabled,
                        case .maintaining = expectation {
                         let temperature = await readFreshSafetyTemperature()
+                        guard !isShuttingDown,
+                              !Task.isCancelled,
+                              ownership == settings.batteryControlOwnership else { return false }
+                        commitFreshSafetyTemperature(temperature)
                         guard temperature.permitsAutomaticCharging(
                             upTo: settings.heatProtectionThreshold
                         ) else { return false }
@@ -466,6 +475,9 @@ extension ChargeController {
 
     private func prepareLocalShutdown() {
         cancelSMCTemperatureSample(clearCache: true)
+        wakeReconciliationGeneration &+= 1
+        wakeReconciliationTask?.cancel()
+        wakeReconciliationTask = nil
         cancelLongRunningOperationCheck()
         stopLongRunningMonitoring()
         stopHistoryHeartbeat()

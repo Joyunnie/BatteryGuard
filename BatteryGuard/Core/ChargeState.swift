@@ -156,7 +156,7 @@ struct BatteryPresentation: Equatable, Sendable {
                 power: power
             )
         }
-        if info.isCharging {
+        if info.isCharging == true {
             return makeActivityPresentation(
                 title: "충전 중",
                 icon: "bolt.fill",
@@ -175,6 +175,18 @@ struct BatteryPresentation: Equatable, Sendable {
                 tone: .neutral,
                 showsChargingBolt: false,
                 headline: "배터리 전원으로 사용 중이에요",
+                power: power
+            )
+        }
+
+        if info.isCharging == nil {
+            return makeActivityPresentation(
+                title: "충전 상태 확인 불가",
+                icon: "questionmark.circle",
+                menuBarIcon: "questionmark.circle",
+                tone: .warning,
+                showsChargingBolt: false,
+                headline: "전원은 연결됐지만 충전 활동을 확인할 수 없어요",
                 power: power
             )
         }
@@ -607,6 +619,26 @@ enum BatteryIssueSource: String, Hashable, Sendable {
     case led
 }
 
+enum BatteryIssueOrigin: Hashable, Sendable {
+    case command(String)
+    case sleep
+    case wake
+    case heatProtection
+    case manualRecovery
+    case externalDrift
+    case sensor
+    case led
+
+    var source: BatteryIssueSource {
+        switch self {
+        case .command, .sleep, .wake, .heatProtection, .manualRecovery: return .command
+        case .externalDrift: return .externalDrift
+        case .sensor: return .sensor
+        case .led: return .led
+        }
+    }
+}
+
 enum BatteryIssueSeverity: Int, Equatable, Comparable, Sendable {
     case warning = 1
     case blocking = 2
@@ -616,15 +648,41 @@ enum BatteryIssueSeverity: Int, Equatable, Comparable, Sendable {
 }
 
 struct BatteryIssue: Identifiable, Equatable, Sendable {
+    let origin: BatteryIssueOrigin
+    let operationID: UUID?
+    let observationGeneration: UInt64?
     let source: BatteryIssueSource
     let severity: BatteryIssueSeverity
     let message: String
     let occurredAt: Date
-    var id: String { "\(source.rawValue):\(message)" }
+    var id: String { "\(String(describing: origin)):\(message)" }
 }
 
 struct BatteryIssueRegistry: Sendable {
-    private var entries: [BatteryIssueSource: BatteryIssue] = [:]
+    private var entries: [BatteryIssueOrigin: BatteryIssue] = [:]
+
+    mutating func record(
+        _ origin: BatteryIssueOrigin,
+        severity: BatteryIssueSeverity,
+        message: String,
+        operationID: UUID? = nil,
+        observationGeneration: UInt64? = nil,
+        at date: Date
+    ) {
+        entries[origin] = BatteryIssue(
+            origin: origin, operationID: operationID,
+            observationGeneration: observationGeneration, source: origin.source,
+            severity: severity, message: message, occurredAt: date
+        )
+    }
+
+    mutating func resolve(_ origin: BatteryIssueOrigin) {
+        entries[origin] = nil
+    }
+
+    mutating func resolveVerifiedControlFailures() {
+        entries = entries.filter { $0.value.source != .command }
+    }
 
     mutating func set(
         _ source: BatteryIssueSource,
@@ -632,28 +690,34 @@ struct BatteryIssueRegistry: Sendable {
         message: String?,
         at date: Date
     ) {
-        guard let message else {
-            entries[source] = nil
-            return
+        let origin: BatteryIssueOrigin
+        switch source {
+        case .command: origin = .command("legacy")
+        case .externalDrift: origin = .externalDrift
+        case .sensor: origin = .sensor
+        case .led: origin = .led
         }
-        if entries[source]?.message == message { return }
-        entries[source] = BatteryIssue(
-            source: source,
-            severity: severity,
-            message: message,
-            occurredAt: date
-        )
+        guard let message else { resolve(origin); return }
+        if entries[origin]?.message == message { return }
+        record(origin, severity: severity, message: message, at: date)
     }
 
     func message(for source: BatteryIssueSource) -> String? {
-        entries[source]?.message
+        orderedIssues.first(where: { $0.source == source })?.message
+    }
+
+    func message(forOrigin origin: BatteryIssueOrigin) -> String? {
+        entries[origin]?.message
     }
 
     var orderedIssues: [BatteryIssue] {
         entries.values.sorted {
             if $0.severity != $1.severity { return $0.severity > $1.severity }
             if $0.occurredAt != $1.occurredAt { return $0.occurredAt > $1.occurredAt }
-            return $0.source.rawValue < $1.source.rawValue
+            if $0.source != $1.source {
+                return $0.source.rawValue < $1.source.rawValue
+            }
+            return String(describing: $0.origin) < String(describing: $1.origin)
         }
     }
 }

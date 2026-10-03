@@ -106,7 +106,7 @@ final class BatteryHistory {
     private let heartbeatInterval: TimeInterval
     private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "History")
     private var readinessWaiters: [CheckedContinuation<BatteryHistoryReadiness, Never>] = []
-    private var pendingRecords: [(chargePercent: Int, chargeLimit: Int)] = []
+    private var pendingRecords: [(chargePercent: Int, chargeLimit: Int, timestamp: Date)] = []
     private var lastChargePercent: Int?
     private var lastChargeLimit: Int?
     private var lastRecordDate: Date?
@@ -228,13 +228,26 @@ final class BatteryHistory {
         let pending = pendingRecords
         pendingRecords.removeAll()
         for record in pending {
-            self.record(chargePercent: record.chargePercent, chargeLimit: record.chargeLimit)
+            self.record(
+                chargePercent: record.chargePercent,
+                chargeLimit: record.chargeLimit,
+                timestamp: record.timestamp
+            )
         }
     }
 
     func waitUntilReady() async -> BatteryHistoryReadiness {
         guard readiness == .loading else { return readiness }
         return await withCheckedContinuation { readinessWaiters.append($0) }
+    }
+
+    /// Release fixture SQLite handles before a test removes its temporary directory.
+    func closeStoreForTests() throws {
+        guard !inMemory else { return }
+        container.viewContext.reset()
+        for store in container.persistentStoreCoordinator.persistentStores {
+            try container.persistentStoreCoordinator.remove(store)
+        }
     }
 
     func loadRecentHistory() async -> [ChartRecord] {
@@ -244,6 +257,11 @@ final class BatteryHistory {
 
     @discardableResult
     func record(chargePercent: Int, chargeLimit: Int) -> Bool {
+        record(chargePercent: chargePercent, chargeLimit: chargeLimit, timestamp: now())
+    }
+
+    @discardableResult
+    private func record(chargePercent: Int, chargeLimit: Int, timestamp: Date) -> Bool {
         guard (0...100).contains(chargePercent),
               UserSettings.chargeLimitRange.contains(chargeLimit) else {
             reportError(
@@ -254,7 +272,7 @@ final class BatteryHistory {
         }
         guard readiness == .ready else {
             if readiness == .loading {
-                pendingRecords.append((chargePercent, chargeLimit))
+                pendingRecords.append((chargePercent, chargeLimit, timestamp))
                 if pendingRecords.count > 256 {
                     pendingRecords.removeFirst(pendingRecords.count - 256)
                 }
@@ -263,7 +281,6 @@ final class BatteryHistory {
             return false
         }
 
-        let timestamp = now()
         let valuesChanged = chargePercent != lastChargePercent || chargeLimit != lastChargeLimit
         let heartbeatDue = lastRecordDate.map { timestamp.timeIntervalSince($0) >= heartbeatInterval } ?? true
         guard valuesChanged || heartbeatDue else { return false }
