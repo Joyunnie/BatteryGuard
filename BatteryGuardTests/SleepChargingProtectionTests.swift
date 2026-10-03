@@ -296,6 +296,36 @@ private final class LockedFlag: @unchecked Sendable {
 
 @MainActor
 extension ChargeControllerSafetyTests {
+    func testVerifiedSleepRetryClearsOnlyItsOwnPreviousError() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            initialMode: .sleepProtected(previous: previous, charge: 70)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .enabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        let firstPrepared = await controller.prepareForSleep()
+        XCTAssertFalse(firstPrepared)
+        XCTAssertNotNil(controller.sleepError)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        let secondPrepared = await controller.prepareForSleep()
+        XCTAssertTrue(secondPrepared)
+        XCTAssertNil(controller.sleepError)
+    }
+
     func testObserverAndControllerUseProductionMessagePathForVerifiedSleepTuple() async throws {
         let transport = FakeSystemPowerTransport()
         let observer = SystemPowerObserver(transport: transport)
@@ -845,6 +875,7 @@ extension ChargeControllerSafetyTests {
             heatProtectionEnabled: true,
             temperature: 30,
             charge: 70,
+            batteryInfoOnRead: makeBatteryInfo(charge: 70, temperature: 30),
             initialMode: .sleepProtected(previous: previous, charge: 70)
         )
         backend.setControlStatus(

@@ -33,7 +33,11 @@ extension ChargeController {
             let failure = "SMC: \(error.localizedDescription)"
             failures.append(failure)
         }
-        let freshInfo = monitor.readBatteryInfo() ?? fallbackInfo
+        let observedInfo = monitor.readBatteryInfo()
+        let freshInfo = observedInfo ?? fallbackInfo
+        if observedInfo == nil, fallbackInfo != nil {
+            failures.append("IOKit: 현재 읽기 실패 (이전 값은 표시 전용)")
+        }
         var ioKit: Double?
         if let freshInfo {
             ioKit = freshInfo.temperature.flatMap(BatteryMonitor.validatedTemperature)

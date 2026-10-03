@@ -289,6 +289,7 @@ extension ChargeController {
         let backend = self.backend
         let monitor = self.monitor
         let settings = self.settings
+        manualRecoveryError = nil
         _ = runBattery(
             operation: "restore Maintain \(limit)%",
             transition: .recoveringMaintain(limit: limit),

@@ -4,6 +4,24 @@ import Foundation
 
 @MainActor
 extension ChargeControllerSafetyTests {
+    func testFreshTemperatureReadNeverTreatsFallbackBatteryInfoAsFresh() async {
+        let (controller, _, monitor, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70
+        )
+        let previousInfo = monitor.batteryInfo
+        let before = controller.safetyTemperatureSnapshot
+
+        let read = await controller.readFreshSafetyTemperature(fallbackInfo: previousInfo)
+
+        XCTAssertNotNil(read.maximum)
+        XCTAssertFalse(read.permitsAutomaticCharging(upTo: 40))
+        XCTAssertTrue(read.failures.contains { $0.contains("현재 읽기 실패") })
+        XCTAssertEqual(controller.safetyTemperatureSnapshot, before)
+        XCTAssertEqual(monitor.batteryInfo, previousInfo)
+    }
+
     func testDisablingHeatDuringEntryPreemptsStaleChargingBlock() async {
         let (controller, backend, monitor, settings) = makeSUT(
             heatProtectionEnabled: true,

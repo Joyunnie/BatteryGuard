@@ -616,17 +616,32 @@ final class BatteryValueTests: XCTestCase {
         // The dedicated notification can arrive before the IOPS source query
         // changes. The signal must still anchor a settlement immediately.
         monitor.handlePowerSourceTransitionNotification()
-        await Task.yield()
+        for _ in 0..<1_000 {
+            if clock.requestedDeadlines.contains(100) { break }
+            await Task.yield()
+        }
+        XCTAssertTrue(clock.requestedDeadlines.contains(100))
         clock.advance(to: 100)
-        await Task.yield()
+        for _ in 0..<1_000 {
+            if readCount >= 2 { break }
+            await Task.yield()
+        }
         XCTAssertEqual(readCount, 2)
 
         source = .ac
         suppliedInfo = makeBatteryInfo(isCharging: true, isPluggedIn: true, amperage: 1_500)
         monitor.handleBroadPowerSourceNotification()
-        for deadline: UInt64 in [500, 1_000, 2_000] {
+        for (index, deadline) in [UInt64(500), 1_000, 2_000].enumerated() {
+            for _ in 0..<1_000 {
+                if clock.requestedDeadlines.contains(deadline) { break }
+                await Task.yield()
+            }
+            XCTAssertTrue(clock.requestedDeadlines.contains(deadline))
             clock.advance(to: deadline)
-            await Task.yield()
+            for _ in 0..<1_000 {
+                if readCount >= index + 3 { break }
+                await Task.yield()
+            }
         }
 
         XCTAssertEqual(readCount, 5)
@@ -781,10 +796,23 @@ final class BatteryValueTests: XCTestCase {
         source = .ac
         info = makeBatteryInfo(isPluggedIn: true)
         monitor.handlePowerSourceTransitionNotification()
-        await Task.yield()
+        for _ in 0..<1_000 {
+            if clock.requestedDeadlines.contains(100) { break }
+            await Task.yield()
+        }
+        XCTAssertTrue(clock.requestedDeadlines.contains(100))
         clock.advance(to: 100)
-        await Task.yield()
+        for _ in 0..<1_000 {
+            if monitor.powerConnectionObservation == .stable(.connected) { break }
+            await Task.yield()
+        }
         XCTAssertEqual(monitor.powerConnectionObservation, .stable(.connected))
+
+        for _ in 0..<1_000 {
+            if clock.requestedDeadlines.contains(500) { break }
+            await Task.yield()
+        }
+        XCTAssertTrue(clock.requestedDeadlines.contains(500))
 
         source = nil
         info = makeBatteryInfo(
@@ -792,7 +820,10 @@ final class BatteryValueTests: XCTestCase {
             connectionEvidence: .disconnected
         )
         clock.advance(to: 500)
-        await Task.yield()
+        for _ in 0..<1_000 {
+            if !monitor.hasActivePowerSourceSettlement { break }
+            await Task.yield()
+        }
 
         XCTAssertEqual(monitor.powerConnectionObservation, .uncertain(previous: .disconnected))
         XCTAssertFalse(monitor.hasActivePowerSourceSettlement)

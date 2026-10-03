@@ -236,4 +236,19 @@ final class ChargeStateTests: XCTestCase {
         registry.resolve(.wake)
         XCTAssertTrue(registry.orderedIssues.isEmpty)
     }
+
+    func testRepeatedTypedFailureReplacesItsOperationAndTimeWithoutDuplication() {
+        var registry = BatteryIssueRegistry()
+        let first = UUID()
+        let second = UUID()
+        let start = Date(timeIntervalSince1970: 100)
+        registry.record(.wake, severity: .critical, message: "same failure", operationID: first, at: start)
+        registry.record(
+            .wake, severity: .critical, message: "same failure",
+            operationID: second, at: start.addingTimeInterval(5)
+        )
+        XCTAssertEqual(registry.orderedIssues.count, 1)
+        XCTAssertEqual(registry.orderedIssues.first?.operationID, second)
+        XCTAssertEqual(registry.orderedIssues.first?.occurredAt, start.addingTimeInterval(5))
+    }
 }
