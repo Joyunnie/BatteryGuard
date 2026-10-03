@@ -127,6 +127,7 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(controller.mode, .maintaining(limit: 80))
         XCTAssertFalse(controller.hasExternalControlDrift)
         XCTAssertNil(controller.externalDriftDescription)
+        await log.flushPendingEvents()
     }
 
     func testUnknownChargingNeverQualifiesAsMaintain() async {

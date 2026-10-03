@@ -63,6 +63,43 @@ final class TestBatteryInfoSource: @unchecked Sendable {
     }
 }
 
+actor TestOperationGate {
+    private var entered = false
+    private var released = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { continuation in
+            entryWaiters.append(continuation)
+        }
+    }
+
+    func arriveAndWait() async {
+        guard !released else { return }
+        entered = true
+        let waiters = entryWaiters
+        entryWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            if released {
+                continuation.resume()
+            } else {
+                releaseWaiters.append(continuation)
+            }
+        }
+    }
+
+    func release() {
+        guard !released else { return }
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
 func shellQuote(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
 }
@@ -214,6 +251,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
     private var longRunningProbeDelayValue: TimeInterval = 0
     private var cancelLongRunningDelayValue: TimeInterval = 0
     private var ignoresCancelLongRunningCancellation = false
+    private var operationGates: [String: TestOperationGate] = [:]
 
     var operations: [String] {
         lock.lock()
@@ -291,6 +329,15 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         lock.withLock { recordedOperations.removeAll() }
     }
 
+    func setOperationGate(_ gate: TestOperationGate, for operation: String) {
+        lock.withLock { operationGates[operation] = gate }
+    }
+
+    private func waitAtOperationGate(_ operation: String) async {
+        let gate = lock.withLock { operationGates[operation] }
+        await gate?.arriveAndWait()
+    }
+
     func enqueueTemperatures(_ values: [Float?]) {
         lock.withLock { temperatureSequence.append(contentsOf: values) }
     }
@@ -363,6 +410,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func readControlStatus() async throws -> BatteryControlStatus {
         try record("read-status")
+        await waitAtOperationGate("read-status")
         let delay = lock.withLock {
             (controlStatusDelayValue, ignoresControlStatusReadCancellation)
         }
@@ -400,6 +448,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
             discharging = false
             return (maintainDelayValue, longRunning)
         }
+        await waitAtOperationGate("maintain")
         if state.0 > 0 {
             try await Task.sleep(nanoseconds: UInt64(state.0 * 1_000_000_000))
         }
@@ -449,6 +498,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func startTopUp(to level: Int) async throws {
         try record("top-up", detail: "\(level)")
+        await waitAtOperationGate("top-up")
         let delay = lock.withLock { topUpDelayValue }
         if delay > 0 {
             try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -490,6 +540,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func cancelLongRunningOperation() async throws {
         try record("cancel-long")
+        await waitAtOperationGate("cancel-long")
         let delay = lock.withLock {
             (cancelLongRunningDelayValue, ignoresCancelLongRunningCancellation)
         }
@@ -509,6 +560,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
         deadlineUptimeNanoseconds: UInt64?
     ) async throws -> BatteryControlStatus {
         try record("prepare-system-sleep")
+        await waitAtOperationGate("prepare-system-sleep")
         let delay = lock.withLock {
             (cancelLongRunningDelayValue, ignoresCancelLongRunningCancellation)
         }
@@ -556,6 +608,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
     func readBatteryTemperature() async throws -> BatteryTemperatureSample {
         try record("read-temperature")
+        await waitAtOperationGate("read-temperature")
         let read = lock.withLock {
             let sample = temperatureSampleSequence.isEmpty
                 ? nil
