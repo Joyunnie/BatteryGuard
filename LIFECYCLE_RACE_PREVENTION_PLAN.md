@@ -1,6 +1,6 @@
 # BatteryGuard 비동기 제어 경합 재발 방지 계획
 
-작성: 2026-10-03 · 기준: `main` (`9c00130`, PR #41 병합 후) · 갱신: 2026-10-04 · 상태: PR #39·#40·#41 병합 및 자동 검증 완료, 최신 실기기 검증 대기
+작성: 2026-10-03 · 기준: `main` (`6f953f7`, PR #43 병합 후) · 갱신: 2026-10-04 · 상태: 코드·자동 검증·실사용 설치 완료, 최신 물리 Sleep/Wake assurance 미수행
 
 > 아래 기존 실기기 원자료는 PR #40·#41 이전에 수집되었으므로 최신 코드의 Sleep/Wake 행동을 입증하지 않는다.
 
@@ -115,4 +115,4 @@ Fake backend는 각 `await` 지점에서 멈추고 순서를 바꿀 수 있어�
 - PR 3은 오류를 typed origin, semantic operation ID 또는 관측 generation으로 구분한다. Sleep·Wake·Heat·수동 복구·일반 명령의 성공은 자신의 오류만 해제하며, 완전한 tuple을 검증한 명시적 복구만 제어 실패 전체를 해제한다.
 - PR 4는 `IsCharging` 누락/비정상 값을 `nil`로 보존하고 연결 상태와 분리하여 불명으로 표시한다. PR 5는 pending 이력의 수집 시각을 저장하고, SQLite fixture와 진단 queue를 닫거나 flush한 뒤 삭제한다.
 - 자동 검증: PR #39에서 전체 XCTest 372개가 통과했고, PR #40·#41 병합 후 374개가 통과했다. strict-concurrency warnings-as-errors build-for-testing, Release build, Debug Analyze도 통과했다. 검증은 fake backend·격리 store·defaults를 사용했고 실제 CLI 명령은 실행하지 않았다. PR #41은 핵심 역방향 경합을 명시적 backend barrier로 전환했다.
-- **남은 게이트:** 리뷰 가능한 PR 경계와 PR #39의 병합은 완료됐다. 최신 `main` 기준의 별도 통제된 실제 Mac Sleep/Wake 검증과 종료 상태 복원은 아직 남았다. 자동 테스트 통과만으로 실기기 충전 제어 경합이 완전히 해결됐다고 선언하지 않는다.
+- **남은 assurance:** 코드 PR #39–#43과 설치는 완료됐고, 설치 후 Maintain 80/non-discharge/exact worker 1개를 확인했다. 다만 이 세션의 software sleep은 macOS busy 상태로 진입하지 않았으며 물리 lid trial도 새로 수집하지 못했다. 이를 일상 사용 차단 사유로 분류하지는 않지만, 최신 코드의 물리 Sleep/Wake가 새로 입증됐다고도 선언하지 않는다.

@@ -1,10 +1,10 @@
 # BatteryGuard 현재 코드 수정 계획
 
-작성: 2026-10-04 · 기준: `main` `ecd039a` (PR #42 병합 후) · 상태: PR 1–3 병합, PR 4 구현·검증 완료
+작성: 2026-10-04 · 기준: `main` `6f953f7` (PR #43 병합 후) · 상태: 코드 PR 1–4 병합, 자동 검증·실사용 설치 완료
 
 ## 1. 목표와 판단 근거
 
-최근 전체 코드 리뷰를 실제 결함 가능성과 수정 위험으로 다시 평가했다. `main`은 clean하며, 직전 전체 검증에서 XCTest 372개, strict-concurrency build-for-testing, Release build, Debug Analyze가 통과했다. 이 결과는 일반 경로의 회귀 위험을 낮추지만, 아래의 전원 연결 판단 불일치와 테스트 fixture 수명 문제를 반증하지는 않는다. 이 문서는 개인용 Apple Silicon Mac 한 대에서 쓰는 현재 앱을 대상으로 한다.
+최근 전체 코드 리뷰를 실제 결함 가능성과 수정 위험으로 다시 평가했다. 최종 `main`은 clean하며, strict 전체 XCTest 380개, Release build, Debug Analyze가 통과했다. 이 문서는 개인용 Apple Silicon Mac 한 대에서 쓰는 현재 앱을 대상으로 한다.
 
 | 우선순위 | 확인된 코드 상태 | 판단 |
 | --- | --- | --- |
@@ -71,4 +71,14 @@
 - PR #41 (`9c00130`): 진단 fixture를 flush 후 정리하고, 핵심 Wake/Sleep/Heat/종료 경합 테스트를 고정 지연 대신 명시적 operation barrier로 바꾸었다. 전체 XCTest 374개가 통과했다.
 - PR #42 (`ecd039a`): Settings 제어권 표시와 sleep 진단 correlation을 수정했다. strict 전체 XCTest 378개, Release build, Debug Analyze가 통과했다.
 - PR 4 측정: 실제 `/usr/local/co.palokaj.battery/battery status_csv`를 20회 읽기 전용으로 실행한 실시간은 0.06–0.08초였다. 2초 총 예산 fixture에서 0.8초 응답은 성공했고, 1.2·1.5·1.8초 응답은 의도대로 cleanup 예약 구간에서 timeout되었다. 각 호출은 2.25초 이내에 반환했고 자식 PID가 모두 회수됨을 확인했다. 정상 CLI 지연이 1초를 넘는 증거가 없으므로 runner 예산은 늘리지 않고 설정 이름만 `statusCommandTotalTimeout`으로 명확히 했다.
-- PR 4 변경을 포함한 최종 자동 검증에서 strict 전체 XCTest 380개, Release build, Debug Analyze가 통과했다. PR 4 병합과 별도 통제된 실기기 검증이 남아 있다.
+- PR #43 (`6f953f7`): timeout 계약과 측정 테스트를 병합했다. 최종 strict 전체 XCTest 380개, Release build, Debug Analyze가 통과했다.
+
+## 6. 실사용 인수 결과 (2026-10-04)
+
+- `main` `6f953f7`의 Release 앱을 `/Applications/BatteryGuard.app`에 설치했다. 설치본과 build artifact는 전체 bundle `diff -qr`에서 차이가 없고 deep strict codesign 검증을 통과했다.
+- 정상 종료·재실행 후 UI는 80%, `충전 한도 유지 중`, 0 mA, 오류 없음을 표시했다. 실제 CLI는 `80,attached;,disabled,not discharging,80`이고 ownership journal은 `batteryGuard`/80이다.
+- PID file은 현재 사용자 소유 정규 파일이며 exact `/bin/bash .../battery maintain_synchronous 80` worker 하나를 가리킨다. 동일 argv worker도 하나뿐이다.
+- DerivedData의 Debug/Release 앱과 휴지통의 구버전 앱 11개를 LaunchServices에서 해제하고 `/Applications` 설치본만 다시 등록했다. 사용자 소유 구버전 bundle은 영구 제거했다. root 소유의 확장자 없는 백업 디렉터리 하나는 관리자 인증 없이는 삭제할 수 없어 휴지통에 남겼지만 앱으로 등록되거나 앱 서랍에 노출되지 않는다.
+- 이 세션의 `pmset sleepnow`는 macOS `0xe00002e2`(busy)로 실제 sleep에 진입하지 않았고, 따라서 최신 코드의 물리 lid Sleep/Wake 증거로 계산하지 않는다. 이 항목은 실사용 배포를 막는 코드 결함이 아니라 추가 하드웨어 assurance 게이트로 남긴다. 이전 8개 실기기 시나리오 원자료는 보존한다.
+
+**결론:** 현재 설치본은 이 Mac에서 Maintain 80 일상 사용을 계속할 수 있는 인수 상태다. 확인하지 못한 최신 물리 Sleep/Wake를 통과했다고 표현하지는 않는다.
