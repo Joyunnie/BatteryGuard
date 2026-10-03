@@ -301,10 +301,11 @@ extension ChargeController {
                     guard settings.batteryControlEnabled else {
                         throw BatteryError.unsupported("BatteryGuard 충전 제어 소유권이 없습니다.")
                     }
-                    guard let freshInfo = monitor.readBatteryInfo(), freshInfo.isPluggedIn else {
+                    let preflightPower = monitor.refreshCurrentPowerObservation()
+                    guard preflightPower.connection == .stable(.connected),
+                          let freshInfo = preflightPower.batteryInfo else {
                         throw BatteryError.unsupported("전원 연결 상태를 새로 확인할 수 없습니다.")
                     }
-                    monitor.batteryInfo = freshInfo
                     guard !(await backend.isLongRunningOperationActive()) else {
                         throw BatteryError.unsupported("BatteryGuard 장기 충전 작업이 아직 실행 중입니다.")
                     }
@@ -351,9 +352,10 @@ extension ChargeController {
                     let postflightTemperature = await self.readFreshSafetyTemperature()
                     try Task.checkCancellation()
                     self.commitFreshSafetyTemperature(postflightTemperature)
+                    let postflightPower = monitor.refreshCurrentPowerObservation()
                     let postflightIsSafe = postflightTemperature.permitsAutomaticCharging(
                         upTo: settings.heatProtectionThreshold
-                    ) && monitor.batteryInfo?.isPluggedIn == true
+                    ) && postflightPower.connection == .stable(.connected)
                     guard postflightIsSafe else {
                         try await backend.disableCharging()
                         let blockedStatus = try await backend.readControlStatus()

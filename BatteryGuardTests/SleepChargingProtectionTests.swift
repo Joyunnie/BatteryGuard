@@ -529,7 +529,12 @@ extension ChargeControllerSafetyTests {
     }
 
     func testExplicitManualSleepRecoveryRestoresVerifiedMaintain() async {
-        let batteryInfo = makeBatteryInfo(charge: 70, isPluggedIn: true, temperature: 30)
+        let batteryInfo = makeBatteryInfo(
+            charge: 70,
+            isPluggedIn: false,
+            connectionEvidence: .uncertain,
+            temperature: 30
+        )
         let context = ManualRecoveryContext(
             origin: .systemSleep(.forcedSystemSleep),
             target: .restoreMaintain(limit: 80),
@@ -537,6 +542,7 @@ extension ChargeControllerSafetyTests {
         )
         let (controller, backend, _, _) = makeSUT(
             batteryInfoOnRead: batteryInfo,
+            powerSourceKindProvider: { .ac },
             initialMode: .failed(
                 previous: .maintaining(limit: 80),
                 message: "sleep settlement failed",
@@ -769,6 +775,8 @@ extension ChargeControllerSafetyTests {
         )
         let (controller, _, monitor, _) = makeSUT(
             isPluggedIn: true,
+            powerSourceKindProvider: { nil },
+            initialPowerConnectionObservation: .uncertain(previous: nil),
             initialMode: .failed(
                 previous: .maintaining(limit: 80),
                 message: "sleep settlement failed",
@@ -779,7 +787,7 @@ extension ChargeControllerSafetyTests {
         XCTAssertEqual(controller.batteryPresentation.statusTitle, "충전 제어 복구 필요")
         XCTAssertEqual(controller.batteryPresentation.powerLabel, "알 수 없음")
         XCTAssertEqual(controller.manualRecoveryObservedDescription, "최근 확인 상태: 충전 비활성")
-        XCTAssertTrue(controller.explicitMaintainRecoveryAvailability.isAllowed)
+        XCTAssertFalse(controller.explicitMaintainRecoveryAvailability.isAllowed)
 
         monitor.batteryInfo = makeBatteryInfo(
             charge: 70,

@@ -8,7 +8,8 @@ extension ChargeControllerSafetyTests {
         let (controller, _, monitor, _) = makeSUT(
             heatProtectionEnabled: true,
             temperature: 30,
-            charge: 70
+            charge: 70,
+            batteryInfoProvider: { nil }
         )
         let previousInfo = monitor.batteryInfo
         let before = controller.safetyTemperatureSnapshot
