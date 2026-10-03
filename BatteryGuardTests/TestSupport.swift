@@ -599,7 +599,7 @@ final class FakeChargeBackend: ChargeBackend, @unchecked Sendable {
 
 func makeBatteryInfo(
     charge: Int = 80,
-    isCharging: Bool = false,
+    isCharging: Bool? = false,
     isPluggedIn: Bool = true,
     connectionEvidence: PowerConnectionEvidence? = nil,
     temperature: Double? = 30,

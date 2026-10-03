@@ -26,37 +26,49 @@ extension ChargeController {
             guard let value = BatteryMonitor.validatedTemperature(rawValue) else {
                 throw BatteryError.unsupported("SMC가 유효하지 않은 배터리 온도 \(rawValue)°C를 반환했습니다.")
             }
-            safetyTemperatureCache.record(value, at: now())
             let sampleFailures = sample.failures.map { "SMC: \($0)" }
-            smcTemperatureFailure = sampleFailures.isEmpty
-                ? nil
-                : sampleFailures.joined(separator: "; ")
             failures.append(contentsOf: sampleFailures)
             smc = value
         } catch {
-            safetyTemperatureCache.clear()
             let failure = "SMC: \(error.localizedDescription)"
-            smcTemperatureFailure = failure
             failures.append(failure)
         }
         let freshInfo = monitor.readBatteryInfo() ?? fallbackInfo
         var ioKit: Double?
         if let freshInfo {
-            monitor.batteryInfo = freshInfo
             ioKit = freshInfo.temperature.flatMap(BatteryMonitor.validatedTemperature)
             if ioKit == nil { failures.append("IOKit: 유효한 배터리 온도 없음") }
         } else {
             failures.append("IOKit: 배터리 정보 없음")
         }
-        let value = publishSafetyTemperature(smc: smc, ioKit: ioKit, failures: failures)
-        if failures.isEmpty {
+        let value = [smc, ioKit].compactMap { $0 }.max()
+        return FreshSafetyTemperatureRead(
+            maximum: value, failures: failures, smc: smc, ioKit: ioKit,
+            batteryInfo: freshInfo, sampledAt: now()
+        )
+    }
+
+    func commitFreshSafetyTemperature(_ read: FreshSafetyTemperatureRead) {
+        if let smc = read.smc {
+            safetyTemperatureCache.record(smc, at: read.sampledAt)
+        } else {
+            safetyTemperatureCache.clear()
+        }
+        let smcFailures = read.failures.filter { $0.hasPrefix("SMC:") }
+        smcTemperatureFailure = smcFailures.isEmpty
+            ? nil
+            : smcFailures.joined(separator: "; ")
+        if let info = read.batteryInfo { monitor.batteryInfo = info }
+        let value = publishSafetyTemperature(
+            smc: read.smc, ioKit: read.ioKit, failures: read.failures
+        )
+        if read.failures.isEmpty {
             clearSensorError()
         } else {
-            setSensorError("Heat Protection 센서 degraded: \(failures.joined(separator: "; "))")
+            setSensorError("Heat Protection 센서 degraded: \(read.failures.joined(separator: "; "))")
         }
         refreshDisplayedError()
         lastTemperature = value
-        return FreshSafetyTemperatureRead(maximum: value, failures: failures)
     }
 
     @discardableResult
@@ -212,7 +224,7 @@ extension ChargeController {
         if case .discharging = previous {
             restoringDischarge = true
             guard monitor.preventSleep(reason: "BatteryGuard: restored Discharge") else {
-                commandError = "절전 방지 설정을 확보할 수 없어 Discharge를 복원하지 않았습니다."
+                heatProtectionError = "절전 방지 설정을 확보할 수 없어 Discharge를 복원하지 않았습니다."
                 refreshDisplayedError()
                 return
             }
@@ -232,6 +244,7 @@ extension ChargeController {
                         let restoreThreshold = self.settings.heatProtectionThreshold
                         let preflight = await self.readFreshSafetyTemperature()
                         try Task.checkCancellation()
+                        self.commitFreshSafetyTemperature(preflight)
                         guard preflight.permitsAutomaticCharging(upTo: restoreThreshold - 2) else {
                             throw BatteryError.commandFailed("Heat Protection restore", -1, "fresh temperature is unavailable or above the restore threshold")
                         }
@@ -247,6 +260,7 @@ extension ChargeController {
                         let postflightThreshold = self.settings.heatProtectionThreshold
                         let postflight = await self.readFreshSafetyTemperature()
                         try Task.checkCancellation()
+                        self.commitFreshSafetyTemperature(postflight)
                         guard postflight.permitsAutomaticCharging(upTo: postflightThreshold) else {
                             throw BatteryError.commandFailed("Heat Protection restore", -1, "post-restore temperature is unavailable or unsafe")
                         }

@@ -94,6 +94,7 @@ extension ChargeController {
             onSuccess: { [weak self] in
                 guard let self else { return }
                 self.mode = .controlDisabled(lastLimit: lastLimit)
+                self.driftError = nil
             },
             onFailure: { [weak self] error in
                 guard let self else { return }
@@ -133,6 +134,7 @@ extension ChargeController {
             onSuccess: { [weak self] in
                 guard let self else { return }
                 self.mode = .maintaining(limit: target)
+                self.driftError = nil
             },
             onFailure: { [weak self] error in
                 guard let self else { return }

@@ -18,6 +18,20 @@ final class BatteryHistoryTests: XCTestCase {
         XCTAssertEqual(records.first?.chargeLimit, 80)
     }
 
+    func testPendingSamplesKeepTheirCollectionTimesAfterStoreLoad() async {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let clock = TestClock(start)
+        let history = BatteryHistory(inMemory: true, now: { clock.now() })
+        XCTAssertEqual(history.readiness, .loading)
+        XCTAssertTrue(history.record(chargePercent: 70, chargeLimit: 80))
+        clock.advance(by: 60)
+        XCTAssertTrue(history.record(chargePercent: 71, chargeLimit: 80))
+        clock.advance(by: 60)
+        let readiness = await history.waitUntilReady()
+        XCTAssertEqual(readiness, .ready)
+        XCTAssertEqual(history.fetchRecentHistory().map(\.timestamp), [start, start.addingTimeInterval(60)])
+    }
+
     func testHistoryAddsHeartbeatForAnUnchangedInterval() async {
         let clock = TestClock(Date(timeIntervalSince1970: 1_000_000))
         let history = BatteryHistory(
@@ -264,6 +278,7 @@ final class BatteryHistoryTests: XCTestCase {
         try Data("not a directory".utf8).write(to: blockingFile)
         defer { try? FileManager.default.removeItem(at: blockingFile) }
         let history = BatteryHistory(storeURL: blockingFile.appendingPathComponent("history.sqlite"))
+        defer { try? history.closeStoreForTests() }
         guard case .failed = await history.waitUntilReady() else {
             return XCTFail("Expected the initial directory failure")
         }
@@ -315,6 +330,7 @@ final class BatteryHistoryTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(events.filter { $0.category == .history }.count, 2)
+        await log.flushPendingEvents()
     }
 
     func testSuccessfulFetchClearsOnlyTheFetchError() async {

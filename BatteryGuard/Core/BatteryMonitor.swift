@@ -14,7 +14,7 @@ import notify
 /// IOPMPowerSource에서 읽어오는 배터리 상태 정보
 struct BatteryInfo: Equatable, Sendable {
     let currentCharge: Int           // 현재 충전 퍼센트 (0-100)
-    let isCharging: Bool             // 충전 중 여부
+    let isCharging: Bool?            // nil이면 충전 활동을 확인할 수 없음
     let isPluggedIn: Bool            // 전원 연결 여부
     let connectionEvidence: PowerConnectionEvidence
     let maxCapacity: Int?            // 최대 용량 (mAh)
@@ -167,8 +167,10 @@ final class BatteryMonitor: ObservableObject {
     private nonisolated static func readOptionalBool(_ dict: [String: Any], key: String) -> Bool? {
         guard dict[key] != nil else { return nil }
         if let b = dict[key] as? Bool { return b }
-        if let n = dict[key] as? NSNumber { return n.boolValue }
-        if let n = dict[key] as? Int { return n != 0 }
+        if let n = dict[key] as? NSNumber, n.intValue == 0 || n.intValue == 1 {
+            return n.intValue == 1
+        }
+        if let n = dict[key] as? Int, n == 0 || n == 1 { return n == 1 }
         return nil
     }
 
@@ -232,7 +234,7 @@ final class BatteryMonitor: ObservableObject {
         let rawMaxCapacity = Self.positiveMeasurement(dict["AppleRawMaxCapacity"] as? Int)
         let designCapacity = Self.positiveMeasurement(dict["DesignCapacity"] as? Int)
 
-        let isCharging = readBool(dict, key: "IsCharging")
+        let isCharging = readOptionalBool(dict, key: "IsCharging")
         let externalConnected = readOptionalBool(dict, key: "ExternalConnected")
         // ExternalConnected는 force discharge 시 CHIE에 의해 false로 보고됨.
         // ExternalChargeCapable / AppleRawExternalConnected는 물리적 연결 상태를 반영.
@@ -284,8 +286,8 @@ final class BatteryMonitor: ObservableObject {
             temperature: tempCelsius,
             amperage: amperage,
             voltage: voltage,
-            timeToFull: isCharging ? (timeToFull == 65535 ? -1 : timeToFull) : -1,
-            timeToEmpty: !isCharging ? (timeToEmpty == 65535 ? -1 : timeToEmpty) : -1,
+            timeToFull: isCharging == true ? (timeToFull == 65535 ? -1 : timeToFull) : -1,
+            timeToEmpty: isCharging == false ? (timeToEmpty == 65535 ? -1 : timeToEmpty) : -1,
             healthPercent: health,
             isPresent: batteryPresent,
             serialNumber: serialNumber
@@ -296,10 +298,10 @@ final class BatteryMonitor: ObservableObject {
         externalConnected: Bool?,
         externalChargeCapable: Bool?,
         rawExternalConnected: Bool?,
-        isCharging: Bool
+        isCharging: Bool?
     ) -> PowerConnectionEvidence {
         let externalSignals = [externalConnected, externalChargeCapable, rawExternalConnected]
-        if isCharging || externalSignals.contains(where: { $0 == true }) {
+        if isCharging == true || externalSignals.contains(where: { $0 == true }) {
             return .connected
         }
         if externalSignals.allSatisfy({ $0 == false }) {
@@ -724,7 +726,7 @@ final class BatteryMonitor: ObservableObject {
                 }
                 if didPublish, let freshInfo {
                     self.logger.notice(
-                        "Power-transition measurement published at offset_ms=\(offset / 1_000_000, privacy: .public), plugged=\(freshInfo.isPluggedIn, privacy: .public), charging=\(freshInfo.isCharging, privacy: .public)"
+                        "Power-transition measurement published at offset_ms=\(offset / 1_000_000, privacy: .public), plugged=\(freshInfo.isPluggedIn, privacy: .public), charging=\(String(describing: freshInfo.isCharging), privacy: .public)"
                     )
                 }
             }

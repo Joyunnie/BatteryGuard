@@ -839,6 +839,73 @@ extension ChargeControllerSafetyTests {
         XCTAssertLessThan(disableIndex, maintainIndex)
     }
 
+    func testNewSleepPreemptsWakeTemperatureReadBeforeMaintainRestore() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            heatProtectionEnabled: true,
+            temperature: 30,
+            charge: 70,
+            initialMode: .sleepProtected(previous: previous, charge: 70)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        backend.enqueueTemperatureReadDelays([0.2], ignoringCancellation: true)
+        let temperatureBefore = controller.safetyTemperatureSnapshot
+        let infoBefore = controller.monitor.batteryInfo
+
+        let wake = Task { await controller.reconcileAfterWake() }
+        let readingTemperature = await eventually {
+            backend.operations.contains("read-temperature")
+        }
+        XCTAssertTrue(readingTemperature)
+
+        let prepared = await controller.prepareForSleep()
+        await wake.value
+
+        XCTAssertTrue(prepared)
+        XCTAssertFalse(backend.operations.contains("maintain:80"))
+        XCTAssertEqual(controller.mode, .sleepProtected(previous: previous, charge: 70))
+        XCTAssertEqual(controller.safetyTemperatureSnapshot, temperatureBefore)
+        XCTAssertEqual(controller.monitor.batteryInfo, infoBefore)
+    }
+
+    func testNewSleepCancelsWakeMaintainBeforeVerifyingChargingOff() async {
+        let previous = RestorableChargeMode.maintaining(limit: 80)
+        let (controller, backend, _, _) = makeSUT(
+            charge: 70,
+            initialMode: .sleepProtected(previous: previous, charge: 70)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: nil,
+                maintainWorker: .stopped
+            )
+        )
+        backend.maintainDelay = 0.2
+
+        let wake = Task { await controller.reconcileAfterWake() }
+        let startedMaintain = await eventually {
+            backend.operations.contains("maintain:80")
+        }
+        XCTAssertTrue(startedMaintain)
+
+        let prepared = await controller.prepareForSleep()
+        await wake.value
+
+        XCTAssertTrue(prepared)
+        XCTAssertEqual(backend.operations.filter { $0 == "prepare-system-sleep" }.count, 1)
+        XCTAssertEqual(controller.mode, .sleepProtected(previous: previous, charge: 70))
+        XCTAssertEqual(controller.readiness, .ready)
+    }
+
     func testShutdownClaimsLifecycleBeforeWaitingForSleepCleanup() async throws {
         let (controller, backend, _, _) = makeSUT(
             initialMode: .toppingUp(returnLimit: 80)

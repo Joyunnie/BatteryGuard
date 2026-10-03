@@ -55,6 +55,18 @@ final class ChargeStateTests: XCTestCase {
         XCTAssertFalse(presentation.showsChargingBolt)
     }
 
+    func testConnectedWithUnknownChargingFlagDoesNotClaimWaitingOrCharging() {
+        let presentation = BatteryPresentation.make(
+            info: makeBatteryInfo(charge: 60, isCharging: nil),
+            connection: .stable(.connected),
+            mode: .maintaining(limit: 80),
+            chargeState: .unknown,
+            requiresManualRecovery: false
+        )
+        XCTAssertEqual(presentation.statusTitle, "충전 상태 확인 불가")
+        XCTAssertFalse(presentation.showsChargingBolt)
+    }
+
     func testMaintainAtLimitIsDistinctFromWaitingBelowLimit() {
         let presentation = BatteryPresentation.make(
             info: makeBatteryInfo(charge: 80, isCharging: false),
@@ -204,5 +216,24 @@ final class ChargeStateTests: XCTestCase {
         registry.set(.led, severity: .warning, message: "led", at: date)
 
         XCTAssertEqual(registry.orderedIssues.map(\.source), [.led, .sensor])
+    }
+
+    func testCommandSuccessResolvesOnlyItsOwnFailureOrigin() {
+        var registry = BatteryIssueRegistry()
+        let operationID = UUID()
+        let timestamp = Date(timeIntervalSince1970: 100)
+        registry.record(
+            .wake, severity: .critical, message: "wake failed",
+            operationID: operationID, at: timestamp
+        )
+        registry.record(
+            .command("top up"), severity: .critical, message: "top up failed",
+            at: timestamp.addingTimeInterval(1)
+        )
+        registry.resolve(.command("top up"))
+        XCTAssertEqual(registry.orderedIssues.map(\.message), ["wake failed"])
+        XCTAssertEqual(registry.orderedIssues.first?.operationID, operationID)
+        registry.resolve(.wake)
+        XCTAssertTrue(registry.orderedIssues.isEmpty)
     }
 }

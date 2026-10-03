@@ -180,6 +180,7 @@ extension ChargeController {
                     guard mode == failedMode,
                           operationGeneration == generation,
                           !isShuttingDown else { return }
+                    commitFreshSafetyTemperature(temperature)
                     guard temperature.permitsAutomaticCharging(
                         upTo: settings.heatProtectionThreshold
                     ) else {
@@ -230,7 +231,7 @@ extension ChargeController {
                     context.updating(observedState: failureObservation)
                 )
             )
-            commandError = "수동 복구 상태를 확인하지 못했습니다: \(error.localizedDescription)"
+            manualRecoveryError = "수동 복구 상태를 확인하지 못했습니다: \(error.localizedDescription)"
             refreshDisplayedError()
             await diagnostics.record(
                 DiagnosticEvent(
@@ -258,7 +259,7 @@ extension ChargeController {
                 )
             )
         )
-        commandError = "현재 상태는 아직 명시적인 Maintain 복구가 필요합니다."
+        manualRecoveryError = "현재 상태는 아직 명시적인 Maintain 복구가 필요합니다."
         refreshDisplayedError()
         await diagnostics.record(
             DiagnosticEvent(
@@ -278,7 +279,7 @@ extension ChargeController {
               case .failed(let previous, _, .manualRecovery(let context)) = mode,
               case .restoreMaintain(let requestedLimit) = context.target else {
             if let denial = explicitMaintainRecoveryAvailability.denialReason {
-                commandError = denial
+                manualRecoveryError = denial
                 refreshDisplayedError()
             }
             return
@@ -321,6 +322,7 @@ extension ChargeController {
                         fallbackInfo: freshInfo
                     )
                     try Task.checkCancellation()
+                    self.commitFreshSafetyTemperature(preflightTemperature)
                     guard preflightTemperature.permitsAutomaticCharging(
                         upTo: settings.heatProtectionThreshold
                     ) else {
@@ -347,6 +349,7 @@ extension ChargeController {
 
                     let postflightTemperature = await self.readFreshSafetyTemperature()
                     try Task.checkCancellation()
+                    self.commitFreshSafetyTemperature(postflightTemperature)
                     let postflightIsSafe = postflightTemperature.permitsAutomaticCharging(
                         upTo: settings.heatProtectionThreshold
                     ) && monitor.batteryInfo?.isPluggedIn == true
@@ -390,6 +393,8 @@ extension ChargeController {
                 guard let self else { return }
                 self.monitor.allowSleep()
                 self.mode = .maintaining(limit: limit)
+                self.issueRegistry.resolveVerifiedControlFailures()
+                self.driftError = nil
             },
             onFailure: { [weak self] error in
                 guard let self else { return }
@@ -448,6 +453,7 @@ extension ChargeController {
                     guard !isShuttingDown,
                           mode == failedMode,
                           operationGeneration == generation else { return }
+                    commitFreshSafetyTemperature(temperature)
                     guard temperature.permitsAutomaticCharging(
                         upTo: settings.heatProtectionThreshold
                     ) else {
@@ -503,7 +509,7 @@ extension ChargeController {
                   mode == failedMode,
                   operationGeneration == generation else { return }
             readiness = readinessBeforeRecovery
-            commandError = "수동 복구 상태를 확인하지 못했습니다: \(error.localizedDescription)"
+            manualRecoveryError = "수동 복구 상태를 확인하지 못했습니다: \(error.localizedDescription)"
             refreshDisplayedError()
             await diagnostics.record(
                 DiagnosticEvent(

@@ -24,7 +24,7 @@ final class ChargeController: ObservableObject {
 
     struct ControlMeasurement: Equatable {
         let currentCharge: Int
-        let isCharging: Bool
+        let isCharging: Bool?
         let isPluggedIn: Bool
         let isPresent: Bool
         let temperature: Double?
@@ -42,6 +42,10 @@ final class ChargeController: ObservableObject {
     struct FreshSafetyTemperatureRead {
         let maximum: Double?
         let failures: [String]
+        let smc: Double?
+        let ioKit: Double?
+        let batteryInfo: BatteryInfo?
+        let sampledAt: Date
 
         func permitsAutomaticCharging(upTo threshold: Double) -> Bool {
             failures.isEmpty && maximum.map { $0 <= threshold } == true
@@ -187,18 +191,20 @@ final class ChargeController: ObservableObject {
 
         switch mode {
         case .controlDisabled:
-            return info.isCharging ? .charging : .chargingPaused
+            return info.isCharging.map { $0 ? .charging : .chargingPaused } ?? .unknown
         case .toppingUp: return .topUp
         case .discharging: return .discharging
         case .heatBlocked: return .chargingPaused
         case .sleepProtected: return .chargingPaused
         case .maintaining(let limit):
-            return info.isCharging && info.currentCharge < limit ? .charging : .chargingPaused
+            guard let isCharging = info.isCharging else { return .unknown }
+            return isCharging && info.currentCharge < limit ? .charging : .chargingPaused
         case .transitioning: return .chargingPaused
         case .externalDrift(_, let observed):
             switch observed {
             case .maintaining(let limit):
-                return info.isCharging && info.currentCharge < limit ? .charging : .chargingPaused
+                guard let isCharging = info.isCharging else { return .unknown }
+                return isCharging && info.currentCharge < limit ? .charging : .chargingPaused
             case .charging: return .charging
             case .discharging: return .discharging
             case .chargingDisabled: return .chargingPaused
@@ -331,19 +337,96 @@ final class ChargeController: ObservableObject {
     var issueRegistry = BatteryIssueRegistry()
     var commandError: String? {
         get { issueRegistry.message(for: .command) }
-        set { issueRegistry.set(.command, severity: .critical, message: newValue, at: now()) }
+        set {
+            if let newValue {
+                issueRegistry.set(.command, severity: .critical, message: newValue, at: now())
+            } else {
+                issueRegistry.resolveVerifiedControlFailures()
+            }
+        }
+    }
+    var sleepError: String? {
+        get { issueRegistry.message(forOrigin: .sleep) }
+        set {
+            if let newValue {
+                issueRegistry.record(
+                    .sleep, severity: .critical, message: newValue,
+                    operationID: activeControllerSleepRequest?.id,
+                    observationGeneration: sleepPreparationGeneration, at: now()
+                )
+            } else { issueRegistry.resolve(.sleep) }
+        }
+    }
+    var wakeError: String? {
+        get { issueRegistry.message(forOrigin: .wake) }
+        set {
+            if let newValue {
+                issueRegistry.record(
+                    .wake, severity: .critical, message: newValue,
+                    operationID: DiagnosticContext.operationID,
+                    observationGeneration: wakeReconciliationGeneration, at: now()
+                )
+            } else { issueRegistry.resolve(.wake) }
+        }
+    }
+    var manualRecoveryError: String? {
+        get { issueRegistry.message(forOrigin: .manualRecovery) }
+        set {
+            if let newValue {
+                issueRegistry.record(
+                    .manualRecovery, severity: .critical,
+                    message: newValue,
+                    operationID: DiagnosticContext.operationID,
+                    observationGeneration: operationGeneration, at: now()
+                )
+            } else { issueRegistry.resolve(.manualRecovery) }
+        }
+    }
+    var heatProtectionError: String? {
+        get { issueRegistry.message(forOrigin: .heatProtection) }
+        set {
+            if let newValue {
+                issueRegistry.record(
+                    .heatProtection, severity: .critical,
+                    message: newValue,
+                    operationID: DiagnosticContext.operationID,
+                    observationGeneration: operationGeneration, at: now()
+                )
+            } else { issueRegistry.resolve(.heatProtection) }
+        }
     }
     var sensorError: String? {
-        get { issueRegistry.message(for: .sensor) }
-        set { issueRegistry.set(.sensor, severity: .warning, message: newValue, at: now()) }
+        get { issueRegistry.message(forOrigin: .sensor) }
+        set {
+            if let newValue {
+                issueRegistry.record(
+                    .sensor, severity: .warning, message: newValue,
+                    observationGeneration: smcTemperatureSampleGeneration, at: now()
+                )
+            } else { issueRegistry.resolve(.sensor) }
+        }
     }
     var ledError: String? {
-        get { issueRegistry.message(for: .led) }
-        set { issueRegistry.set(.led, severity: .warning, message: newValue, at: now()) }
+        get { issueRegistry.message(forOrigin: .led) }
+        set {
+            if let newValue {
+                issueRegistry.record(
+                    .led, severity: .warning, message: newValue,
+                    observationGeneration: ledGeneration, at: now()
+                )
+            } else { issueRegistry.resolve(.led) }
+        }
     }
     var driftError: String? {
-        get { issueRegistry.message(for: .externalDrift) }
-        set { issueRegistry.set(.externalDrift, severity: .blocking, message: newValue, at: now()) }
+        get { issueRegistry.message(forOrigin: .externalDrift) }
+        set {
+            if let newValue {
+                issueRegistry.record(
+                    .externalDrift, severity: .blocking, message: newValue,
+                    observationGeneration: operationGeneration, at: now()
+                )
+            } else { issueRegistry.resolve(.externalDrift) }
+        }
     }
     var batteryInfoObservation: AnyCancellable?
     var smcTemperatureTimer: Timer?
@@ -378,6 +461,8 @@ final class ChargeController: ObservableObject {
     var ledGeneration: UInt64 = 0
     var systemPowerObservationError: String?
     var sleepPreparationGeneration: UInt64 = 0
+    var wakeReconciliationGeneration: UInt64 = 0
+    var wakeReconciliationTask: Task<Void, Never>?
     var sleepPreparationTask: Task<Bool, Never>?
     var activeControllerSleepRequest: SystemSleepRequest?
     var magSafeLED: MagSafeLEDController
@@ -460,6 +545,13 @@ final class ChargeController: ObservableObject {
         operationGeneration &+= 1
         let operationID = operationGeneration
         let diagnosticOperationID = UUID()
+        let issueOrigin: BatteryIssueOrigin
+        switch transition {
+        case .enteringHeat, .restoringHeat:
+            issueOrigin = .heatProtection
+        default:
+            issueOrigin = .command(operation)
+        }
         let stateBefore = mode.diagnosticLabel
         activeOperationID = operationID
         mode = .transitioning(transition)
@@ -498,11 +590,14 @@ final class ChargeController: ObservableObject {
             self.activeOperationTask = nil
             switch result {
             case .success:
-                self.commandError = nil
-                self.driftError = nil
+                self.issueRegistry.resolve(issueOrigin)
                 onSuccess()
             case .failure(let error):
-                self.commandError = "\(operation): \(error.localizedDescription)"
+                self.issueRegistry.record(
+                    issueOrigin, severity: .critical,
+                    message: "\(operation): \(error.localizedDescription)",
+                    operationID: diagnosticOperationID, at: self.now()
+                )
                 logger.error("\(operation, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                 if let onFailure {
                     onFailure(error)

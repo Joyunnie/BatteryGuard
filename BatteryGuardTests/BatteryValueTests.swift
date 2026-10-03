@@ -100,6 +100,26 @@ final class BatteryValueTests: XCTestCase {
         XCTAssertNil(info.cycleCount)
         XCTAssertNil(info.voltage)
         XCTAssertNil(info.serialNumber)
+        XCTAssertNil(info.isCharging)
+    }
+
+    func testInvalidChargingFlagRemainsUnknownWithConnectedPower() throws {
+        let info = try XCTUnwrap(BatteryMonitor.parseBatteryInfo([
+            "CurrentCapacity": 70,
+            "ExternalConnected": true,
+            "IsCharging": "not a boolean"
+        ]))
+        XCTAssertEqual(info.connectionEvidence, .connected)
+        XCTAssertNil(info.isCharging)
+        XCTAssertEqual(info.timeToFull, -1)
+        XCTAssertEqual(info.timeToEmpty, -1)
+
+        let nonBooleanNumber = try XCTUnwrap(BatteryMonitor.parseBatteryInfo([
+            "CurrentCapacity": 70,
+            "ExternalConnected": true,
+            "IsCharging": 2
+        ]))
+        XCTAssertNil(nonBooleanNumber.isCharging)
     }
 
     func testConnectionEvidencePreservesTrueFalseAndMissingSignals() throws {
