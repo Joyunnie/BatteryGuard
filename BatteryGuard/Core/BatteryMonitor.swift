@@ -167,8 +167,8 @@ final class BatteryMonitor: ObservableObject {
     private nonisolated static func readOptionalBool(_ dict: [String: Any], key: String) -> Bool? {
         guard dict[key] != nil else { return nil }
         if let b = dict[key] as? Bool { return b }
-        if let n = dict[key] as? NSNumber, n.intValue == 0 || n.intValue == 1 {
-            return n.intValue == 1
+        if let n = dict[key] as? NSNumber, n.doubleValue == 0 || n.doubleValue == 1 {
+            return n.doubleValue == 1
         }
         if let n = dict[key] as? Int, n == 0 || n == 1 { return n == 1 }
         return nil

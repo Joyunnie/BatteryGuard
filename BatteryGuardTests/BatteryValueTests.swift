@@ -120,6 +120,12 @@ final class BatteryValueTests: XCTestCase {
             "IsCharging": 2
         ]))
         XCTAssertNil(nonBooleanNumber.isCharging)
+        let fractionalNumber = try XCTUnwrap(BatteryMonitor.parseBatteryInfo([
+            "CurrentCapacity": 70,
+            "ExternalConnected": true,
+            "IsCharging": NSNumber(value: 1.5)
+        ]))
+        XCTAssertNil(fractionalNumber.isCharging)
     }
 
     func testConnectionEvidencePreservesTrueFalseAndMissingSignals() throws {
