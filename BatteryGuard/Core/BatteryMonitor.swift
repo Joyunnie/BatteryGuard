@@ -135,6 +135,11 @@ final class BatteryMonitor: ObservableObject {
     private let transitionNotificationCanceller: (Int32) -> Void
     var usesMonitoringInfrastructure: Bool { runsMonitoringInfrastructure }
     var hasActivePowerSourceSettlement: Bool { powerSourceSettlementTask != nil }
+    /// Observe completion without starting work or changing settlement ownership.
+    /// Tests use this barrier instead of guessing executor progress with sleeps.
+    func waitForCurrentPowerSourceSettlement() async {
+        await powerSourceSettlementTask?.value
+    }
     var isWatchdogScheduled: Bool { timer != nil }
     private(set) var isSleepPreventionActive = false
     private var timer: Timer?

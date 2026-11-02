@@ -25,6 +25,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         longRunningHeartbeatInterval: TimeInterval = 30,
         historyHeartbeatInterval: TimeInterval = 15 * 60,
         diagnostics: DiagnosticLog = .disabled,
+        observationDiagnostics: DiagnosticLog = .disabled,
         preventSleepHandler: @escaping (String) -> Bool = { _ in true },
         allowSleepHandler: @escaping () -> Void = {},
         now: @escaping @Sendable () -> Date = { Date() }
@@ -44,7 +45,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
             allowSleepHandler: allowSleepHandler,
             powerSourceKindProvider: powerSourceKindProvider,
             initialPowerConnectionObservation: initialPowerConnectionObservation,
-            powerSourceSnapshotProvider: powerSourceSnapshotProvider
+            powerSourceSnapshotProvider: powerSourceSnapshotProvider,
+            diagnostics: observationDiagnostics
         )
         monitor.batteryInfo = initialInfo
         let settings = UserSettings(
