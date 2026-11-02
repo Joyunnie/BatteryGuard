@@ -1,5 +1,6 @@
 import XCTest
 import Combine
+import IOKit.ps
 @testable import BatteryGuard
 
 @MainActor
@@ -50,6 +51,110 @@ private final class ManualNotificationRefreshScheduler {
 
 
 final class BatteryValueTests: XCTestCase {
+    func testChargingActivityRequiresAgreementAndPreservesMissingReports() {
+        let values: [Bool?] = [nil, false, true]
+        for system in values {
+            for battery in values {
+                let observation = ChargingActivityObservation(systemIsCharging: system, batteryIsCharging: battery)
+                let expected: ChargingActivityObservation.State
+                if let system, let battery {
+                    expected = system == battery ? (battery ? .charging : .notCharging) : .conflicting
+                } else {
+                    expected = .unavailable
+                }
+                XCTAssertEqual(observation.state, expected)
+                XCTAssertEqual(observation.systemIsCharging, system)
+                XCTAssertEqual(observation.batteryIsCharging, battery)
+            }
+        }
+    }
+
+    @MainActor
+    func testCurrentDirectionChangeIsRecordedWithoutLoggingEveryCurrentFluctuation() async {
+        let log = DiagnosticLog(fileURL: nil, capacity: 100)
+        var current = -500
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(isCharging: false, amperage: current) },
+            runsMonitoringInfrastructure: false,
+            powerSourceSnapshotProvider: { PowerSourceSnapshot(kind: .ac, isCharging: false) },
+            diagnostics: log
+        )
+        monitor.startMonitoring()
+        current = -400
+        monitor.performWatchdogRefresh()
+        current = 100
+        monitor.performWatchdogRefresh()
+        await log.flushPendingEvents()
+        let changes = await log.recentEvents().compactMap(\.powerObservation).filter { $0.phase == .changed }
+        XCTAssertEqual(changes.map(\.amperage), [-500, 100])
+        XCTAssertTrue(changes.allSatisfy { $0.activity.state == .notCharging })
+        monitor.stopMonitoring()
+    }
+
+    func testPublicChargingReportSelectsOnlyUniqueInternalBatteryAndStrictBoolean() {
+        let internalBattery: [String: Any] = [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSIsChargingKey: true]
+        let ups: [String: Any] = [kIOPSTypeKey: kIOPSUPSType, kIOPSIsChargingKey: false]
+        XCTAssertEqual(PowerSourceSnapshot.internalBatteryCharging(in: [ups, internalBattery]), true)
+        XCTAssertNil(PowerSourceSnapshot.internalBatteryCharging(in: [ups]))
+        XCTAssertNil(PowerSourceSnapshot.internalBatteryCharging(in: [internalBattery, internalBattery]))
+        for invalid: Any in ["true", NSNumber(value: 2), NSNumber(value: 1.5), NSNumber(value: 1)] {
+            XCTAssertNil(PowerSourceSnapshot.internalBatteryCharging(in: [
+                [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSIsChargingKey: invalid]
+            ]))
+        }
+        XCTAssertNil(PowerSourceSnapshot.internalBatteryCharging(in: [[kIOPSTypeKey: kIOPSInternalBatteryType]]))
+        XCTAssertEqual(PowerSourceSnapshot.internalBatteryCharging(in: [
+            [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSIsChargingKey: false]
+        ]), false)
+    }
+
+    @MainActor
+    func testPairedChargingObservationDoesNotReplaceControlMeasurementsOrRepublishIdenticalEvidence() async {
+        var source = PowerSourceSnapshot(kind: .ac, isCharging: true)
+        var sourceReads = 0
+        var batteryReads = 0
+        let info = makeBatteryInfo(charge: 67, isCharging: false, amperage: -500)
+        let log = DiagnosticLog(fileURL: nil, capacity: 100)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { batteryReads += 1; return info },
+            runsMonitoringInfrastructure: false,
+            powerSourceSnapshotProvider: { sourceReads += 1; return source },
+            diagnostics: log
+        )
+        var published: [ChargingActivityObservation] = []
+        let subscription = monitor.$chargingActivity.dropFirst().sink { published.append($0) }
+        monitor.startMonitoring()
+        XCTAssertEqual(monitor.chargingActivity.state, .conflicting)
+        XCTAssertEqual(monitor.batteryInfo, info)
+        XCTAssertEqual(sourceReads, 1)
+        XCTAssertEqual(batteryReads, 1)
+        for _ in 0..<10 { monitor.performWatchdogRefresh() }
+        XCTAssertEqual(published.count, 1)
+        XCTAssertEqual(sourceReads, 11)
+        XCTAssertEqual(batteryReads, 11)
+
+        source = .unavailable
+        monitor.performWatchdogRefresh()
+        XCTAssertNil(monitor.chargingActivity.systemIsCharging)
+        XCTAssertEqual(monitor.chargingActivity.batteryIsCharging, false)
+        XCTAssertEqual(monitor.chargingActivity.state, .unavailable)
+        XCTAssertEqual(monitor.batteryInfo, info)
+        // Safety measurement refresh must not read or modify presentation evidence.
+        source = PowerSourceSnapshot(kind: .ac, isCharging: false)
+        monitor.refreshBatteryInfo()
+        XCTAssertEqual(sourceReads, 12)
+        XCTAssertNil(monitor.chargingActivity.systemIsCharging)
+        monitor.stopMonitoring()
+        await log.flushPendingEvents()
+        let events = await log.recentEvents()
+        XCTAssertEqual(events.compactMap(\.powerObservation).map(\.phase), [.began, .changed, .changed, .ended])
+        XCTAssertEqual(Set(events.compactMap(\.operationID)).count, 1)
+        XCTAssertEqual(Set(events.map(\.id)).count, events.count)
+        XCTAssertNil(events.first?.powerObservation?.sampleReadUptimeNanoseconds)
+        XCTAssertNotNil(events.last?.powerObservation?.sampleReadUptimeNanoseconds)
+        subscription.cancel()
+    }
+
     @MainActor
     func testAppHostedTestCompositionNeverUsesProductionState() {
         XCTAssertTrue(AppRuntime.isRunningTests)
@@ -57,6 +162,7 @@ final class BatteryValueTests: XCTestCase {
         XCTAssertFalse(BatteryMonitor.shared.usesMonitoringInfrastructure)
         XCTAssertFalse(UserSettings.shared.usesStandardDefaults)
         XCTAssertNil(DiagnosticLog.shared.fileURL)
+        XCTAssertNil(DiagnosticLog.powerObservations.fileURL)
     }
 
     func testUnavailableMeasurementsRemainUnavailable() {

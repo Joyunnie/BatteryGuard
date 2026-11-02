@@ -184,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // survive termination.
                 await initialization?.value
                 try await ChargeController.shared.shutdown()
+                await BatteryMonitor.shared.flushObservationDiagnostics()
                 await DiagnosticLog.shared.flushPendingEvents()
                 self.terminationApproved = true
                 self.terminationTask = nil
