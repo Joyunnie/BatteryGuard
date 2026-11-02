@@ -55,6 +55,12 @@ struct MenuBarView: View {
                     tint: controller.batteryPresentation.tone.presentationTint,
                     icon: controller.batteryPresentation.statusIcon
                 )
+                if let detail = controller.batteryPresentation.activityDetail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer(minLength: 0)

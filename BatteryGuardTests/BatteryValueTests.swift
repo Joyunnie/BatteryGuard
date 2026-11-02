@@ -91,6 +91,91 @@ final class BatteryValueTests: XCTestCase {
         monitor.stopMonitoring()
     }
 
+    @MainActor
+    func testProjectionDiagnosticsDeduplicateAndShareTheObservationSession() async {
+        let log = DiagnosticLog(fileURL: nil, capacity: 100)
+        let info = makeBatteryInfo(charge: 60, isCharging: false)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { info }, runsMonitoringInfrastructure: false,
+            powerSourceSnapshotProvider: { PowerSourceSnapshot(kind: .ac, isCharging: true) }, diagnostics: log
+        )
+        monitor.startMonitoring()
+        let mode: ChargeMode = .maintaining(limit: 80)
+        let presentation = BatteryPresentation.make(
+            info: info, connection: monitor.powerConnectionObservation, mode: mode,
+            chargeState: .chargingPaused, requiresManualRecovery: false, activity: monitor.chargingActivity
+        )
+        for _ in 0..<10 { monitor.recordPresentation(presentation, mode: mode) }
+        monitor.stopMonitoring()
+        monitor.recordPresentation(presentation, mode: mode)
+        await log.flushPendingEvents()
+        let events = await log.recentEvents().compactMap(\.powerObservation)
+        let projections = events.filter { $0.phase == .projection }
+        XCTAssertEqual(projections.count, 1)
+        XCTAssertEqual(projections.first?.presentation?.title, "충전 상태 확인 중")
+        XCTAssertEqual(projections.first?.presentation?.controllerMode, mode.diagnosticLabel)
+        XCTAssertEqual(Set(events.map(\.sessionID)).count, 1)
+    }
+
+    @MainActor
+    func testSafetyOnlyReadsCannotResurrectAnInvalidatedSystemReport() {
+        var charging = true
+        var sourceReads = 0
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(isCharging: charging) }, runsMonitoringInfrastructure: false,
+            powerSourceSnapshotProvider: {
+                sourceReads += 1
+                return PowerSourceSnapshot(kind: .ac, isCharging: true)
+            }
+        )
+        monitor.startMonitoring()
+        XCTAssertEqual(monitor.currentChargingActivity.state, .charging)
+        charging = false
+        monitor.refreshBatteryInfo()
+        XCTAssertEqual(monitor.currentChargingActivity.state, .unavailable)
+        charging = true
+        monitor.refreshBatteryInfo()
+        XCTAssertEqual(monitor.currentChargingActivity.state, .unavailable)
+        XCTAssertNil(monitor.currentChargingActivity.systemIsCharging)
+        XCTAssertEqual(sourceReads, 1)
+        var publications = 0
+        let subscription = monitor.objectWillChange.sink { publications += 1 }
+        monitor.performWatchdogRefresh()
+        XCTAssertEqual(monitor.currentChargingActivity.state, .charging)
+        XCTAssertEqual(sourceReads, 2)
+        XCTAssertEqual(publications, 1)
+        subscription.cancel()
+        monitor.stopMonitoring()
+    }
+
+    @MainActor
+    func testTopUpActivityProjectionChangesEvenWhenTitleAndModeDoNot() async {
+        var charging = false
+        let log = DiagnosticLog(fileURL: nil, capacity: 100)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(isCharging: charging) }, runsMonitoringInfrastructure: false,
+            powerSourceSnapshotProvider: { PowerSourceSnapshot(kind: .ac, isCharging: charging) }, diagnostics: log
+        )
+        let mode: ChargeMode = .toppingUp(returnLimit: 80)
+        monitor.startMonitoring()
+        for value in [false, true] {
+            charging = value
+            monitor.performWatchdogRefresh()
+            let presentation = BatteryPresentation.make(
+                info: monitor.batteryInfo, connection: monitor.powerConnectionObservation, mode: mode,
+                chargeState: .topUp, requiresManualRecovery: false, activity: monitor.currentChargingActivity
+            )
+            monitor.recordPresentation(presentation, mode: mode)
+        }
+        await log.flushPendingEvents()
+        let projections = await log.recentEvents().compactMap { $0.powerObservation?.presentation }
+        XCTAssertEqual(projections.count, 2)
+        XCTAssertEqual(projections.map(\.showsChargingBolt), [false, true])
+        XCTAssertEqual(Set(projections.map(\.title)).count, 1)
+        XCTAssertEqual(Set(projections.map(\.controllerMode)).count, 1)
+        monitor.stopMonitoring()
+    }
+
     func testPublicChargingReportSelectsOnlyUniqueInternalBatteryAndStrictBoolean() {
         let internalBattery: [String: Any] = [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSIsChargingKey: true]
         let ups: [String: Any] = [kIOPSTypeKey: kIOPSUPSType, kIOPSIsChargingKey: false]

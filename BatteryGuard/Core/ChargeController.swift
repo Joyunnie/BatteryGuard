@@ -271,7 +271,8 @@ final class ChargeController: ObservableObject {
             chargeState: currentState,
             requiresManualRecovery: manualInterventionRecoveryDescription != nil,
             ownership: settings.batteryControlOwnership,
-            readiness: readiness
+            readiness: readiness,
+            activity: monitor.currentChargingActivity
         )
     }
     var manualRecoveryObservedDescription: String? {
@@ -431,6 +432,9 @@ final class ChargeController: ObservableObject {
         }
     }
     var batteryInfoObservation: AnyCancellable?
+    var presentationObservation: AnyCancellable?
+    var presentationDiagnosticWork: DispatchWorkItem?
+    var presentationObservationGeneration: UInt64 = 0
     var smcTemperatureTimer: Timer?
     var longRunningHeartbeatTimer: Timer?
     var longRunningExitObservationTask: Task<Void, Never>?

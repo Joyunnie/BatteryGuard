@@ -292,6 +292,7 @@ extension ChargeController {
     }
 
     private func cleanupAfterFailedInitialization() {
+        stopPresentationObservation()
         cancelSMCTemperatureSample(clearCache: true)
         batteryInfoObservation?.cancel()
         batteryInfoObservation = nil
@@ -538,6 +539,7 @@ extension ChargeController {
     }
 
     private func finishLocalShutdown() {
+        stopPresentationObservation()
         cancelSMCTemperatureSample(clearCache: true)
         batteryInfoObservation?.cancel()
         batteryInfoObservation = nil

@@ -13,6 +13,7 @@ final class ChargeControllerSafetyTests: XCTestCase {
         batteryInfoOnRead: BatteryInfo? = nil,
         batteryInfoProvider: (() -> BatteryInfo?)? = nil,
         powerSourceKindProvider: @escaping () -> BatteryPowerSourceKind? = { .ac },
+        powerSourceSnapshotProvider: (() -> PowerSourceSnapshot)? = nil,
         initialPowerConnectionObservation: PowerConnectionObservation = .stable(.connected),
         initialReadiness: ChargeControllerReadiness = .ready,
         initialMode: ChargeMode? = nil,
@@ -42,7 +43,8 @@ final class ChargeControllerSafetyTests: XCTestCase {
             preventSleepHandler: preventSleepHandler,
             allowSleepHandler: allowSleepHandler,
             powerSourceKindProvider: powerSourceKindProvider,
-            initialPowerConnectionObservation: initialPowerConnectionObservation
+            initialPowerConnectionObservation: initialPowerConnectionObservation,
+            powerSourceSnapshotProvider: powerSourceSnapshotProvider
         )
         monitor.batteryInfo = initialInfo
         let settings = UserSettings(

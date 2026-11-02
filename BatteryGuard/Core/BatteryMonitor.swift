@@ -90,9 +90,25 @@ final class BatteryMonitor: ObservableObject {
         2_000_000_000
     ]
 
-    @Published var batteryInfo: BatteryInfo?
+    @Published var batteryInfo: BatteryInfo? {
+        didSet {
+            if oldValue?.isCharging != batteryInfo?.isCharging {
+                chargingMeasurementRevision &+= 1
+            }
+        }
+    }
     @Published private(set) var powerConnectionObservation: PowerConnectionObservation
     @Published private(set) var chargingActivity: ChargingActivityObservation = .unavailable
+    private var chargingMeasurementRevision: UInt64 = 0
+    private var pairedChargingRevision: UInt64?
+    /// A raw flag change invalidates the paired system report until another
+    /// paired read, even if subsequent safety-only reads return the old value.
+    var currentChargingActivity: ChargingActivityObservation {
+        guard pairedChargingRevision == chargingMeasurementRevision else {
+            return ChargingActivityObservation(systemIsCharging: nil, batteryIsCharging: batteryInfo?.isCharging)
+        }
+        return chargingActivity
+    }
 
     private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "BatteryMonitor")
     private let batteryInfoProvider: (() -> BatteryInfo?)?
@@ -109,6 +125,7 @@ final class BatteryMonitor: ObservableObject {
     private var lastObservedSource: BatteryPowerSourceKind?
     private var lastObservationInfo: BatteryInfo?
     private var lastDiagnosticConnection: PowerObservationDiagnostic.Connection?
+    private var lastProjection: PowerPresentationDiagnostic?
     private let transitionOffsetsNanoseconds: [UInt64]
     private let monotonicNow: @MainActor () -> UInt64
     private let transitionSleepUntil: @MainActor (UInt64) async -> Void
@@ -509,6 +526,8 @@ final class BatteryMonitor: ObservableObject {
 
     private func publishChargingActivity(_ snapshot: FreshPowerSnapshot) {
         if observationSessionID == nil { beginObservationSession() }
+        let priorActivity = currentChargingActivity
+        pairedChargingRevision = chargingMeasurementRevision
         let observation = ChargingActivityObservation(
             systemIsCharging: snapshot.source.isCharging,
             batteryIsCharging: snapshot.batteryInfo?.isCharging
@@ -517,7 +536,11 @@ final class BatteryMonitor: ObservableObject {
             || snapshot.batteryInfo?.amperage.map({ $0.signum() }) != lastObservationInfo?.amperage.map({ $0.signum() })
             || snapshot.batteryInfo?.currentCharge != lastObservationInfo?.currentCharge
             || PowerObservationDiagnostic.Connection(powerConnectionObservation) != lastDiagnosticConnection
-        if observation != chargingActivity { chargingActivity = observation }
+        if observation != chargingActivity {
+            chargingActivity = observation
+        } else if priorActivity != observation {
+            objectWillChange.send()
+        }
         lastObservedSource = snapshot.sourceKind
         lastObservationInfo = snapshot.batteryInfo
         sampleReadUptimeNanoseconds = monotonicNow()
@@ -529,15 +552,20 @@ final class BatteryMonitor: ObservableObject {
         observationSessionID = UUID()
         observationAnchor = monotonicNow()
         observationGeneration = powerSourceTransitionGeneration
+        pairedChargingRevision = nil
         if chargingActivity != .unavailable { chargingActivity = .unavailable }
         lastObservedSource = nil
         lastObservationInfo = nil
         sampleReadUptimeNanoseconds = nil
         lastDiagnosticConnection = nil
+        lastProjection = nil
         recordPowerObservation(.began)
     }
 
-    private func recordPowerObservation(_ phase: PowerObservationDiagnostic.Phase) {
+    private func recordPowerObservation(
+        _ phase: PowerObservationDiagnostic.Phase,
+        presentation: PowerPresentationDiagnostic? = nil
+    ) {
         guard let sessionID = observationSessionID else { return }
         let readAt = monotonicNow()
         let connection = PowerObservationDiagnostic.Connection(powerConnectionObservation)
@@ -564,13 +592,27 @@ final class BatteryMonitor: ObservableObject {
                 activity: chargingActivity,
                 amperage: lastObservationInfo?.amperage,
                 chargePercent: lastObservationInfo?.currentCharge,
-                connection: connection
+                connection: connection,
+                presentation: presentation
             )
         ))
     }
 
     func flushObservationDiagnostics() async {
         await diagnostics.flushPendingEvents()
+    }
+
+    /// Records the selected projection, not proof that a window was painted.
+    func recordPresentation(_ presentation: BatteryPresentation, mode: ChargeMode) {
+        guard isMonitoring, observationSessionID != nil else { return }
+        let projection = PowerPresentationDiagnostic(
+            title: presentation.statusTitle, controllerMode: mode.diagnosticLabel,
+            showsChargingBolt: presentation.showsChargingBolt, menuBarIcon: presentation.menuBarIcon,
+            headline: presentation.headline, activityDetail: presentation.activityDetail
+        )
+        guard projection != lastProjection else { return }
+        lastProjection = projection
+        recordPowerObservation(.projection, presentation: projection)
     }
 
     /// Narrow testable entry used by the real watchdog timer.
@@ -608,6 +650,7 @@ final class BatteryMonitor: ObservableObject {
     func stopMonitoring() {
         recordPowerObservation(.ended)
         observationSessionID = nil
+        pairedChargingRevision = nil
         if chargingActivity != .unavailable { chargingActivity = .unavailable }
         lastObservedSource = nil
         lastObservationInfo = nil
