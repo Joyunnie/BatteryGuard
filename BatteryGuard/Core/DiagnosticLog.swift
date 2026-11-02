@@ -55,6 +55,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
     let stateAfter: String?
     let sleepSettlement: SleepSettlementDiagnostic?
     let controlVerification: ControlVerificationDiagnostic?
+    let powerObservation: PowerObservationDiagnostic?
 
     init(
         id: UUID = UUID(),
@@ -69,7 +70,8 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         stateBefore: String? = nil,
         stateAfter: String? = nil,
         sleepSettlement: SleepSettlementDiagnostic? = nil,
-        controlVerification: ControlVerificationDiagnostic? = nil
+        controlVerification: ControlVerificationDiagnostic? = nil,
+        powerObservation: PowerObservationDiagnostic? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -84,6 +86,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         self.stateAfter = stateAfter
         self.sleepSettlement = sleepSettlement
         self.controlVerification = controlVerification
+        self.powerObservation = powerObservation
     }
 
     private static func summarize(_ value: String) -> String {
@@ -105,6 +108,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         case stateAfter
         case sleepSettlement
         case controlVerification
+        case powerObservation
         case termination
         case stderrSummary
     }
@@ -126,6 +130,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
             ControlVerificationDiagnostic.self,
             forKey: .controlVerification
         )
+        powerObservation = try container.decodeIfPresent(PowerObservationDiagnostic.self, forKey: .powerObservation)
 
         let operationIDText = try container.decodeIfPresent(String.self, forKey: .operationID)
         operationID = operationIDText.flatMap(UUID.init(uuidString:))
@@ -157,6 +162,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(stateAfter, forKey: .stateAfter)
         try container.encodeIfPresent(sleepSettlement, forKey: .sleepSettlement)
         try container.encodeIfPresent(controlVerification, forKey: .controlVerification)
+        try container.encodeIfPresent(powerObservation, forKey: .powerObservation)
     }
 
     private static func outcome(fromLegacyValue value: String?) -> DiagnosticOutcome {
@@ -185,6 +191,9 @@ private extension DiagnosticEvent {
     }
 
     var retentionPriority: RetentionPriority {
+        if powerObservation != nil, category == .sensor, outcome == .succeeded {
+            return .routine
+        }
         switch category {
         case .control, .lifecycle:
             return .safety
@@ -270,13 +279,19 @@ actor DiagnosticLog {
     static let disabled = DiagnosticLog(fileURL: nil, capacity: 0)
     static let shared = AppRuntime.isRunningTests
         ? disabled
-        : DiagnosticLog(fileURL: productionFileURL(), capacity: 100)
+        : DiagnosticLog(fileURL: productionFileURL(), capacity: 100, routineContext: powerObservations)
+    // Keep routine observation evidence from evicting safety events, and from
+    // being permanently evicted by a full safety log. Reuse the same bounded store.
+    static let powerObservations = AppRuntime.isRunningTests
+        ? disabled
+        : DiagnosticLog(fileURL: productionFileURL(name: "PowerObservations.json"), capacity: 100)
 
     nonisolated let fileURL: URL?
     nonisolated private let submissionQueue: DiagnosticSubmissionQueue
 
     private let capacity: Int
     private let routineFlushInterval: TimeInterval
+    private let routineContext: DiagnosticLog?
     private var events: [DiagnosticEvent]
     private var hasLoadedFromDisk = false
     private var routineFlushTask: Task<Void, Never>?
@@ -286,11 +301,13 @@ actor DiagnosticLog {
     init(
         fileURL: URL?,
         capacity: Int = 100,
-        routineFlushInterval: TimeInterval = 30
+        routineFlushInterval: TimeInterval = 30,
+        routineContext: DiagnosticLog? = nil
     ) {
         self.fileURL = fileURL
         self.submissionQueue = DiagnosticSubmissionQueue()
         self.capacity = max(0, capacity)
+        self.routineContext = routineContext
         self.routineFlushInterval = routineFlushInterval.isFinite
             ? max(0, routineFlushInterval)
             : 30
@@ -302,8 +319,13 @@ actor DiagnosticLog {
         submissionQueue.submit(event)
     }
 
-    func record(_ event: DiagnosticEvent) {
+    func record(_ event: DiagnosticEvent) async {
         guard capacity > 0 else { return }
+        // One-way dependency: only the safety log references the observation log.
+        // Drain its ordered submission queue before committing an immediate event.
+        if event.retentionPriority != .routine {
+            await routineContext?.flushPendingEvents()
+        }
         loadFromDiskIfNeeded()
         insertRetainingPriority(event)
         if event.retentionPriority == .routine, routineFlushInterval > 0 {
@@ -548,13 +570,13 @@ actor DiagnosticLog {
         return data
     }
 
-    private nonisolated static func productionFileURL() -> URL? {
+    private nonisolated static func productionFileURL(name: String = "Diagnostics.json") -> URL? {
         guard let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first else { return nil }
         return applicationSupport
             .appendingPathComponent("BatteryGuard", isDirectory: true)
-            .appendingPathComponent("Diagnostics.json")
+            .appendingPathComponent(name)
     }
 }

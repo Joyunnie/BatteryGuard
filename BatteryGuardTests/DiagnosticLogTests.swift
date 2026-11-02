@@ -4,6 +4,53 @@ import Foundation
 
 
 final class DiagnosticLogTests: XCTestCase {
+    func testSafetyEventFlushesSeparatePendingObservationContext() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let observationsURL = directory.appendingPathComponent("PowerObservations.json")
+        let safetyURL = directory.appendingPathComponent("Diagnostics.json")
+        let observations = DiagnosticLog(fileURL: observationsURL, capacity: 100, routineFlushInterval: 3_600)
+        let safety = DiagnosticLog(fileURL: safetyURL, capacity: 100, routineContext: observations)
+        let session = UUID()
+        let event = DiagnosticEvent(
+            category: .sensor, operation: "power observation",
+            powerObservation: PowerObservationDiagnostic(
+                sessionID: session, generation: 1, phase: .changed,
+                eventUptimeNanoseconds: 2, sampleReadUptimeNanoseconds: 1,
+                elapsedNanoseconds: 1, source: "ac",
+                activity: .unavailable, amperage: nil, chargePercent: nil, connection: .uncertain
+            )
+        )
+        observations.submit(event)
+        await safety.record(DiagnosticEvent(category: .control, operation: "verified maintain"))
+        let persisted = await DiagnosticLog(fileURL: observationsURL).recentEvents()
+        XCTAssertEqual(persisted.map(\.id), [event.id])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: safetyURL.path))
+        await safety.flushPendingEvents()
+        await observations.flushPendingEvents()
+    }
+
+    func testPowerObservationRoundTripAndPreviousSchemaCompatibility() throws {
+        let session = UUID()
+        let event = DiagnosticEvent(
+            category: .sensor, operationID: session, operation: "power observation",
+            powerObservation: PowerObservationDiagnostic(
+                sessionID: session, generation: 2, phase: .changed,
+                eventUptimeNanoseconds: 120, sampleReadUptimeNanoseconds: 119,
+                elapsedNanoseconds: 100, source: "ac",
+                activity: ChargingActivityObservation(systemIsCharging: true, batteryIsCharging: false),
+                amperage: -500, chargePercent: 67, connection: .connected
+            )
+        )
+        let encoded = try JSONEncoder().encode(event)
+        XCTAssertEqual(try JSONDecoder().decode(DiagnosticEvent.self, from: encoded), event)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.removeValue(forKey: "powerObservation")
+        let decoded = try JSONDecoder().decode(DiagnosticEvent.self, from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertNil(decoded.powerObservation)
+        XCTAssertEqual(decoded.operationID, event.operationID)
+    }
+
     func testDiagnosticLogPersistsOnlyItsNewestHundredEvents() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("batteryguard-diagnostics-\(UUID().uuidString)", isDirectory: true)
