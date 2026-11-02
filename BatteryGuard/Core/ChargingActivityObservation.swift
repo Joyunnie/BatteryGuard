@@ -34,12 +34,33 @@ struct ChargingActivityObservation: Equatable, Codable, Sendable {
         guard systemIsCharging == batteryIsCharging else { return .conflicting }
         return batteryIsCharging ? .charging : .notCharging
     }
+
+    var detail: String {
+        func label(_ value: Bool?) -> String {
+            switch value {
+            case true: return "충전 중"
+            case false: return "충전 아님"
+            case nil: return "확인 불가"
+            }
+        }
+        return "시스템 보고: \(label(systemIsCharging)) · 배터리 측정: \(label(batteryIsCharging))"
+    }
+}
+
+struct PowerPresentationDiagnostic: Codable, Equatable, Sendable {
+    let title: String
+    /// Controller mode at projection time, not a newly verified CLI tuple.
+    let controllerMode: String
+    let showsChargingBolt: Bool
+    let menuBarIcon: String
+    let headline: String
+    let activityDetail: String?
 }
 
 /// Read times are observation times, NOT hardware sample timestamps. Re-reading
 /// an unchanged dictionary cannot establish when the sensor last sampled it.
 struct PowerObservationDiagnostic: Codable, Equatable, Sendable {
-    enum Phase: String, Codable, Sendable { case began, changed, connectionSettled, ended }
+    enum Phase: String, Codable, Sendable { case began, changed, connectionSettled, projection, ended }
     enum Connection: String, Codable, Sendable {
         case connected, disconnected, transitioning, uncertain
 
@@ -63,4 +84,5 @@ struct PowerObservationDiagnostic: Codable, Equatable, Sendable {
     let amperage: Int?
     let chargePercent: Int?
     let connection: Connection
+    var presentation: PowerPresentationDiagnostic? = nil
 }

@@ -47,6 +47,8 @@ another report, not an independent sensor or a guaranteed faster source.
 
 - Observation: implemented; 386 strict-concurrency tests passed. Separate routine
   context is drained before immediate safety diagnostics and normal termination.
-- Presentation: pending.
+- Presentation: implemented; 393 strict-concurrency tests passed. Paired evidence
+  stays invalid after a safety-only raw-flag change until a fresh paired read;
+  Top Up projection diagnostics include bolt/icon/headline/detail changes.
 - Latency and budgets: pending.
 - Real-hardware reproduction: not run.

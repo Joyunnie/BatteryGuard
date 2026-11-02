@@ -4,6 +4,31 @@ import Foundation
 
 @MainActor
 extension ChargeControllerSafetyTests {
+    func testPresentationOnlyChargingChangeDoesNotIssueCommandsOrChangeControlMode() async {
+        var systemCharging = false
+        let (controller, backend, monitor, _) = makeSUT(
+            charge: 67, isCharging: false,
+            powerSourceSnapshotProvider: { PowerSourceSnapshot(kind: .ac, isCharging: systemCharging) }
+        )
+        monitor.startMonitoring()
+        controller.startBatteryInfoObservation()
+        let mode = controller.mode
+        let operations = backend.operations
+        systemCharging = true
+        monitor.performWatchdogRefresh()
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertEqual(controller.batteryPresentation.statusTitle, "충전 상태 확인 중")
+        XCTAssertFalse(controller.batteryPresentation.showsChargingBolt)
+        XCTAssertEqual(controller.mode, mode)
+        XCTAssertEqual(backend.operations, operations)
+        XCTAssertEqual(monitor.batteryInfo?.isCharging, false)
+        controller.stopPresentationObservation()
+        controller.batteryInfoObservation?.cancel()
+        monitor.stopMonitoring()
+    }
+
     func testHistoryRecordsVerifiedModeLimitInsteadOfStoredPreference() async throws {
         let history = BatteryHistory(inMemory: true)
         let historyReadiness = await history.waitUntilReady()

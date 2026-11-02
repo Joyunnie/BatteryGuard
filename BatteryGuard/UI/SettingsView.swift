@@ -519,8 +519,9 @@ struct SettingsView: View {
     private func revealDiagnosticLog() async {
         do {
             let fileURL = try await DiagnosticLog.shared.prepareForViewing()
+            let observationURL = try await DiagnosticLog.powerObservations.prepareForViewing()
             diagnosticLogError = nil
-            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL, observationURL])
         } catch {
             diagnosticLogError = error.localizedDescription
         }

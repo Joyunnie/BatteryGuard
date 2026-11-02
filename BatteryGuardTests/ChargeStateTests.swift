@@ -47,11 +47,12 @@ final class ChargeStateTests: XCTestCase {
             connection: .stable(.connected),
             mode: .maintaining(limit: 80),
             chargeState: .chargingPaused,
-            requiresManualRecovery: false
+            requiresManualRecovery: false,
+            activity: ChargingActivityObservation(systemIsCharging: false, batteryIsCharging: false)
         )
 
-        XCTAssertEqual(presentation.statusTitle, "전원 연결됨 · 충전 대기 중")
-        XCTAssertEqual(presentation.headline, "macOS의 충전 시작을 기다리고 있어요")
+        XCTAssertEqual(presentation.statusTitle, "전원 연결됨 · 현재 충전되지 않음")
+        XCTAssertEqual(presentation.headline, "전원은 연결됐지만 충전 활동은 보고되지 않았어요")
         XCTAssertFalse(presentation.showsChargingBolt)
     }
 
@@ -73,7 +74,8 @@ final class ChargeStateTests: XCTestCase {
             connection: .stable(.connected),
             mode: .maintaining(limit: 80),
             chargeState: .chargingPaused,
-            requiresManualRecovery: false
+            requiresManualRecovery: false,
+            activity: ChargingActivityObservation(systemIsCharging: false, batteryIsCharging: false)
         )
 
         XCTAssertEqual(presentation.statusTitle, "충전 한도 유지 중")
@@ -81,13 +83,14 @@ final class ChargeStateTests: XCTestCase {
         XCTAssertFalse(presentation.showsChargingBolt)
     }
 
-    func testChargingBoltRequiresChargingMeasurementOrExplicitTopUp() {
+    func testChargingBoltRequiresAgreedChargingEvidenceEvenDuringTopUp() {
         let charging = BatteryPresentation.make(
             info: makeBatteryInfo(isCharging: true),
             connection: .stable(.connected),
             mode: .maintaining(limit: 80),
             chargeState: .charging,
-            requiresManualRecovery: false
+            requiresManualRecovery: false,
+            activity: ChargingActivityObservation(systemIsCharging: true, batteryIsCharging: true)
         )
         let topUp = BatteryPresentation.make(
             info: makeBatteryInfo(isCharging: false),
@@ -98,7 +101,58 @@ final class ChargeStateTests: XCTestCase {
         )
 
         XCTAssertTrue(charging.showsChargingBolt)
-        XCTAssertTrue(topUp.showsChargingBolt)
+        XCTAssertFalse(topUp.showsChargingBolt)
+        XCTAssertTrue(topUp.headline.contains("충전 활동"))
+    }
+
+    func testConflictingOrMissingActivityNeverClaimsChargingOrAnOSCause() {
+        let values: [Bool?] = [nil, false, true]
+        for system in values {
+            for raw in values {
+                let activity = ChargingActivityObservation(systemIsCharging: system, batteryIsCharging: raw)
+                let presentation = BatteryPresentation.make(
+                    info: makeBatteryInfo(charge: 60, isCharging: raw),
+                    connection: .stable(.connected), mode: .maintaining(limit: 80),
+                    chargeState: .charging, requiresManualRecovery: false, activity: activity
+                )
+                XCTAssertEqual(presentation.showsChargingBolt, system == true && raw == true)
+                XCTAssertEqual(presentation.activityDetail, activity.detail)
+                XCTAssertFalse(presentation.headline.contains("macOS의 충전 시작"))
+                if activity.state == .conflicting {
+                    XCTAssertEqual(presentation.statusTitle, "충전 상태 확인 중")
+                } else if activity.state == .unavailable {
+                    XCTAssertEqual(presentation.statusTitle, "충전 상태 확인 불가")
+                }
+            }
+        }
+    }
+
+    func testSafetyOnlyMeasurementCannotReuseOlderSystemReportForChargingPresentation() {
+        let presentation = BatteryPresentation.make(
+            info: makeBatteryInfo(isCharging: false), connection: .stable(.connected),
+            mode: .maintaining(limit: 80), chargeState: .chargingPaused,
+            requiresManualRecovery: false,
+            activity: ChargingActivityObservation(systemIsCharging: true, batteryIsCharging: true)
+        )
+        XCTAssertFalse(presentation.showsChargingBolt)
+        XCTAssertEqual(presentation.statusTitle, "충전 상태 확인 불가")
+        XCTAssertTrue(presentation.activityDetail?.contains("시스템 보고: 확인 불가") == true)
+    }
+
+    func testTopUpActivityIsSeparateFromItsVerifiedControlMode() {
+        for connected in [true, false] {
+            for charging in [true, false] {
+                let presentation = BatteryPresentation.make(
+                    info: makeBatteryInfo(isCharging: charging),
+                    connection: .stable(connected ? .connected : .disconnected),
+                    mode: .toppingUp(returnLimit: 80), chargeState: .topUp,
+                    requiresManualRecovery: false,
+                    activity: ChargingActivityObservation(systemIsCharging: charging, batteryIsCharging: charging)
+                )
+                XCTAssertEqual(presentation.statusTitle, "Top Up 중")
+                XCTAssertEqual(presentation.showsChargingBolt, connected && charging)
+            }
+        }
     }
 
     func testManualRecoveryUsesOneTransitionAwareTitleContract() {

@@ -147,6 +147,12 @@ struct DashboardView: View {
                             Text(controller.batteryPresentation.headline)
                                 .font(.system(size: 21, weight: .bold, design: .rounded))
                                 .fixedSize(horizontal: false, vertical: true)
+                            if let detail = controller.batteryPresentation.activityDetail {
+                                Text(detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
 
                         VStack(spacing: 8) {

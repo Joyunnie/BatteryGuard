@@ -123,6 +123,7 @@ struct BatteryPresentation: Equatable, Sendable {
     let eyebrow: String
     let headline: String
     let controlOwnership: ControlOwnershipPresentation
+    var activityDetail: String? = nil
 
     nonisolated static func make(
         info: BatteryInfo?,
@@ -131,7 +132,34 @@ struct BatteryPresentation: Equatable, Sendable {
         chargeState: ChargeState,
         requiresManualRecovery: Bool,
         ownership: BatteryControlOwnership = .batteryGuard(lastLimit: 80),
-        readiness: ChargeControllerReadiness = .ready
+        readiness: ChargeControllerReadiness = .ready,
+        activity: ChargingActivityObservation = .unavailable
+    ) -> BatteryPresentation {
+        // A controller safety-only read may supersede the raw half of the last
+        // presentation pair. Never combine it with an older system report.
+        let currentActivity = activity.batteryIsCharging == info?.isCharging
+            ? activity
+            : ChargingActivityObservation(systemIsCharging: nil, batteryIsCharging: info?.isCharging)
+        var presentation = makeBase(
+            info: info, connection: connection, mode: mode, chargeState: chargeState,
+            requiresManualRecovery: requiresManualRecovery, ownership: ownership,
+            readiness: readiness, activity: currentActivity
+        )
+        if connection == .stable(.connected) {
+            presentation.activityDetail = currentActivity.detail
+        }
+        return presentation
+    }
+
+    private nonisolated static func makeBase(
+        info: BatteryInfo?,
+        connection: PowerConnectionObservation,
+        mode: ChargeMode,
+        chargeState: ChargeState,
+        requiresManualRecovery: Bool,
+        ownership: BatteryControlOwnership,
+        readiness: ChargeControllerReadiness,
+        activity: ChargingActivityObservation
     ) -> BatteryPresentation {
         let power = PowerDescription(connection)
         let controlOwnership = ControlOwnershipPresentation.make(
@@ -245,13 +273,18 @@ struct BatteryPresentation: Equatable, Sendable {
         }
 
         if case .toppingUp = mode {
+            let observedCharging = activity.state == .charging && connection == .stable(.connected)
             return makeActivityPresentation(
                 title: "Top Up 중",
                 icon: "arrow.up.to.line.compact",
-                menuBarIcon: "bolt.fill",
-                tone: .success,
-                showsChargingBolt: true,
-                headline: "추가 충전을 진행하고 있어요",
+                menuBarIcon: observedCharging ? "bolt.fill" : "arrow.up.to.line.compact",
+                tone: observedCharging ? .success : .info,
+                showsChargingBolt: observedCharging,
+                headline: observedCharging
+                    ? "추가 충전을 진행하고 있어요"
+                    : (connection == .stable(.disconnected)
+                       ? "Top Up 제어 활성 · 전원 미연결"
+                       : "Top Up 제어 활성 · 충전 활동을 확인하고 있어요"),
                 power: power,
                 controlOwnership: controlOwnership
             )
@@ -268,7 +301,7 @@ struct BatteryPresentation: Equatable, Sendable {
                 controlOwnership: controlOwnership
             )
         }
-        if info.isCharging == true {
+        if activity.state == .charging, connection == .stable(.connected) {
             return makeActivityPresentation(
                 title: "충전 중",
                 icon: "bolt.fill",
@@ -293,7 +326,19 @@ struct BatteryPresentation: Equatable, Sendable {
             )
         }
 
-        if info.isCharging == nil {
+        if activity.state == .conflicting {
+            return makeActivityPresentation(
+                title: "충전 상태 확인 중",
+                icon: "arrow.triangle.2.circlepath",
+                menuBarIcon: "arrow.triangle.2.circlepath",
+                tone: .info,
+                showsChargingBolt: false,
+                headline: "시스템 보고와 배터리 측정이 아직 일치하지 않아요",
+                power: power,
+                controlOwnership: controlOwnership
+            )
+        }
+        if activity.state == .unavailable {
             return makeActivityPresentation(
                 title: "충전 상태 확인 불가",
                 icon: "questionmark.circle",
@@ -309,14 +354,14 @@ struct BatteryPresentation: Equatable, Sendable {
         if case .maintaining(let limit) = mode {
             let isHoldingAtLimit = info.currentCharge >= limit
             return makeActivityPresentation(
-                title: isHoldingAtLimit ? "충전 한도 유지 중" : "전원 연결됨 · 충전 대기 중",
+                title: isHoldingAtLimit ? "충전 한도 유지 중" : "전원 연결됨 · 현재 충전되지 않음",
                 icon: isHoldingAtLimit ? "pause.fill" : "powerplug.fill",
                 menuBarIcon: "battery.75percent",
                 tone: isHoldingAtLimit ? .success : .warning,
                 showsChargingBolt: false,
                 headline: isHoldingAtLimit
                     ? "설정한 충전 한도를 지키고 있어요"
-                    : "macOS의 충전 시작을 기다리고 있어요",
+                    : "전원은 연결됐지만 충전 활동은 보고되지 않았어요",
                 power: power,
                 controlOwnership: controlOwnership
             )

@@ -9,6 +9,7 @@ extension ChargeController {
     // MARK: - Monitoring
 
     func startBatteryInfoObservation() {
+        startPresentationObservation()
         batteryInfoObservation?.cancel()
         batteryInfoObservation = monitor.$batteryInfo
             .map(ControlMeasurement.init)
@@ -22,6 +23,39 @@ extension ChargeController {
                     self.updateDisplayState()
                 }
             }
+    }
+
+    private func startPresentationObservation() {
+        stopPresentationObservation()
+        presentationObservation = Publishers.MergeMany(
+            monitor.objectWillChange.eraseToAnyPublisher(),
+            $mode.map { _ in () }.eraseToAnyPublisher(),
+            $readiness.map { _ in () }.eraseToAnyPublisher(),
+            settings.objectWillChange.eraseToAnyPublisher()
+        ).sink { [weak self] in self?.schedulePresentationDiagnostic() }
+    }
+
+    private func schedulePresentationDiagnostic() {
+        guard presentationDiagnosticWork == nil else { return }
+        let generation = presentationObservationGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.presentationObservationGeneration == generation else { return }
+            self.presentationDiagnosticWork = nil
+            guard !self.isShuttingDown, self.presentationObservation != nil else { return }
+            self.monitor.recordPresentation(self.batteryPresentation, mode: self.mode)
+        }
+        presentationDiagnosticWork = work
+        // @Published emits before assignment; coalesce the whole pair and mode
+        // into one projection after the current main-run-loop turn.
+        DispatchQueue.main.async(execute: work)
+    }
+
+    func stopPresentationObservation() {
+        presentationObservationGeneration &+= 1
+        presentationObservation?.cancel()
+        presentationObservation = nil
+        presentationDiagnosticWork?.cancel()
+        presentationDiagnosticWork = nil
     }
 
     func startSMCTemperatureLoop() {
