@@ -4,6 +4,49 @@ import Foundation
 
 @MainActor
 extension ChargeControllerSafetyTests {
+    func testStoppedProjectionObserverCannotRecordQueuedWorkInNewSession() async {
+        var systemCharging = false
+        let log = DiagnosticLog(fileURL: nil, capacity: 100)
+        let (controller, backend, monitor, _) = makeSUT(
+            charge: 67, isCharging: false,
+            powerSourceSnapshotProvider: { PowerSourceSnapshot(kind: .ac, isCharging: systemCharging) },
+            observationDiagnostics: log
+        )
+        monitor.startMonitoring()
+        controller.startBatteryInfoObservation()
+        let operations = backend.operations
+        let mode = controller.mode
+        systemCharging = true
+        monitor.performWatchdogRefresh()
+        XCTAssertNotNil(controller.presentationDiagnosticWork)
+        controller.stopPresentationObservation()
+        monitor.stopMonitoring()
+        monitor.startMonitoring()
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        await log.flushPendingEvents()
+        let stoppedEvents = await log.recentEvents().compactMap(\.powerObservation)
+        XCTAssertTrue(stoppedEvents.allSatisfy { $0.phase != .projection })
+
+        controller.startBatteryInfoObservation()
+        systemCharging = false
+        monitor.performWatchdogRefresh()
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        await log.flushPendingEvents()
+        let events = await log.recentEvents().compactMap(\.powerObservation)
+        let projections = events.filter { $0.phase == .projection }
+        XCTAssertEqual(projections.count, 1)
+        XCTAssertEqual(projections.first?.sessionID, events.last(where: { $0.phase == .began })?.sessionID)
+        XCTAssertEqual(controller.mode, mode)
+        XCTAssertEqual(backend.operations, operations, "observation must not issue battery or LED commands")
+        controller.stopPresentationObservation()
+        controller.batteryInfoObservation?.cancel()
+        monitor.stopMonitoring()
+    }
+
     func testPresentationOnlyChargingChangeDoesNotIssueCommandsOrChangeControlMode() async {
         var systemCharging = false
         let (controller, backend, monitor, _) = makeSUT(
