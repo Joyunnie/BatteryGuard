@@ -18,6 +18,7 @@ extension ChargeController {
         initializationFailureContext = nil
         var recoveryExpectation: ReconciledChargeExpectation?
         let recoveryOwnership = settings.batteryControlOwnership
+        var hasStartedMonitoring = false
         readiness = .initializing
         mode = .idle
         do {
@@ -29,6 +30,7 @@ extension ChargeController {
             readiness = .reconciling
             let observedStatus = try await readInitialStatusWithTransientRetry()
             monitor.startMonitoring()
+            hasStartedMonitoring = true
 
             let desiredLimit = UserSettings.validatedChargeLimit(settings.chargeLimit)
             readiness = .establishingControl
@@ -123,7 +125,7 @@ extension ChargeController {
                     try completeInitializationInfrastructure(restartMonitoring: false)
                     return
                 }
-                cleanupAfterFailedInitialization()
+                cleanupControlAfterFailedInitialization()
                 if case BatteryError.unsupportedControlCapability(let reason) = error {
                     initializationFailureContext = .unsupportedControlCapability(reason)
                 } else if !initializationHardwareMutationAttempted {
@@ -142,6 +144,7 @@ extension ChargeController {
                     disposition: .manualIntervention
                 )
                 readiness = .failed(error.localizedDescription)
+                startObservationInfrastructure(restartMonitoring: !hasStartedMonitoring)
                 recordDiagnostic(
                     category: .lifecycle,
                     operation: "initialize",
@@ -215,8 +218,22 @@ extension ChargeController {
         return false
     }
 
+    func startObservationInfrastructure(restartMonitoring: Bool) {
+        guard !isShuttingDown else { return }
+        isObservationActive = true
+        if restartMonitoring { monitor.startMonitoring() }
+        startBatteryInfoObservation()
+        updateDisplayState()
+        if backendAvailableForShutdown,
+           isChargeControlUnsupported,
+           controlCapabilities.batteryTemperature {
+            samplePassiveSMCTemperatureIfAvailable(force: true)
+        }
+    }
+
     func completeInitializationInfrastructure(restartMonitoring: Bool) throws {
         guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
+        isObservationActive = true
         if restartMonitoring { monitor.startMonitoring() }
         startBatteryInfoObservation()
         do {
@@ -356,16 +373,11 @@ extension ChargeController {
         }
     }
 
-    private func cleanupAfterFailedInitialization() {
-        stopPresentationObservation()
+    private func cleanupControlAfterFailedInitialization() {
         cancelSMCTemperatureSample(clearCache: true)
-        batteryInfoObservation?.cancel()
-        batteryInfoObservation = nil
         smcTemperatureTimer?.invalidate()
         smcTemperatureTimer = nil
         stopLongRunningMonitoring()
-        stopHistoryHeartbeat()
-        monitor.stopMonitoring()
         removeSleepWakeObservers()
         stopExternalReconciliation()
     }
@@ -625,6 +637,7 @@ extension ChargeController {
     }
 
     private func finishLocalShutdown() {
+        isObservationActive = false
         stopPresentationObservation()
         cancelSMCTemperatureSample(clearCache: true)
         batteryInfoObservation?.cancel()

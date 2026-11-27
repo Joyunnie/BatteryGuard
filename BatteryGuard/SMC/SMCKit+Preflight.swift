@@ -22,25 +22,7 @@ extension SMCKit {
             displayName: "SMC binary"
         )
         rawSMCAvailable = true
-        if let temperatureReaderPath {
-            do {
-                temperatureReaderExecutableIdentity = try validateTemperatureReaderBeforeUse(
-                    path: temperatureReaderPath
-                )
-                bundledTemperatureReaderState = .untested
-            } catch {
-                temperatureReaderExecutableIdentity = nil
-                bundledTemperatureReaderState = .incompatible(error.localizedDescription)
-                await diagnostics.record(
-                    DiagnosticEvent(
-                        category: .sensor,
-                        operation: "validate bundled SMC temperature reader",
-                        outcome: .failed,
-                        message: error.localizedDescription
-                    )
-                )
-            }
-        }
+        await validateBundledTemperatureReaderIfNeeded()
 
         try await validateBatteryCLIVersionUnlocked()
         let preflightStatus = try await readControlStatusUntilSettled(target: "preflight") { _ in true }
@@ -141,6 +123,31 @@ extension SMCKit {
         }
         if expectedType == S_IFREG, metadata.st_mode & S_IXUSR == 0 {
             throw BatteryError.preflightFailed("\(displayName) is not owner-executable: \(path)")
+        }
+    }
+
+    func validateBundledTemperatureReaderIfNeeded() async {
+        guard let temperatureReaderPath,
+              temperatureReaderExecutableIdentity == nil,
+              bundledTemperatureReaderState == .untested else {
+            return
+        }
+        do {
+            temperatureReaderExecutableIdentity = try validateTemperatureReaderBeforeUse(
+                path: temperatureReaderPath
+            )
+            bundledTemperatureReaderState = .untested
+        } catch {
+            temperatureReaderExecutableIdentity = nil
+            bundledTemperatureReaderState = .incompatible(error.localizedDescription)
+            await diagnostics.record(
+                DiagnosticEvent(
+                    category: .sensor,
+                    operation: "validate bundled SMC temperature reader",
+                    outcome: .failed,
+                    message: error.localizedDescription
+                )
+            )
         }
     }
 

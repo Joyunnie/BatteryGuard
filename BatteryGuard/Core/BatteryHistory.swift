@@ -84,10 +84,11 @@ final class BatteryHistory {
     struct ChartRecord: Equatable {
         let timestamp: Date
         let chargePercent: Int
-        let chargeLimit: Int
+        let chargeLimit: Int?
     }
 
     static let retentionInterval: TimeInterval = 7 * 24 * 60 * 60
+    private static let noChargeLimitSentinel: Int16 = 0
 
     private(set) var readiness: BatteryHistoryReadiness = .loading
     private(set) var saveError: String?
@@ -106,9 +107,10 @@ final class BatteryHistory {
     private let heartbeatInterval: TimeInterval
     private let logger = Logger(subsystem: "com.jiwon.batteryguard", category: "History")
     private var readinessWaiters: [CheckedContinuation<BatteryHistoryReadiness, Never>] = []
-    private var pendingRecords: [(chargePercent: Int, chargeLimit: Int, timestamp: Date)] = []
+    private var pendingRecords: [(chargePercent: Int, chargeLimit: Int?, timestamp: Date)] = []
     private var lastChargePercent: Int?
     private var lastChargeLimit: Int?
+    private var hasRecordedSample = false
     private var lastRecordDate: Date?
     private var lastCleanupDate: Date?
 
@@ -256,16 +258,16 @@ final class BatteryHistory {
     }
 
     @discardableResult
-    func record(chargePercent: Int, chargeLimit: Int) -> Bool {
+    func record(chargePercent: Int, chargeLimit: Int?) -> Bool {
         record(chargePercent: chargePercent, chargeLimit: chargeLimit, timestamp: now())
     }
 
     @discardableResult
-    private func record(chargePercent: Int, chargeLimit: Int, timestamp: Date) -> Bool {
-        guard (0...100).contains(chargePercent),
-              UserSettings.chargeLimitRange.contains(chargeLimit) else {
+    private func record(chargePercent: Int, chargeLimit: Int?, timestamp: Date) -> Bool {
+        let validLimit = chargeLimit.map { UserSettings.chargeLimitRange.contains($0) } ?? true
+        guard (0...100).contains(chargePercent), validLimit else {
             reportError(
-                "History rejected invalid values: charge=\(chargePercent), limit=\(chargeLimit)",
+                "History rejected invalid values: charge=\(chargePercent), limit=\(chargeLimit.map(String.init) ?? "none")",
                 operation: "validate history sample"
             )
             return false
@@ -281,7 +283,9 @@ final class BatteryHistory {
             return false
         }
 
-        let valuesChanged = chargePercent != lastChargePercent || chargeLimit != lastChargeLimit
+        let valuesChanged = !hasRecordedSample
+            || chargePercent != lastChargePercent
+            || chargeLimit != lastChargeLimit
         let heartbeatDue = lastRecordDate.map { timestamp.timeIntervalSince($0) >= heartbeatInterval } ?? true
         guard valuesChanged || heartbeatDue else { return false }
 
@@ -302,9 +306,10 @@ final class BatteryHistory {
             let record = BatteryRecord(entity: entity, insertInto: context)
             record.timestamp = timestamp
             record.chargePercent = Int16(chargePercent)
-            record.chargeLimit = Int16(chargeLimit)
+            record.chargeLimit = chargeLimit.map(Int16.init) ?? Self.noChargeLimitSentinel
             try storeOperations.save(context)
 
+            hasRecordedSample = true
             lastChargePercent = chargePercent
             lastChargeLimit = chargeLimit
             lastRecordDate = timestamp
@@ -330,10 +335,11 @@ final class BatteryHistory {
             let records = try storeOperations.fetch(container.viewContext, request)
             fetchError = nil
             return records.map {
-                ChartRecord(
+                let storedLimit = Int($0.chargeLimit)
+                return ChartRecord(
                     timestamp: $0.timestamp,
                     chargePercent: Int($0.chargePercent),
-                    chargeLimit: Int($0.chargeLimit)
+                    chargeLimit: UserSettings.chargeLimitRange.contains(storedLimit) ? storedLimit : nil
                 )
             }
         } catch {
@@ -406,11 +412,12 @@ final class BatteryHistory {
         guard maxPoints > 1 else { return [records.count - 1] }
 
         var indices = [0, records.count - 1]
+        let limitIndices = records.indices.filter { records[$0].chargeLimit != nil }
         let candidates = [
             records.indices.max { records[$0].chargePercent < records[$1].chargePercent },
             records.indices.min { records[$0].chargePercent < records[$1].chargePercent },
-            records.indices.max { records[$0].chargeLimit < records[$1].chargeLimit },
-            records.indices.min { records[$0].chargeLimit < records[$1].chargeLimit }
+            limitIndices.max { (records[$0].chargeLimit ?? 0) < (records[$1].chargeLimit ?? 0) },
+            limitIndices.min { (records[$0].chargeLimit ?? 0) < (records[$1].chargeLimit ?? 0) }
         ].compactMap { $0 }
         for index in candidates where indices.count < maxPoints && !indices.contains(index) {
             indices.append(index)
@@ -434,15 +441,17 @@ final class BatteryHistory {
                 / Double(averageRange.count)
             let averageY = averageRange.map { Double($0.chargePercent) }.reduce(0, +)
                 / Double(averageRange.count)
-            let averageLimit = averageRange.map { Double($0.chargeLimit) }.reduce(0, +)
-                / Double(averageRange.count)
+            let averageLimits = averageRange.compactMap(\.chargeLimit)
+            let averageLimit: Double? = averageLimits.isEmpty
+                ? nil
+                : averageLimits.map(Double.init).reduce(0, +) / Double(averageLimits.count)
 
             let rangeStart = min(Int(floor(Double(bucket) * every)) + 1, records.count - 2)
             let rangeEnd = min(Int(floor(Double(bucket + 1) * every)) + 1, records.count - 1)
             let pointA = records[selectedIndex]
             let ax = pointA.timestamp.timeIntervalSinceReferenceDate
             let ay = Double(pointA.chargePercent)
-            let limitA = Double(pointA.chargeLimit)
+            let limitA = pointA.chargeLimit.map(Double.init)
             var bestArea = -1.0
             var bestIndex = rangeStart
             for index in rangeStart..<max(rangeStart + 1, rangeEnd) {
@@ -451,10 +460,15 @@ final class BatteryHistory {
                     (ax - averageX) * (Double(point.chargePercent) - ay)
                     - (ax - point.timestamp.timeIntervalSinceReferenceDate) * (averageY - ay)
                 )
-                let limitArea = abs(
-                    (ax - averageX) * (Double(point.chargeLimit) - limitA)
-                    - (ax - point.timestamp.timeIntervalSinceReferenceDate) * (averageLimit - limitA)
-                )
+                let limitArea: Double
+                if let limitA, let averageLimit, let pointLimit = point.chargeLimit.map(Double.init) {
+                    limitArea = abs(
+                        (ax - averageX) * (pointLimit - limitA)
+                        - (ax - point.timestamp.timeIntervalSinceReferenceDate) * (averageLimit - limitA)
+                    )
+                } else {
+                    limitArea = 0
+                }
                 let area = max(chargeArea, limitArea)
                 if area > bestArea {
                     bestArea = area

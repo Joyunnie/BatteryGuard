@@ -1748,4 +1748,31 @@ final class SMCKitOperationSafetyTests: XCTestCase {
         XCTAssertFalse(commands.contains("maintain 80"))
         XCTAssertTrue(commands.contains("maintain stop"))
     }
+
+    func testBundledTemperatureReaderWorksWithoutOpeningPrivilegedBatteryCLI() async throws {
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo "TB0T [flt ] 28.5 (bytes 00 00 e4 41)"
+            echo "TB1T [flt ] 31.0 (bytes 00 00 f8 41)"
+            echo "TB2T [flt ] 30.25 (bytes 00 00 f2 41)"
+            """
+        )
+        let missingBattery = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-missing-cli-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: readerFixture)
+        }
+        let backend = SMCKit(
+            batteryPath: missingBattery.path,
+            smcBinaryPath: missingBattery.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        let sample = try await backend.readBatteryTemperature()
+        XCTAssertEqual(sample.maximum, 31.0)
+        XCTAssertTrue(sample.hasCompleteCoverage)
+    }
 }

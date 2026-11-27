@@ -406,13 +406,15 @@ struct DashboardView: View {
                 }
 
                 ForEach(sampled, id: \.timestamp) { record in
-                    LineMark(
-                        x: .value("시간", record.timestamp),
-                        y: .value("충전 한도", record.chargeLimit),
-                        series: .value("종류", "충전 한도")
-                    )
-                    .foregroundStyle(BatteryGuardPalette.peachInk)
-                    .lineStyle(StrokeStyle(lineWidth: 1.7, dash: [6, 4]))
+                    if let chargeLimit = record.chargeLimit {
+                        LineMark(
+                            x: .value("시간", record.timestamp),
+                            y: .value("충전 한도", chargeLimit),
+                            series: .value("종류", "충전 한도")
+                        )
+                        .foregroundStyle(BatteryGuardPalette.peachInk)
+                        .lineStyle(StrokeStyle(lineWidth: 1.7, dash: [6, 4]))
+                    }
                 }
             }
             .chartXScale(
@@ -451,7 +453,9 @@ struct DashboardView: View {
 
             HStack(spacing: 18) {
                 chartLegend(title: "충전량", color: BatteryGuardPalette.accent, dashed: false)
-                chartLegend(title: "충전 한도", color: BatteryGuardPalette.peach, dashed: true)
+                if sampled.contains(where: { $0.chargeLimit != nil }) {
+                    chartLegend(title: "충전 한도", color: BatteryGuardPalette.peach, dashed: true)
+                }
             }
         }
     }

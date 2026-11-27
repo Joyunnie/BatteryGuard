@@ -356,4 +356,33 @@ final class BatteryHistoryTests: XCTestCase {
         XCTAssertTrue(history.fetchRecentHistory().isEmpty)
         XCTAssertNil(history.fetchError)
     }
+
+    func testHistoryRecordsAndDownsamplesMonitoringOnlySamplesWithoutChargeLimit() async {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_000_000))
+        let history = BatteryHistory(inMemory: true, now: { clock.now() })
+        let readiness = await history.waitUntilReady()
+        XCTAssertEqual(readiness, .ready)
+
+        XCTAssertTrue(history.record(chargePercent: 85, chargeLimit: nil))
+        XCTAssertFalse(history.record(chargePercent: 85, chargeLimit: nil))
+        clock.advance(by: 60)
+        XCTAssertTrue(history.record(chargePercent: 84, chargeLimit: nil))
+        clock.advance(by: 60)
+        XCTAssertTrue(history.record(chargePercent: 84, chargeLimit: 80))
+
+        let records = history.fetchRecentHistory()
+        XCTAssertEqual(records.map(\.chargePercent), [85, 84, 84])
+        XCTAssertEqual(records.map(\.chargeLimit), [nil, nil, 80])
+
+        let synthetic = (0..<300).map { index in
+            BatteryHistory.ChartRecord(
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                chargePercent: index == 150 ? 100 : 60,
+                chargeLimit: nil
+            )
+        }
+        let sampled = BatteryHistory.downsample(synthetic, maxPoints: 50)
+        XCTAssertEqual(sampled.count, 50)
+        XCTAssertTrue(sampled.contains { $0.chargePercent == 100 && $0.chargeLimit == nil })
+    }
 }

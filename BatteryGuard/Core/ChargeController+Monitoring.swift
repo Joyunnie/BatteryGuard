@@ -18,7 +18,7 @@ extension ChargeController {
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self,
-                          self.readiness == .ready,
+                          self.isObservationActive,
                           !self.isShuttingDown else { return }
                     self.updateDisplayState()
                 }
@@ -65,10 +65,73 @@ extension ChargeController {
             withTimeInterval: smcTemperatureSamplingInterval,
             repeats: true
         ) { [weak self] _ in
-            Task { @MainActor in self?.sampleSMCTemperature() }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.settings.heatProtectionEnabled {
+                    self.sampleSMCTemperature()
+                } else {
+                    self.samplePassiveSMCTemperatureIfAvailable()
+                }
+            }
         }
         smcTemperatureTimer?.tolerance = min(0.5, smcTemperatureSamplingInterval * 0.1)
-        sampleSMCTemperature(force: true)
+        if settings.heatProtectionEnabled {
+            sampleSMCTemperature(force: true)
+        } else {
+            samplePassiveSMCTemperatureIfAvailable(force: true)
+        }
+    }
+
+    func samplePassiveSMCTemperatureIfAvailable(force: Bool = false) {
+        let allowsPassiveRead: Bool
+        if readiness == .ready, case .controlDisabled = mode {
+            allowsPassiveRead = true
+        } else if backendAvailableForShutdown, isChargeControlUnsupported {
+            allowsPassiveRead = true
+        } else {
+            allowsPassiveRead = false
+        }
+        guard isObservationActive,
+              allowsPassiveRead,
+              !isShuttingDown,
+              !settings.heatProtectionEnabled,
+              controlCapabilities.batteryTemperature,
+              smcTemperatureSampleTask == nil else { return }
+        let sampleStartedAt = now()
+        let passiveInterval = max(30, smcTemperatureSamplingInterval * 6)
+        if !force,
+           let lastSMCTemperatureSampleStartedAt,
+           sampleStartedAt.timeIntervalSince(lastSMCTemperatureSampleStartedAt) < passiveInterval {
+            return
+        }
+        lastSMCTemperatureSampleStartedAt = sampleStartedAt
+        smcTemperatureSampleGeneration &+= 1
+        let generation = smcTemperatureSampleGeneration
+        let backend = self.backend
+        smcTemperatureSampleTask = Task { [weak self] in
+            let measuredSMC: Double?
+            do {
+                let sample = try await backend.readBatteryTemperature()
+                measuredSMC = BatteryMonitor.validatedTemperature(Double(sample.maximum))
+            } catch {
+                measuredSMC = nil
+            }
+            guard let self else { return }
+            guard self.smcTemperatureSampleGeneration == generation else { return }
+            self.smcTemperatureSampleTask = nil
+            guard !Task.isCancelled,
+                  self.isObservationActive,
+                  !self.isShuttingDown,
+                  !self.settings.heatProtectionEnabled else { return }
+            if let measuredSMC {
+                self.safetyTemperatureCache.record(measuredSMC, at: self.now())
+            }
+            self.publishSafetyTemperature(
+                smc: self.recentSMCTemperature(maxAge: max(60, passiveInterval * 2)),
+                ioKit: self.monitor.batteryInfo?.temperature,
+                failures: []
+            )
+        }
     }
 
     func sampleSMCTemperature(force: Bool = false) {
@@ -160,12 +223,14 @@ extension ChargeController {
     func updateDisplayState() {
         guard let info = monitor.batteryInfo else {
             setSensorError("배터리 상태를 읽을 수 없습니다.")
-            applyLongRunningProgressDecision(
-                LongRunningChargePolicy.progress(mode: mode, currentCharge: nil),
-                batteryMeasurementAvailable: false
-            )
-            if settings.heatProtectionEnabled {
-                evaluateHeatProtectionWithoutBatteryInfo(temperature: recentSMCTemperature())
+            if readiness == .ready {
+                applyLongRunningProgressDecision(
+                    LongRunningChargePolicy.progress(mode: mode, currentCharge: nil),
+                    batteryMeasurementAvailable: false
+                )
+                if settings.heatProtectionEnabled {
+                    evaluateHeatProtectionWithoutBatteryInfo(temperature: recentSMCTemperature())
+                }
             }
             refreshDisplayedError()
             return
@@ -292,31 +357,47 @@ extension ChargeController {
         longRunningExitObservationTask = nil
     }
 
-    private func historyLimitForRecording() -> Int? {
+    private enum HistoryRecordingTarget: Equatable {
+        case skip
+        case record(limit: Int?)
+    }
+
+    private func historyRecordingTarget() -> HistoryRecordingTarget {
         if case .externalDrift(_, .maintaining(let limit)) = mode {
-            return limit
+            return .record(limit: limit)
         }
-        if case .externalDrift = mode { return nil }
-        return mode.restorableMode?.maintainLimit
+        if case .externalDrift = mode { return .skip }
+        if case .controlDisabled = mode {
+            return .record(limit: nil)
+        }
+        if case .failed = mode, isObservationActive, isChargeControlUnsupported {
+            return .record(limit: nil)
+        }
+        if let limit = mode.restorableMode?.maintainLimit {
+            return .record(limit: limit)
+        }
+        return .skip
     }
 
     func recordHistoryAfterStableModeTransition(from previousMode: ChargeMode) {
         guard mode != previousMode,
-              readiness == .ready,
+              isObservationActive,
               !isShuttingDown,
               let info = monitor.batteryInfo else { return }
         switch mode {
-        case .maintaining, .toppingUp, .discharging, .heatBlocked, .sleepProtected:
+        case .maintaining, .toppingUp, .discharging, .heatBlocked, .sleepProtected, .controlDisabled:
             recordHistorySample(info)
         case .externalDrift(_, .maintaining):
             recordHistorySample(info)
-        case .idle, .transitioning, .controlDisabled, .failed, .externalDrift:
+        case .failed where isChargeControlUnsupported:
+            recordHistorySample(info)
+        case .idle, .transitioning, .failed, .externalDrift:
             break
         }
     }
 
     private func recordHistorySample(_ info: BatteryInfo) {
-        guard let history, let limit = historyLimitForRecording() else {
+        guard let history, case .record(let limit) = historyRecordingTarget() else {
             stopHistoryHeartbeat()
             return
         }
@@ -328,7 +409,9 @@ extension ChargeController {
 
     private func scheduleHistoryHeartbeat() {
         historyHeartbeatTimer?.invalidate()
-        guard history != nil, historyLimitForRecording() != nil, !isShuttingDown else {
+        guard history != nil,
+              case .record = historyRecordingTarget(),
+              !isShuttingDown else {
             historyHeartbeatTimer = nil
             return
         }
@@ -356,30 +439,35 @@ extension ChargeController {
 
     func processBatteryInfo(_ info: BatteryInfo) {
         recordHistorySample(info)
-        if settings.heatProtectionEnabled {
+        if readiness == .ready, settings.heatProtectionEnabled {
             evaluateHeatProtection(using: info)
         } else {
+            let maxAge: TimeInterval = settings.heatProtectionEnabled ? 15 : 60
             publishSafetyTemperature(
-                smc: recentSMCTemperature(),
+                smc: recentSMCTemperature(maxAge: maxAge),
                 ioKit: info.temperature,
                 failures: smcTemperatureFailure.map { [$0] } ?? []
             )
             clearSensorError()
-            if case .heatBlocked(let previous) = mode {
-                restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
-            } else if case .failed(let previous?, _, .heatProtection) = mode {
-                restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
+            if readiness == .ready {
+                if case .heatBlocked(let previous) = mode {
+                    restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
+                } else if case .failed(let previous?, _, .heatProtection) = mode {
+                    restoreAfterHeatProtection(previous: previous, requiresSafeTemperature: false)
+                }
             }
         }
 
-        applyLongRunningProgressDecision(
-            LongRunningChargePolicy.progress(
-                mode: mode,
-                currentCharge: info.currentCharge
-            ),
-            batteryMeasurementAvailable: true
-        )
-        updateLED()
+        if readiness == .ready {
+            applyLongRunningProgressDecision(
+                LongRunningChargePolicy.progress(
+                    mode: mode,
+                    currentCharge: info.currentCharge
+                ),
+                batteryMeasurementAvailable: true
+            )
+            updateLED()
+        }
     }
 
     func setSleepChargingStrategy(_ strategy: SleepChargingStrategy) {

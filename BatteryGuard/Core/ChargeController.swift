@@ -466,6 +466,7 @@ final class ChargeController: ObservableObject {
     var wakeFallbackObserver: NSObjectProtocol?
     var chargeLimitDebounceWork: DispatchWorkItem?
     var isShuttingDown = false
+    var isObservationActive = false
     var initializationInProgress = false
     var initializationFailureContext: InitializationFailureContext?
     var initializationCompletionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -534,6 +535,7 @@ final class ChargeController: ObservableObject {
             ? max(Self.minimumHistoryHeartbeatInterval, historyHeartbeatInterval)
             : Self.defaultHistoryHeartbeatInterval
         self.readiness = initialReadiness
+        self.isObservationActive = initialReadiness == .ready
         self.backendAvailableForShutdown = initialReadiness == .ready
         self.initializationHardwareMutationAttempted = initialReadiness == .ready
         self.mode = initialMode ?? (initialReadiness == .ready
