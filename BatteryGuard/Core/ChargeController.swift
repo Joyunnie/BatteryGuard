@@ -79,6 +79,7 @@ final class ChargeController: ObservableObject {
 
     enum InitializationFailureContext {
         case retryInitialization
+        case unsupportedControlCapability(String)
         case verifyControl(ReconciledChargeExpectation, BatteryControlOwnership)
         case inspectHardware
     }
@@ -93,6 +94,7 @@ final class ChargeController: ObservableObject {
     let history: BatteryHistory?
     let diagnostics: DiagnosticLog
     let systemPowerObserver: SystemPowerObserving
+    let systemChargeLimitReader: SystemChargeLimitReading
     let runsSystemPowerObservation: Bool
     let reconciliationInterval: TimeInterval
     let smcTemperatureSamplingInterval: TimeInterval
@@ -113,8 +115,43 @@ final class ChargeController: ObservableObject {
     @Published var sleepProtectionState: SleepChargingProtectionState
     @Published var issues: [BatteryIssue] = []
     @Published var safetyTemperatureSnapshot: SafetyTemperatureSnapshot = .unavailable
+    @Published var controlCapabilities: ChargeControlCapabilities = .full
+    @Published var nativeChargeLimitStatus: SystemChargeLimitStatus = .unavailable
 
     var isReady: Bool { readiness == .ready }
+    var isChargeControlUnsupported: Bool { !controlCapabilities.chargeControl.isSupported }
+    var monitoringHeatWarningMessage: String? {
+        guard isBatteryControlDisabled || isChargeControlUnsupported,
+              settings.monitoringHeatAlertEnabled,
+              let temperature = safetyTemperatureSnapshot.value,
+              temperature > settings.heatProtectionThreshold else {
+            return nil
+        }
+        return String(
+            format: "배터리 온도가 높습니다 (%.1f°C · 경고 임계 %.0f°C). 충전이나 고부하 작업을 잠시 확인하세요.",
+            temperature,
+            settings.heatProtectionThreshold
+        )
+    }
+    var canDisableBatteryGuardControl: Bool {
+        guard !isShuttingDown,
+              !initializationInProgress,
+              activeOperationID == nil,
+              !isReconcilingExternalState else { return false }
+        if isReady {
+            return (!hasExternalControlDrift || isReleasedControlDrift)
+                && (!isBatteryControlDisabled || isReleasedControlDrift)
+        }
+        if case .failed = readiness, backendAvailableForShutdown {
+            switch settings.batteryControlOwnership {
+            case .batteryGuard, .releasing:
+                return true
+            case .system:
+                return false
+            }
+        }
+        return false
+    }
     var isCommandPending: Bool {
         if isReconcilingExternalState { return true }
         if activeOperationID != nil { return true }
@@ -239,8 +276,10 @@ final class ChargeController: ObservableObject {
                 return "초기 제어 명령 뒤 상태 확인이 실패했습니다. 하드웨어를 변경하지 않고 다시 확인할 수 있습니다."
             case .retryInitialization:
                 return "초기화가 완료되지 않았습니다. 원인을 확인한 뒤 초기화를 다시 시도할 수 있습니다."
+            case .unsupportedControlCapability(let reason):
+                return "\(reason) BatteryGuard 제어를 끄고 macOS Charge Limit(모니터링 전용)로 전환할 수 있습니다."
             case .inspectHardware:
-                return "초기 제어 명령 결과가 불확실합니다. 하드웨어 상태를 점검해야 합니다."
+                return "초기 제어 명령 결과가 불확실합니다. 하드웨어 상태를 다시 확인하거나 모니터링 전용으로 전환할 수 있습니다."
             }
         }
         guard case .failed(let previous?, _, let disposition) = mode else { return nil }
@@ -272,7 +311,8 @@ final class ChargeController: ObservableObject {
             requiresManualRecovery: manualInterventionRecoveryDescription != nil,
             ownership: settings.batteryControlOwnership,
             readiness: readiness,
-            activity: monitor.currentChargingActivity
+            activity: monitor.currentChargingActivity,
+            controlCapabilities: controlCapabilities
         )
     }
     var manualRecoveryObservedDescription: String? {
@@ -284,11 +324,8 @@ final class ChargeController: ObservableObject {
         guard manualInterventionRecoveryDescription != nil else {
             return .denied("다시 확인할 수동 복구 상태가 없습니다.")
         }
-        if case .inspectHardware = initializationFailureContext {
-            return .denied("명령 실패 결과가 불확실합니다. 실제 하드웨어 상태를 먼저 점검하세요.")
-        }
         if !isReady, case .failed = readiness {
-            // Failed initialization owns its own read-only verification path.
+            // Failed initialization owns its own read-only verification/retry path.
         } else if !isReady {
             return .denied("초기화가 진행 중입니다.")
         }
@@ -444,6 +481,7 @@ final class ChargeController: ObservableObject {
     var wakeFallbackObserver: NSObjectProtocol?
     var chargeLimitDebounceWork: DispatchWorkItem?
     var isShuttingDown = false
+    var isObservationActive = false
     var initializationInProgress = false
     var initializationFailureContext: InitializationFailureContext?
     var initializationCompletionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -486,6 +524,9 @@ final class ChargeController: ObservableObject {
         historyHeartbeatInterval: TimeInterval = 15 * 60,
         diagnostics: DiagnosticLog = .disabled,
         systemPowerObserver: SystemPowerObserving = SystemPowerObserver(),
+        systemChargeLimitReader: SystemChargeLimitReading = AppRuntime.isRunningTests
+            ? InertSystemChargeLimitReader()
+            : PMSetSystemChargeLimitReader(),
         runsSystemPowerObservation: Bool = !AppRuntime.isRunningTests,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -497,6 +538,7 @@ final class ChargeController: ObservableObject {
         self.history = history
         self.diagnostics = diagnostics
         self.systemPowerObserver = systemPowerObserver
+        self.systemChargeLimitReader = systemChargeLimitReader
         self.runsSystemPowerObservation = runsSystemPowerObservation
         self.now = now
         self.reconciliationInterval = reconciliationInterval.isFinite
@@ -512,6 +554,7 @@ final class ChargeController: ObservableObject {
             ? max(Self.minimumHistoryHeartbeatInterval, historyHeartbeatInterval)
             : Self.defaultHistoryHeartbeatInterval
         self.readiness = initialReadiness
+        self.isObservationActive = initialReadiness == .ready
         self.backendAvailableForShutdown = initialReadiness == .ready
         self.initializationHardwareMutationAttempted = initialReadiness == .ready
         self.mode = initialMode ?? (initialReadiness == .ready

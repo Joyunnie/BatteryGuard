@@ -22,29 +22,46 @@ extension SMCKit {
             displayName: "SMC binary"
         )
         rawSMCAvailable = true
-        if let temperatureReaderPath {
-            do {
-                temperatureReaderExecutableIdentity = try validateTemperatureReaderBeforeUse(
-                    path: temperatureReaderPath
-                )
-                bundledTemperatureReaderState = .untested
-            } catch {
-                temperatureReaderExecutableIdentity = nil
-                bundledTemperatureReaderState = .incompatible(error.localizedDescription)
-                await diagnostics.record(
-                    DiagnosticEvent(
-                        category: .sensor,
-                        operation: "validate bundled SMC temperature reader",
-                        outcome: .failed,
-                        message: error.localizedDescription
-                    )
-                )
-            }
-        }
+        await validateBundledTemperatureReaderIfNeeded()
 
         try await validateBatteryCLIVersionUnlocked()
-        _ = try await readControlStatusUntilSettled(target: "preflight") { _ in true }
-        print("[SMCKit] battery CLI and SMC binary ready")
+        let preflightStatus = try await readControlStatusUntilSettled(target: "preflight") { _ in true }
+        probedCapabilities = Self.inferCapabilities(
+            from: preflightStatus,
+            rawSMCAvailable: rawSMCAvailable
+        )
+        print("[SMCKit] battery CLI and SMC binary ready (chargeControl: \(probedCapabilities.chargeControl.isSupported))")
+    }
+
+    private static func inferCapabilities(
+        from status: BatteryControlStatus,
+        rawSMCAvailable: Bool
+    ) -> ChargeControlCapabilities {
+        if status.charging == .unknown {
+            return .unsupportedChargeControl(
+                reason: "현재 macOS/하드웨어에서 SMC 충전 제어 키를 읽을 수 없습니다 (status_csv: charging=unknown).",
+                forceDischarge: status.isDischarging != nil,
+                batteryTemperature: true,
+                magSafeLED: rawSMCAvailable,
+                cliAvailable: true
+            )
+        }
+        if status.isDischarging == nil {
+            return .unsupportedChargeControl(
+                reason: "현재 macOS/하드웨어에서 SMC 방전 제어 상태를 읽을 수 없습니다 (status_csv: discharging=unknown).",
+                forceDischarge: false,
+                batteryTemperature: true,
+                magSafeLED: rawSMCAvailable,
+                cliAvailable: true
+            )
+        }
+        return ChargeControlCapabilities(
+            chargeControl: .supported,
+            forceDischarge: true,
+            batteryTemperature: true,
+            magSafeLED: rawSMCAvailable,
+            cliAvailable: true
+        )
     }
 
     private func validateExecutableBeforeUse(
@@ -106,6 +123,31 @@ extension SMCKit {
         }
         if expectedType == S_IFREG, metadata.st_mode & S_IXUSR == 0 {
             throw BatteryError.preflightFailed("\(displayName) is not owner-executable: \(path)")
+        }
+    }
+
+    func validateBundledTemperatureReaderIfNeeded() async {
+        guard let temperatureReaderPath,
+              temperatureReaderExecutableIdentity == nil,
+              bundledTemperatureReaderState == .untested else {
+            return
+        }
+        do {
+            temperatureReaderExecutableIdentity = try validateTemperatureReaderBeforeUse(
+                path: temperatureReaderPath
+            )
+            bundledTemperatureReaderState = .untested
+        } catch {
+            temperatureReaderExecutableIdentity = nil
+            bundledTemperatureReaderState = .incompatible(error.localizedDescription)
+            await diagnostics.record(
+                DiagnosticEvent(
+                    category: .sensor,
+                    operation: "validate bundled SMC temperature reader",
+                    outcome: .failed,
+                    message: error.localizedDescription
+                )
+            )
         }
     }
 

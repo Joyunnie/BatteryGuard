@@ -6,7 +6,9 @@ extension SMCKit {
     // MARK: - Battery temperature
 
     func readBatteryTemperature() async throws -> BatteryTemperatureSample {
-        guard rawSMCAvailable else {
+        await validateBundledTemperatureReaderIfNeeded()
+        let hasBundledReader = temperatureReaderPath != nil && temperatureReaderExecutableIdentity != nil
+        guard hasBundledReader || rawSMCAvailable else {
             throw BatteryError.unsupported("Raw SMC binary is unavailable; battery temperature cannot be read")
         }
         let startedAt = DispatchTime.now().uptimeNanoseconds
@@ -80,6 +82,10 @@ extension SMCKit {
                     )
                 )
             }
+        }
+
+        guard rawSMCAvailable else {
+            throw BatteryError.unsupported("Bundled SMC temperature reader failed and raw SMC binary is unavailable")
         }
 
         try revalidateExecutableIdentity(

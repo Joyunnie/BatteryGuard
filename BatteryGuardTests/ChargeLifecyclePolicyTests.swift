@@ -218,6 +218,30 @@ final class ChargeLifecyclePolicyTests: XCTestCase {
                 restoreLimit: 80
             )
         )
+
+        let unknownChargingReleased = BatteryControlStatus(
+            charging: .unknown,
+            isDischarging: false,
+            maintainLevel: 80,
+            maintainWorker: .stopped
+        )
+        XCTAssertThrowsError(
+            try ChargeShutdownPlanner.verifiedPolicy(
+                requested: .preserveReleasedControl,
+                status: unknownChargingReleased,
+                restoreLimit: 80,
+                capabilities: .full
+            )
+        )
+        XCTAssertEqual(
+            try ChargeShutdownPlanner.verifiedPolicy(
+                requested: .preserveReleasedControl,
+                status: unknownChargingReleased,
+                restoreLimit: 80,
+                capabilities: .unsupportedChargeControl(reason: "CHTE unavailable")
+            ),
+            .preserveReleasedControl
+        )
     }
 
     private func requestedPolicy(for mode: ChargeMode) throws -> ChargeShutdownPolicy {

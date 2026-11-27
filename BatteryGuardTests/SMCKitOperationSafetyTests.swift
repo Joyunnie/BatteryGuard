@@ -1696,4 +1696,84 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             .map(String.init)
         XCTAssertEqual(commands, ["status_csv"])
     }
+
+    func testPreflightDetectsUnknownChargingAsUnsupportedCapabilityAndAllowsControlRelease() async throws {
+        let commandLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-unsupported-capability-\(UUID().uuidString).log")
+        let batteryFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            printf '%s\n' "$*" >> \(shellQuote(commandLog.path))
+            if [[ "$1" == "status_csv" ]]; then
+              echo "92,4:25,unknown,not discharging,80"
+            fi
+            """
+        )
+        let smcFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            exit 0
+            """
+        )
+        defer {
+            try? FileManager.default.removeItem(at: batteryFixture)
+            try? FileManager.default.removeItem(at: smcFixture)
+            try? FileManager.default.removeItem(at: commandLog)
+        }
+        let backend = SMCKit(
+            batteryPath: batteryFixture.path,
+            smcBinaryPath: smcFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        try await backend.open()
+        let capabilities = await backend.capabilities()
+        XCTAssertFalse(capabilities.chargeControl.isSupported)
+        XCTAssertTrue(capabilities.forceDischarge)
+
+        do {
+            try await backend.applyMaintain(level: 80)
+            XCTFail("Expected applyMaintain to fail immediately when charge control is unsupported")
+        } catch let error as BatteryError {
+            guard case .unsupportedControlCapability = error else {
+                return XCTFail("Expected unsupportedControlCapability, received \(error)")
+            }
+        }
+
+        try await backend.releaseBatteryGuardControl()
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+            .split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+        XCTAssertFalse(commands.contains("maintain 80"))
+        XCTAssertTrue(commands.contains("maintain stop"))
+        XCTAssertTrue(commands.contains("remove_daemon"))
+    }
+
+    func testBundledTemperatureReaderWorksWithoutOpeningPrivilegedBatteryCLI() async throws {
+        let readerFixture = try makeExecutableFixture(
+            """
+            #!/bin/bash
+            echo "TB0T [flt ] 28.5 (bytes 00 00 e4 41)"
+            echo "TB1T [flt ] 31.0 (bytes 00 00 f8 41)"
+            echo "TB2T [flt ] 30.25 (bytes 00 00 f2 41)"
+            """
+        )
+        let missingBattery = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-missing-cli-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: readerFixture)
+        }
+        let backend = SMCKit(
+            batteryPath: missingBattery.path,
+            smcBinaryPath: missingBattery.path,
+            temperatureReaderPath: readerFixture.path,
+            maintainWorkerProbe: { _, _ in .stopped },
+            executableTrustPolicy: .testFixture
+        )
+
+        let sample = try await backend.readBatteryTemperature()
+        XCTAssertEqual(sample.maximum, 31.0)
+        XCTAssertTrue(sample.hasCompleteCoverage)
+    }
 }

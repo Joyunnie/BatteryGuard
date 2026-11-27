@@ -335,6 +335,47 @@ final class ChargeStateTests: XCTestCase {
         XCTAssertEqual(system.controlOwnership.tone, .info)
     }
 
+    func testControlOwnershipPresentationShowsUnsupportedChargeControl() {
+        let presentation = BatteryPresentation.make(
+            info: makeBatteryInfo(),
+            connection: .stable(.disconnected),
+            mode: .failed(previous: nil, message: "CHTE unavailable", disposition: .manualIntervention),
+            chargeState: .unknown,
+            requiresManualRecovery: true,
+            ownership: .batteryGuard(lastLimit: 80),
+            readiness: .failed("CHTE unavailable"),
+            controlCapabilities: .unsupportedChargeControl(reason: "CHTE unavailable")
+        )
+
+        XCTAssertEqual(presentation.statusTitle, "SMC 충전 제어 미지원")
+        XCTAssertEqual(presentation.tone, .warning)
+        XCTAssertEqual(presentation.controlOwnership.title, "SMC 충전 제어 미지원 · 모니터링 전환 필요")
+        XCTAssertEqual(presentation.controlOwnership.tone, .warning)
+    }
+
+    func testPMSetSystemChargeLimitParserHandlesCommonOutputs() {
+        XCTAssertEqual(
+            PMSetSystemChargeLimitReader.parse(output: "No battery level limits set\n"),
+            .notSet
+        )
+        XCTAssertEqual(
+            PMSetSystemChargeLimitReader.parse(output: "Battery Charge Limit: 80%\n"),
+            .limited(80)
+        )
+        XCTAssertEqual(
+            PMSetSystemChargeLimitReader.parse(output: "Charge Limit = 85"),
+            .limited(85)
+        )
+        XCTAssertEqual(
+            PMSetSystemChargeLimitReader.parse(output: "unexpected text without percentage"),
+            .unavailable
+        )
+        XCTAssertEqual(
+            PMSetSystemChargeLimitReader.parse(output: "Charge Limit: 5%"),
+            .unavailable
+        )
+    }
+
     func testIssueRegistryOrdersBySeverityThenRecency() {
         var registry = BatteryIssueRegistry()
         let start = Date(timeIntervalSince1970: 100)

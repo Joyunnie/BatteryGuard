@@ -193,10 +193,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.terminationTask = nil
                 let alert = NSAlert()
                 alert.messageText = "안전한 종료 실패"
-                alert.informativeText = "\(error.localizedDescription)\n\n배터리 제어 상태를 확인하기 위해 앱을 종료하지 않았습니다."
+                alert.informativeText = "\(error.localizedDescription)\n\n배터리 제어 상태를 확인하기 위해 자동 종료를 보류했습니다. 상태를 먼저 확인하거나, 위험을 이해하고 강제로 종료할 수 있습니다."
                 alert.alertStyle = .critical
-                alert.runModal()
-                sender.reply(toApplicationShouldTerminate: false)
+                alert.addButton(withTitle: "취소")
+                let forceQuitButton = alert.addButton(withTitle: "강제 종료")
+                forceQuitButton.hasDestructiveAction = true
+                let response = alert.runModal()
+                if response == .alertSecondButtonReturn {
+                    ChargeController.shared.forceLocalShutdownForManualEscape()
+                    await BatteryMonitor.shared.flushObservationDiagnostics()
+                    await DiagnosticLog.shared.flushPendingEvents()
+                    self.terminationApproved = true
+                    sender.reply(toApplicationShouldTerminate: true)
+                } else {
+                    sender.reply(toApplicationShouldTerminate: false)
+                }
             }
         }
         return .terminateLater

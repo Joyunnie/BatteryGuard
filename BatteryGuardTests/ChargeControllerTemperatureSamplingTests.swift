@@ -394,4 +394,153 @@ extension ChargeControllerSafetyTests {
         XCTAssertFalse(backend.operations.contains("disable-charging"))
         try await controller.shutdown()
     }
+
+    func testObservationPlaneKeepsTemperatureAndHistoryAliveWhenControlCapabilityIsUnsupported() async throws {
+        let history = BatteryHistory(inMemory: true)
+        let historyReadiness = await history.waitUntilReady()
+        XCTAssertEqual(historyReadiness, .ready)
+
+        let backend = FakeChargeBackend()
+        backend.temperature = 33.5
+        backend.setCapabilities(
+            .unsupportedChargeControl(reason: "SMC CHTE key unavailable", batteryTemperature: true)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .unknown,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 91, temperature: 29.5) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings,
+            history: history
+        )
+
+        do { try await controller.initialize() } catch {}
+
+        let sampled = await eventually {
+            controller.safetyTemperatureSnapshot.value == 33.5
+                && controller.safetyTemperatureSnapshot.freshness == .fresh
+        }
+        XCTAssertTrue(sampled)
+        let records = history.fetchRecentHistory()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.chargePercent, 91)
+        XCTAssertNil(records.first?.chargeLimit)
+
+        try await controller.shutdown()
+    }
+
+    func testMonitoringOnlyModeRecordsHistoryAndReadsPassiveSMCTemperature() async throws {
+        let history = BatteryHistory(inMemory: true)
+        let historyReadiness = await history.waitUntilReady()
+        XCTAssertEqual(historyReadiness, .ready)
+
+        let backend = FakeChargeBackend()
+        backend.temperature = 32.0
+        backend.setCapabilities(
+            .unsupportedChargeControl(reason: "SMC CHTE key unavailable", batteryTemperature: true)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .unknown,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 88, temperature: 28.0) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        try settings.completeBatteryControlRelease(lastLimit: 80)
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings,
+            history: history
+        )
+
+        try await controller.initialize()
+
+        let sampled = await eventually {
+            controller.safetyTemperatureSnapshot.value == 32.0
+                && controller.safetyTemperatureSnapshot.sources == [.smc]
+        }
+        XCTAssertTrue(sampled)
+        let records = history.fetchRecentHistory()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.chargePercent, 88)
+        XCTAssertNil(records.first?.chargeLimit)
+        try await controller.shutdown()
+    }
+
+    func testMonitoringOnlyHeatWarningBannerAndNativeLimitHistory() async throws {
+        let history = BatteryHistory(inMemory: true)
+        let historyReadiness = await history.waitUntilReady()
+        XCTAssertEqual(historyReadiness, .ready)
+
+        let backend = FakeChargeBackend()
+        backend.temperature = 43.0
+        backend.setCapabilities(
+            .unsupportedChargeControl(reason: "SMC CHTE key unavailable", batteryTemperature: true)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .unknown,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 80, temperature: 41.5) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        try settings.completeBatteryControlRelease(lastLimit: 80)
+        settings.heatProtectionThreshold = 40.0
+        settings.monitoringHeatAlertEnabled = true
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings,
+            history: history,
+            systemChargeLimitReader: InertSystemChargeLimitReader(status: .limited(80))
+        )
+
+        try await controller.initialize()
+
+        let observed = await eventually {
+            controller.nativeChargeLimitStatus == .limited(80)
+                && controller.monitoringHeatWarningMessage != nil
+        }
+        XCTAssertTrue(observed)
+        XCTAssertTrue(controller.monitoringHeatWarningMessage?.contains("40°C") == true)
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+        XCTAssertEqual(history.fetchRecentHistory().last?.chargeLimit, 80)
+
+        settings.monitoringHeatAlertEnabled = false
+        XCTAssertNil(controller.monitoringHeatWarningMessage)
+        try await controller.shutdown()
+    }
 }

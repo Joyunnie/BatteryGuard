@@ -84,7 +84,8 @@ enum ChargeShutdownPlanner {
     static func verifiedPolicy(
         requested: ChargeShutdownPolicy,
         status: BatteryControlStatus,
-        restoreLimit: Int
+        restoreLimit: Int,
+        capabilities: ChargeControlCapabilities = .full
     ) throws -> ChargeShutdownPolicy {
         if case .preserveMaintain = requested,
            let actualLimit = status.maintainLevel,
@@ -96,7 +97,7 @@ enum ChargeShutdownPlanner {
         case .keepChargingDisabled:
             return .keepChargingDisabled
         case .preserveReleasedControl:
-            guard status.isCompatibleWithReleasedControl else {
+            guard status.isCompatibleWithReleasedControl(capabilities: capabilities) else {
                 throw ChargeShutdownPlanningError.releasedControlMismatch(status)
             }
             return .preserveReleasedControl

@@ -7,6 +7,17 @@ enum OwnedLongRunningOperationObservation: Equatable, Sendable {
 struct ChargeReconciliationSnapshot: Sendable {
     let status: BatteryControlStatus
     let ownedLongRunningOperation: OwnedLongRunningOperationObservation
+    let capabilities: ChargeControlCapabilities
+
+    init(
+        status: BatteryControlStatus,
+        ownedLongRunningOperation: OwnedLongRunningOperationObservation,
+        capabilities: ChargeControlCapabilities = .full
+    ) {
+        self.status = status
+        self.ownedLongRunningOperation = ownedLongRunningOperation
+        self.capabilities = capabilities
+    }
 }
 
 enum ChargeReconciliationPolicy {
@@ -32,7 +43,7 @@ enum ChargeReconciliationPolicy {
             return false
         case .controlReleased:
             return snapshot.ownedLongRunningOperation == .inactive &&
-                status.isCompatibleWithReleasedControl
+                status.isCompatibleWithReleasedControl(capabilities: snapshot.capabilities)
         }
     }
 

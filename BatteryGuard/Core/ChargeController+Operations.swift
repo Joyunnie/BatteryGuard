@@ -56,12 +56,13 @@ extension ChargeController {
     }
 
     func disableBatteryGuardControl() {
-        let isRetryingReleasedControlDrift = isReleasedControlDrift
-        guard isReady,
-              activeOperationID == nil,
-              !isReconcilingExternalState,
-              (!hasExternalControlDrift || isRetryingReleasedControlDrift),
-              (!isBatteryControlDisabled || isRetryingReleasedControlDrift) else { return }
+        guard canDisableBatteryGuardControl else { return }
+        let wasFailedInitialization: Bool
+        if case .failed = readiness {
+            wasFailedInitialization = true
+        } else {
+            wasFailedInitialization = false
+        }
         cancelPendingChargeLimit(reason: "BatteryGuard 제어 해제로 Charge Limit 변경이 취소됐습니다.")
         let lastLimit = effectiveChargeLimit
         let previous = mode.restorableMode
@@ -81,8 +82,10 @@ extension ChargeController {
             work: { [weak self] in
                 guard let self else { throw CancellationError() }
                 try await backend.releaseBatteryGuardControl()
+                let capabilities = await backend.capabilities()
+                self.controlCapabilities = capabilities
                 let status = try await backend.readControlStatus()
-                guard status.isVerifiedControlReleased else {
+                guard status.isVerifiedControlReleased(capabilities: capabilities) else {
                     throw BatteryError.commandFailed(
                         "release BatteryGuard control",
                         -1,
@@ -95,6 +98,15 @@ extension ChargeController {
                 guard let self else { return }
                 self.mode = .controlDisabled(lastLimit: lastLimit)
                 self.driftError = nil
+                self.commandError = nil
+                self.initializationFailureContext = nil
+                if wasFailedInitialization {
+                    do {
+                        try self.completeInitializationInfrastructure(restartMonitoring: true)
+                    } catch {
+                        self.readiness = .failed(error.localizedDescription)
+                    }
+                }
             },
             onFailure: { [weak self] error in
                 guard let self else { return }
@@ -108,6 +120,7 @@ extension ChargeController {
 
     func enableBatteryGuardControl() {
         guard isReady,
+              !isChargeControlUnsupported,
               activeOperationID == nil,
               !isReconcilingExternalState,
               case .system = settings.batteryControlOwnership,

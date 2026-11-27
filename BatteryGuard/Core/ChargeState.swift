@@ -28,7 +28,8 @@ struct ControlOwnershipPresentation: Equatable, Sendable {
         ownership: BatteryControlOwnership,
         mode: ChargeMode,
         readiness: ChargeControllerReadiness,
-        requiresManualRecovery: Bool
+        requiresManualRecovery: Bool,
+        controlCapabilities: ChargeControlCapabilities = .full
     ) -> ControlOwnershipPresentation {
         switch ownership {
         case .system:
@@ -54,6 +55,14 @@ struct ControlOwnershipPresentation: Equatable, Sendable {
             )
         case .batteryGuard:
             break
+        }
+
+        if !controlCapabilities.chargeControl.isSupported {
+            return ControlOwnershipPresentation(
+                title: "SMC 충전 제어 미지원 · 모니터링 전환 필요",
+                icon: "exclamationmark.triangle.fill",
+                tone: .warning
+            )
         }
 
         if case .failed = readiness {
@@ -133,7 +142,8 @@ struct BatteryPresentation: Equatable, Sendable {
         requiresManualRecovery: Bool,
         ownership: BatteryControlOwnership = .batteryGuard(lastLimit: 80),
         readiness: ChargeControllerReadiness = .ready,
-        activity: ChargingActivityObservation = .unavailable
+        activity: ChargingActivityObservation = .unavailable,
+        controlCapabilities: ChargeControlCapabilities = .full
     ) -> BatteryPresentation {
         // A controller safety-only read may supersede the raw half of the last
         // presentation pair. Never combine it with an older system report.
@@ -143,7 +153,8 @@ struct BatteryPresentation: Equatable, Sendable {
         var presentation = makeBase(
             info: info, connection: connection, mode: mode, chargeState: chargeState,
             requiresManualRecovery: requiresManualRecovery, ownership: ownership,
-            readiness: readiness, activity: currentActivity
+            readiness: readiness, activity: currentActivity,
+            controlCapabilities: controlCapabilities
         )
         if connection == .stable(.connected) {
             presentation.activityDetail = currentActivity.detail
@@ -159,15 +170,33 @@ struct BatteryPresentation: Equatable, Sendable {
         requiresManualRecovery: Bool,
         ownership: BatteryControlOwnership,
         readiness: ChargeControllerReadiness,
-        activity: ChargingActivityObservation
+        activity: ChargingActivityObservation,
+        controlCapabilities: ChargeControlCapabilities
     ) -> BatteryPresentation {
         let power = PowerDescription(connection)
         let controlOwnership = ControlOwnershipPresentation.make(
             ownership: ownership,
             mode: mode,
             readiness: readiness,
-            requiresManualRecovery: requiresManualRecovery
+            requiresManualRecovery: requiresManualRecovery,
+            controlCapabilities: controlCapabilities
         )
+
+        if case .batteryGuard = ownership, !controlCapabilities.chargeControl.isSupported {
+            let connectedPrefix = connection == .stable(.connected) ? "전원 연결됨 · " : ""
+            return BatteryPresentation(
+                statusTitle: "\(connectedPrefix)SMC 충전 제어 미지원",
+                statusIcon: "exclamationmark.triangle.fill",
+                menuBarIcon: "exclamationmark.triangle.fill",
+                tone: .warning,
+                showsChargingBolt: false,
+                powerIcon: power.icon,
+                powerLabel: power.label,
+                eyebrow: power.eyebrow,
+                headline: "현재 macOS에서 SMC 충전 제어를 사용할 수 없어요",
+                controlOwnership: controlOwnership
+            )
+        }
 
         if requiresManualRecovery {
             let connectedPrefix = connection == .stable(.connected) ? "전원 연결됨 · " : ""

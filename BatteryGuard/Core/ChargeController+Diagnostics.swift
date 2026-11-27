@@ -108,6 +108,9 @@ extension ChargeController {
         alsoRequiresNoPendingLimit: Bool,
         conflicts: Bool
     ) -> ChargeActionAvailability {
+        if isChargeControlUnsupported {
+            return .denied("현재 macOS에서 SMC 충전 제어를 지원하지 않습니다.")
+        }
         if !isReady { return .denied("초기화가 완료되지 않았습니다.") }
         if isCommandPending { return .denied("다른 배터리 작업이 진행 중입니다.") }
         if alsoRequiresNoPendingLimit && isChargeLimitPending {

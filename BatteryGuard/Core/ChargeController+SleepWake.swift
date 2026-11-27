@@ -291,6 +291,10 @@ extension ChargeController {
 
     private func performWakeReconciliation(generation: UInt64) async {
         guard !isShuttingDown else { return }
+        if !controlCapabilities.cliAvailable, case .controlDisabled = mode {
+            refreshNativeChargeLimit()
+            return
+        }
         await finishSleepPreparationIfNeeded()
         guard wakeReconciliationGeneration == generation, !Task.isCancelled else { return }
         activeControllerSleepRequest = nil
