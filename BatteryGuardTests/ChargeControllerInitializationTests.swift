@@ -364,6 +364,10 @@ extension ChargeControllerSafetyTests {
 
         XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("maintain:") }))
         XCTAssertTrue(controller.isChargeControlUnsupported)
+        XCTAssertEqual(
+            controller.chargeLimitAvailability.denialReason,
+            "현재 macOS에서 SMC 충전 제어를 지원하지 않습니다."
+        )
         XCTAssertTrue(controller.manualRecoveryRefreshAvailability.isAllowed)
         XCTAssertTrue(controller.canDisableBatteryGuardControl)
         XCTAssertEqual(controller.manualRecoveryRefreshTitle, "상태 다시 확인")

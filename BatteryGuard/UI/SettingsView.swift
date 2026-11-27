@@ -24,44 +24,37 @@ struct SettingsView: View {
             case .general: return "시작, LED, 진단"
             }
         }
-
-        var tint: Color {
-            switch self {
-            case .charge: return BatteryGuardPalette.accent
-            case .protection: return BatteryGuardPalette.mintInk
-            case .general: return BatteryGuardPalette.peachInk
-            }
-        }
     }
 
     @EnvironmentObject private var settings: UserSettings
     @EnvironmentObject private var controller: ChargeController
     @EnvironmentObject private var monitor: BatteryMonitor
     @State private var selection: Destination = .charge
+    @State private var hoveredDestination: Destination?
     @State private var diagnosticLogError: String?
     @State private var batterySettingsOpenError: String?
     @State private var showsDisableControlConfirmation = false
     @State private var showsEnableControlConfirmation = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
-            PastelCanvas()
+            BatteryGuardCanvas()
 
             HStack(spacing: 0) {
                 sidebar
-                    .frame(width: 200)
+                    .frame(width: 204)
 
                 Rectangle()
-                    .fill(Color.secondary.opacity(0.12))
+                    .fill(BatteryGuardPalette.border)
                     .frame(width: 1)
-                    .padding(.vertical, 18)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         pageHeader
                         selectedPage
                     }
-                    .padding(26)
+                    .padding(24)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
             }
@@ -94,6 +87,7 @@ struct SettingsView: View {
         .onAppear {
             settings.refreshLaunchAtLoginStatus()
             monitor.requestPresentationRefresh()
+            controller.refreshNativeChargeLimit()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             settings.refreshLaunchAtLoginStatus()
@@ -102,25 +96,23 @@ struct SettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 9) {
-                    Image(systemName: "leaf.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(BatteryGuardPalette.success)
-                        .frame(width: 30, height: 30)
-                        .background(BatteryGuardPalette.mint.opacity(0.16), in: RoundedRectangle(cornerRadius: 9))
-                    Text("BatteryGuard")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                }
-                Text("나만의 배터리 루틴")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 9) {
+                Image(systemName: "bolt.shield.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(BatteryGuardPalette.accent)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        BatteryGuardPalette.accent.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: BatteryGuardRadius.iconBadge, style: .continuous)
+                    )
+                Text("BatteryGuard")
+                    .font(.system(size: 14.5, weight: .bold))
+                    .lineLimit(1)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 8)
+            .padding(.top, 2)
 
-            VStack(spacing: 6) {
+            VStack(spacing: 4) {
                 ForEach(Destination.allCases) { destination in
                     sidebarButton(destination)
                 }
@@ -128,70 +120,88 @@ struct SettingsView: View {
 
             Spacer()
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("BatteryGuard")
-                    .font(.system(size: 10, weight: .semibold))
-                Text("v\(AppMetadata.version)")
-                    .font(.system(size: 9.5, design: .rounded))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 10)
+            Text("v\(AppMetadata.version)")
+                .font(.system(size: 11, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
         }
-        .padding(18)
+        .padding(16)
+        .background(BatteryGuardPalette.surface)
     }
 
     private func sidebarButton(_ destination: Destination) -> some View {
         let isSelected = selection == destination
+        let isHovered = hoveredDestination == destination
         return Button {
             selection = destination
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: destination.icon)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(isSelected ? destination.tint : Color.secondary)
-                    .frame(width: 28, height: 28)
+                    .foregroundStyle(isSelected ? BatteryGuardPalette.accent : BatteryGuardPalette.neutralInk)
+                    .frame(width: 26, height: 26)
                     .background(
-                        (isSelected ? destination.tint : Color.secondary).opacity(isSelected ? 0.14 : 0.07),
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        isSelected
+                            ? BatteryGuardPalette.accent.opacity(0.14)
+                            : BatteryGuardPalette.surfaceInset,
+                        in: RoundedRectangle(cornerRadius: BatteryGuardRadius.iconBadge, style: .continuous)
                     )
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(destination.rawValue)
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(isSelected ? .primary : .secondary)
                     Text(destination.subtitle)
-                        .font(.system(size: 9))
+                        .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
             .contentShape(Rectangle())
             .background(
-                isSelected ? destination.tint.opacity(0.10) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                sidebarRowBackground(isSelected: isSelected, isHovered: isHovered),
+                in: RoundedRectangle(cornerRadius: BatteryGuardRadius.control, style: .continuous)
             )
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            let next = hovering ? destination : (hoveredDestination == destination ? nil : hoveredDestination)
+            if reduceMotion {
+                hoveredDestination = next
+            } else {
+                withAnimation(.easeOut(duration: 0.14)) {
+                    hoveredDestination = next
+                }
+            }
+        }
         .accessibilityLabel("\(destination.rawValue) 설정")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
+    private func sidebarRowBackground(isSelected: Bool, isHovered: Bool) -> Color {
+        if isSelected { return BatteryGuardPalette.accent.opacity(0.10) }
+        if isHovered { return BatteryGuardPalette.hoverFill }
+        return .clear
+    }
+
     private var pageHeader: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(selection.rawValue)
-                .font(.system(size: 25, weight: .bold, design: .rounded))
+                .font(.system(size: 22, weight: .bold))
             Text(pageSubtitle)
-                .font(.system(size: 11.5))
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
         }
     }
 
     private var pageSubtitle: String {
         switch selection {
-        case .charge: return "충전 한도와 BatteryGuard의 제어 범위를 관리합니다."
-        case .protection: return "잠자기와 고온 상황에서도 배터리를 안전하게 지킵니다."
-        case .general: return "앱 시작 방식, MagSafe LED, 진단 정보를 관리합니다."
+        case .charge: return "충전 한도와 제어 소유권을 관리합니다."
+        case .protection: return "잠자기 충전 보호와 온도 경고를 설정합니다."
+        case .general: return "자동 실행, MagSafe LED, 진단 로그를 관리합니다."
         }
     }
 
@@ -205,78 +215,122 @@ struct SettingsView: View {
     }
 
     private var chargeSettings: some View {
-        VStack(spacing: 16) {
-            PastelCard(tint: BatteryGuardPalette.lavender) {
-                VStack(alignment: .leading, spacing: 18) {
-                    PastelSectionHeader(
-                        "충전 한도",
-                        subtitle: "20%에서 100% 사이, 5% 단위로 조절합니다.",
-                        icon: "battery.75percent",
-                        tint: BatteryGuardPalette.accent
-                    )
+        VStack(spacing: 14) {
+            if controller.isBatteryControlDisabled || controller.isChargeControlUnsupported {
+                controlOwnershipCard
 
-                    HStack(spacing: 16) {
-                        Slider(
-                            value: Binding(
-                                get: { Double(controller.displayedChargeLimit) },
-                                set: { controller.setChargeLimit(Int($0)) }
-                            ),
-                            in: 20...100,
-                            step: 5
-                        )
-                        .disabled(!controller.chargeLimitAvailability.isAllowed)
-                        .help(controller.chargeLimitAvailability.helpText(fallback: "충전 한도 변경"))
-                        .accessibilityLabel("충전 한도")
-                        .accessibilityValue("\(controller.displayedChargeLimit) 퍼센트")
-
-                        Text("\(controller.displayedChargeLimit)%")
-                            .font(.system(size: 22, weight: .bold, design: .rounded))
-                            .foregroundStyle(BatteryGuardPalette.accent)
-                            .frame(width: 60, alignment: .trailing)
-                            .contentTransition(.numericText())
-                    }
-
-                    if let denial = controller.chargeLimitAvailability.denialReason {
-                        PastelNotice(message: denial, kind: .info)
-                    }
-
-                    ChargeRecoveryStatusView(
-                        controller: controller,
-                        presentation: controller.batteryPresentation
-                    )
+                if controller.isBatteryControlDisabled && !controller.hasExternalControlDrift {
+                    nativeChargeLimitCard
                 }
+            } else {
+                batteryGuardChargeLimitCard
+                controlOwnershipCard
+
+                StatusNotice(
+                    message: "Maintain worker는 시스템 잠자기 동안 실행되지 않습니다. 잠자기 충전 보호가 이 구간을 별도로 맡습니다.",
+                    kind: .info
+                )
             }
+        }
+    }
 
-            controlOwnershipCard
+    private var nativeChargeLimitCard: some View {
+        SurfaceCard {
+            VStack(alignment: .leading, spacing: 14) {
+                SectionHeader(
+                    "macOS 충전 한도",
+                    subtitle: "시스템 설정의 Charge Limit가 충전 상한을 직접 유지합니다.",
+                    icon: "battery.75percent",
+                    tint: BatteryGuardPalette.info
+                )
 
-            PastelNotice(
-                message: "Maintain worker는 시스템 잠자기 동안 실행되지 않습니다. 잠자기 충전 보호가 이 구간을 별도로 맡습니다.",
-                kind: .info
-            )
+                StatusPill(
+                    title: controller.nativeChargeLimitStatus.summaryText,
+                    tint: BatteryGuardPalette.info,
+                    icon: "checkmark.circle.fill"
+                )
+
+                Text("충전 한도를 변경하려면 macOS 시스템 설정 > 배터리에서 Charge Limit를 조절하세요.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var batteryGuardChargeLimitCard: some View {
+        SurfaceCard {
+            VStack(alignment: .leading, spacing: 16) {
+                SectionHeader(
+                    "충전 한도",
+                    subtitle: "20%에서 100% 사이, 5% 단위로 조절합니다.",
+                    icon: "battery.75percent",
+                    tint: BatteryGuardPalette.accent
+                )
+
+                HStack(spacing: 14) {
+                    Slider(
+                        value: Binding(
+                            get: { Double(controller.displayedChargeLimit) },
+                            set: { controller.setChargeLimit(Int($0)) }
+                        ),
+                        in: 20...100,
+                        step: 5
+                    )
+                    .disabled(!controller.chargeLimitAvailability.isAllowed)
+                    .help(controller.chargeLimitAvailability.helpText(fallback: "충전 한도 변경"))
+                    .accessibilityLabel("충전 한도")
+                    .accessibilityValue("\(controller.displayedChargeLimit) 퍼센트")
+
+                    Text("\(controller.displayedChargeLimit)%")
+                        .font(.system(size: 20, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(BatteryGuardPalette.accent)
+                        .frame(width: 56, alignment: .trailing)
+                        .contentTransition(.numericText())
+                }
+
+                if let denial = controller.chargeLimitAvailability.denialReason {
+                    StatusNotice(message: denial, kind: .info)
+                }
+
+                ChargeRecoveryStatusView(
+                    controller: controller,
+                    presentation: controller.batteryPresentation
+                )
+            }
         }
     }
 
     private var controlOwnershipCard: some View {
         let ownership = controller.batteryPresentation.controlOwnership
-        return PastelCard(tint: ownership.tone.presentationTint) {
+        return SurfaceCard {
             VStack(alignment: .leading, spacing: 14) {
-                PastelSectionHeader(
+                SectionHeader(
                     "충전 제어 소유권",
                     subtitle: "macOS와 BatteryGuard 중 하나만 충전을 제어해야 합니다.",
                     icon: ownership.icon,
                     tint: ownership.tone.presentationTint
                 )
 
-                PastelStatusPill(
+                StatusPill(
                     title: ownership.title,
                     tint: ownership.tone.presentationTint,
                     icon: ownership.icon
                 )
 
-                Text("BatteryGuard의 Maintain, Top Up, Discharge, Heat Protection과 macOS Charge Limit를 동시에 사용하지 마세요. 단순 제한만 필요하면 BatteryGuard 제어를 끈 뒤 macOS 배터리 설정에서 Charge Limit를 사용하세요. macOS Charge Limit는 Tahoe 26.4 이상 Apple Silicon Mac에서 제공됩니다.")
-                    .font(.system(size: 10.5))
+                Text("BatteryGuard의 Maintain, Top Up, Discharge, Heat Protection과 macOS Charge Limit를 동시에 사용하지 마세요. 단순 충전 제한만 필요하면 BatteryGuard 제어를 끄고 macOS 배터리 설정에서 Charge Limit를 사용하세요. macOS Charge Limit는 Tahoe 26.4 이상 Apple Silicon Mac에서 제공됩니다.")
+                    .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if controller.isChargeControlUnsupported && !controller.isBatteryControlDisabled {
+                    ChargeRecoveryStatusView(
+                        controller: controller,
+                        presentation: controller.batteryPresentation,
+                        titleOverride: "SMC 충전 제어 불가"
+                    )
+                }
 
                 HStack(spacing: 10) {
                     if controller.isBatteryControlDisabled {
@@ -284,11 +338,13 @@ struct SettingsView: View {
                             Button("제어 해제 다시 시도") {
                                 controller.disableBatteryGuardControl()
                             }
+                            .buttonStyle(.borderedProminent)
                             .disabled(!controller.canDisableBatteryGuardControl)
                         } else {
                             Button("BatteryGuard 제어 켜기") {
                                 showsEnableControlConfirmation = true
                             }
+                            .buttonStyle(.bordered)
                             .disabled(
                                 !controller.isReady
                                     || controller.isCommandPending
@@ -299,35 +355,37 @@ struct SettingsView: View {
                                     ?? "BatteryGuard 충전 제어를 켭니다."
                             )
                         }
-                    } else {
+                    } else if !controller.isChargeControlUnsupported {
                         Button("BatteryGuard 제어 끄기", role: .destructive) {
                             showsDisableControlConfirmation = true
                         }
+                        .buttonStyle(.bordered)
                         .disabled(!controller.canDisableBatteryGuardControl)
                     }
 
                     Button("macOS 배터리 설정 열기") {
                         openBatterySettings()
                     }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
 
                 if let batterySettingsOpenError {
-                    PastelNotice(message: batterySettingsOpenError, kind: .critical)
+                    StatusNotice(message: batterySettingsOpenError, kind: .critical)
                 }
             }
         }
     }
 
     private var protectionSettings: some View {
-        VStack(spacing: 16) {
-            PastelCard(tint: BatteryGuardPalette.sky) {
-                VStack(alignment: .leading, spacing: 16) {
-                    PastelSectionHeader(
+        let controlUnavailable = controller.isBatteryControlDisabled || controller.isChargeControlUnsupported
+        return VStack(spacing: 14) {
+            SurfaceCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    SectionHeader(
                         "잠자기 충전 보호",
                         subtitle: "Mac이 잠들기 직전에 충전 비활성을 검증합니다.",
                         icon: "moon.zzz.fill",
-                        tint: BatteryGuardPalette.skyInk
+                        tint: BatteryGuardPalette.info
                     )
 
                     HStack {
@@ -347,33 +405,33 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         .frame(width: 180)
-                        .disabled(controller.isBatteryControlDisabled || controller.isCommandPending)
+                        .disabled(controlUnavailable || controller.isCommandPending)
                     }
 
                     if let description = controller.sleepProtectionState.userDescription {
-                        PastelNotice(
+                        StatusNotice(
                             message: description,
                             kind: sleepProtectionNoticeKind
                         )
                     }
 
                     Text("잠자기 직전에 Top Up과 Discharge를 중단하고 충전 비활성을 검증합니다. 실제 Mac에서 동작을 확인한 뒤 활성화하세요. 시스템이 이미 잠자기를 시작한 뒤에는 실패를 되돌릴 수 없습니다.")
-                        .font(.system(size: 10.5))
+                        .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            PastelCard(tint: BatteryGuardPalette.peach) {
-                VStack(alignment: .leading, spacing: 16) {
-                    PastelSectionHeader(
+            SurfaceCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    SectionHeader(
                         "열 보호",
                         subtitle: "고온 충전이 지속되지 않도록 독립 센서로 감시합니다.",
                         icon: "thermometer.sun.fill",
-                        tint: BatteryGuardPalette.peachInk
+                        tint: BatteryGuardPalette.warning
                     )
 
-                    if controller.isBatteryControlDisabled || controller.isChargeControlUnsupported {
+                    if controlUnavailable {
                         Toggle(
                             "고온 경고 배너 표시 (모니터링 전용)",
                             isOn: Binding(
@@ -392,19 +450,19 @@ struct SettingsView: View {
                         )
                     )
                     .toggleStyle(.switch)
-                    .disabled(controller.isBatteryControlDisabled || controller.isChargeControlUnsupported)
+                    .disabled(controlUnavailable)
 
                     if settings.heatProtectionEnabled
-                        || ((controller.isBatteryControlDisabled || controller.isChargeControlUnsupported)
-                            && settings.monitoringHeatAlertEnabled) {
+                        || (controlUnavailable && settings.monitoringHeatAlertEnabled) {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("임계 온도")
                                     .font(.system(size: 12, weight: .medium))
                                 Spacer()
                                 Text(String(format: "%.0f°C", settings.heatProtectionThreshold))
-                                    .font(.system(size: 17, weight: .bold, design: .rounded))
-                                    .foregroundStyle(BatteryGuardPalette.peachInk)
+                                    .font(.system(size: 16, weight: .bold))
+                                    .monospacedDigit()
+                                    .foregroundStyle(BatteryGuardPalette.warning)
                             }
                             Slider(
                                 value: Binding(
@@ -420,25 +478,25 @@ struct SettingsView: View {
                     }
 
                     Text(
-                        controller.isBatteryControlDisabled || controller.isChargeControlUnsupported
+                        controlUnavailable
                             ? "모니터링 전용 모드에서는 하드웨어 충전을 직접 차단하지 않고, 안전 온도가 임계값을 넘으면 앱 내 경고 배너만 표시합니다."
                             : "배터리 온도가 임계값을 초과하면 자동으로 충전을 중단합니다. 2°C 히스테리시스를 적용해 짧은 간격의 반복 전환을 막습니다."
                     )
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
     }
 
     private var generalSettings: some View {
-        VStack(spacing: 16) {
-            PastelCard(tint: BatteryGuardPalette.lavender) {
+        VStack(spacing: 14) {
+            SurfaceCard {
                 VStack(alignment: .leading, spacing: 14) {
-                    PastelSectionHeader(
+                    SectionHeader(
                         "앱 시작",
-                        subtitle: "필요할 때 자동으로 BatteryGuard를 준비합니다.",
+                        subtitle: "로그인 시 앱 자동 실행을 설정합니다.",
                         icon: "power",
                         tint: BatteryGuardPalette.accent
                     )
@@ -451,21 +509,22 @@ struct SettingsView: View {
                     )
                     .toggleStyle(.switch)
                     Text(launchAtLoginDescription)
-                        .font(.system(size: 10.5))
+                        .font(.system(size: 11.5))
                         .foregroundStyle(settings.launchAtLoginState == .requiresApproval ? BatteryGuardPalette.warning : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let error = settings.launchAtLoginError {
-                        PastelNotice(message: error, kind: .critical)
+                        StatusNotice(message: error, kind: .critical)
                     }
                 }
             }
 
-            PastelCard(tint: BatteryGuardPalette.mint) {
+            SurfaceCard {
                 VStack(alignment: .leading, spacing: 14) {
-                    PastelSectionHeader(
+                    SectionHeader(
                         "MagSafe LED",
-                        subtitle: "케이블의 작은 불빛으로 현재 상태를 알립니다.",
+                        subtitle: "MagSafe 3 케이블 표시등으로 충전 상태를 표시합니다.",
                         icon: "lightbulb.led.fill",
-                        tint: BatteryGuardPalette.success
+                        tint: BatteryGuardPalette.neutralInk
                     )
                     Toggle(
                         "MagSafe LED 제어",
@@ -475,33 +534,35 @@ struct SettingsView: View {
                         )
                     )
                     .toggleStyle(.switch)
-                    .disabled(controller.isBatteryControlDisabled)
-                    Text("초록: 한도 도달  ·  주황: 충전 중  ·  점멸: 방전 중\nMagSafe 3 모델에서만 작동합니다.")
-                        .font(.system(size: 10.5))
+                    .disabled(controller.isBatteryControlDisabled || controller.isChargeControlUnsupported)
+                    Text("초록(한도 도달), 주황(충전 중), 점멸(방전 중). MagSafe 3 모델에서만 작동합니다.")
+                        .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            PastelCard(tint: BatteryGuardPalette.sky) {
+            SurfaceCard {
                 VStack(alignment: .leading, spacing: 14) {
-                    PastelSectionHeader(
+                    SectionHeader(
                         "진단",
                         subtitle: "문제가 생기면 최근 동작 기록을 확인할 수 있습니다.",
                         icon: "doc.text.magnifyingglass",
-                        tint: BatteryGuardPalette.skyInk
+                        tint: BatteryGuardPalette.neutralInk
                     )
                     Button {
                         Task { await revealDiagnosticLog() }
                     } label: {
                         Label("진단 로그 보기", systemImage: "folder")
+                            .lineLimit(1)
                     }
                     .buttonStyle(.bordered)
                     if let diagnosticLogError {
-                        PastelNotice(message: diagnosticLogError, kind: .critical)
+                        StatusNotice(message: diagnosticLogError, kind: .critical)
                     }
                     if let fileURL = DiagnosticLog.shared.fileURL {
                         Text(fileURL.path)
-                            .font(.system(size: 9.5, design: .monospaced))
+                            .font(.system(size: 10.5, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                             .lineLimit(2)
@@ -511,7 +572,7 @@ struct SettingsView: View {
         }
     }
 
-    private var sleepProtectionNoticeKind: PastelNotice.Kind {
+    private var sleepProtectionNoticeKind: StatusNotice.Kind {
         if case .unavailable = controller.sleepProtectionState { return .critical }
         return .info
     }

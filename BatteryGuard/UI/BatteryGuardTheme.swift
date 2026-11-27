@@ -1,73 +1,70 @@
 import AppKit
 import SwiftUI
 
+enum BatteryGuardRadius {
+    static let card: CGFloat = 14
+    static let control: CGFloat = 9
+    static let iconBadge: CGFloat = 8
+    static let pill: CGFloat = 999
+}
+
 enum BatteryGuardPalette {
+    // Single locked brand accent: deep pine emerald (battery/energy native, zero purple/violet).
     static let accent = adaptive(
-        light: NSColor(red: 0.42, green: 0.42, blue: 0.66, alpha: 1),
-        dark: NSColor(red: 0.69, green: 0.68, blue: 0.88, alpha: 1)
+        light: NSColor(red: 0.08, green: 0.45, blue: 0.34, alpha: 1),
+        dark: NSColor(red: 0.24, green: 0.76, blue: 0.58, alpha: 1)
     )
-    static let lavender = adaptive(
-        light: NSColor(red: 0.78, green: 0.75, blue: 0.91, alpha: 1),
-        dark: NSColor(red: 0.42, green: 0.39, blue: 0.57, alpha: 1)
-    )
-    static let mint = adaptive(
-        light: NSColor(red: 0.68, green: 0.84, blue: 0.78, alpha: 1),
-        dark: NSColor(red: 0.32, green: 0.49, blue: 0.43, alpha: 1)
-    )
-    static let peach = adaptive(
-        light: NSColor(red: 0.94, green: 0.75, blue: 0.68, alpha: 1),
-        dark: NSColor(red: 0.56, green: 0.38, blue: 0.34, alpha: 1)
-    )
-    static let butter = adaptive(
-        light: NSColor(red: 0.91, green: 0.84, blue: 0.60, alpha: 1),
-        dark: NSColor(red: 0.54, green: 0.47, blue: 0.25, alpha: 1)
-    )
-    static let sky = adaptive(
-        light: NSColor(red: 0.68, green: 0.81, blue: 0.91, alpha: 1),
-        dark: NSColor(red: 0.31, green: 0.45, blue: 0.57, alpha: 1)
-    )
-    static let lavenderInk = accent
-    static let mintInk = success
-    static let peachInk = adaptive(
-        light: NSColor(red: 0.64, green: 0.33, blue: 0.27, alpha: 1),
-        dark: NSColor(red: 0.91, green: 0.57, blue: 0.49, alpha: 1)
-    )
-    static let butterInk = warning
-    static let skyInk = adaptive(
-        light: NSColor(red: 0.27, green: 0.47, blue: 0.61, alpha: 1),
-        dark: NSColor(red: 0.48, green: 0.69, blue: 0.84, alpha: 1)
+
+    // Neutral surfaces (off-white / rich off-black, one crisp step between canvas, card, and inset).
+    static let canvas = adaptive(
+        light: NSColor(red: 0.955, green: 0.957, blue: 0.955, alpha: 1),
+        dark: NSColor(red: 0.082, green: 0.085, blue: 0.092, alpha: 1)
     )
     static let surface = adaptive(
-        light: NSColor(red: 0.99, green: 0.985, blue: 1, alpha: 0.93),
-        dark: NSColor(red: 0.13, green: 0.13, blue: 0.17, alpha: 0.94)
+        light: NSColor(red: 0.996, green: 0.996, blue: 0.995, alpha: 1),
+        dark: NSColor(red: 0.125, green: 0.130, blue: 0.140, alpha: 1)
     )
-    static let canvasTop = adaptive(
-        light: NSColor(red: 0.97, green: 0.95, blue: 0.99, alpha: 1),
-        dark: NSColor(red: 0.09, green: 0.09, blue: 0.12, alpha: 1)
-    )
-    static let canvasBottom = adaptive(
-        light: NSColor(red: 0.92, green: 0.97, blue: 0.95, alpha: 1),
-        dark: NSColor(red: 0.10, green: 0.13, blue: 0.13, alpha: 1)
+    static let surfaceInset = adaptive(
+        light: NSColor(red: 0.948, green: 0.951, blue: 0.953, alpha: 1),
+        dark: NSColor(red: 0.155, green: 0.161, blue: 0.173, alpha: 1)
     )
     static let border = adaptive(
-        light: NSColor(white: 1, alpha: 0.82),
-        dark: NSColor(white: 1, alpha: 0.10)
+        light: NSColor(white: 0, alpha: 0.085),
+        dark: NSColor(white: 1, alpha: 0.105)
     )
-    static let shadow = adaptive(
-        light: NSColor(red: 0.28, green: 0.24, blue: 0.39, alpha: 0.12),
-        dark: NSColor(white: 0, alpha: 0.28)
+    static let borderSubtle = adaptive(
+        light: NSColor(white: 0, alpha: 0.06),
+        dark: NSColor(white: 1, alpha: 0.075)
     )
-    static let danger = adaptive(
-        light: NSColor(red: 0.71, green: 0.27, blue: 0.31, alpha: 1),
-        dark: NSColor(red: 0.95, green: 0.50, blue: 0.53, alpha: 1)
+    static let topHighlight = adaptive(
+        light: NSColor(white: 1, alpha: 0),
+        dark: NSColor(white: 1, alpha: 0.06)
+    )
+    static let hoverFill = adaptive(
+        light: NSColor(white: 0, alpha: 0.045),
+        dark: NSColor(white: 1, alpha: 0.07)
+    )
+    static let neutralInk = adaptive(
+        light: NSColor(red: 0.36, green: 0.39, blue: 0.42, alpha: 1),
+        dark: NSColor(red: 0.67, green: 0.70, blue: 0.74, alpha: 1)
+    )
+
+    // Semantic status colors only (never used for random decorative variety).
+    static let success = adaptive(
+        light: NSColor(red: 0.09, green: 0.48, blue: 0.32, alpha: 1),
+        dark: NSColor(red: 0.26, green: 0.78, blue: 0.55, alpha: 1)
     )
     static let warning = adaptive(
-        light: NSColor(red: 0.58, green: 0.33, blue: 0.08, alpha: 1),
-        dark: NSColor(red: 0.94, green: 0.68, blue: 0.35, alpha: 1)
+        light: NSColor(red: 0.62, green: 0.34, blue: 0.04, alpha: 1),
+        dark: NSColor(red: 0.95, green: 0.70, blue: 0.28, alpha: 1)
     )
-    static let success = adaptive(
-        light: NSColor(red: 0.18, green: 0.44, blue: 0.33, alpha: 1),
-        dark: NSColor(red: 0.47, green: 0.78, blue: 0.64, alpha: 1)
+    static let danger = adaptive(
+        light: NSColor(red: 0.73, green: 0.18, blue: 0.21, alpha: 1),
+        dark: NSColor(red: 0.96, green: 0.44, blue: 0.47, alpha: 1)
+    )
+    static let info = adaptive(
+        light: NSColor(red: 0.14, green: 0.41, blue: 0.64, alpha: 1),
+        dark: NSColor(red: 0.42, green: 0.70, blue: 0.95, alpha: 1)
     )
 
     private static func adaptive(light: NSColor, dark: NSColor) -> Color {
@@ -78,51 +75,24 @@ enum BatteryGuardPalette {
     }
 }
 
-struct PastelCanvas: View {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
+struct BatteryGuardCanvas: View {
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [BatteryGuardPalette.canvasTop, BatteryGuardPalette.canvasBottom],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            if !reduceTransparency {
-                RadialGradient(
-                    colors: [BatteryGuardPalette.lavender.opacity(0.24), .clear],
-                    center: .topLeading,
-                    startRadius: 12,
-                    endRadius: 720
-                )
-                RadialGradient(
-                    colors: [BatteryGuardPalette.peach.opacity(0.16), .clear],
-                    center: .bottomTrailing,
-                    startRadius: 12,
-                    endRadius: 620
-                )
-            }
-        }
-        .ignoresSafeArea()
-        .accessibilityHidden(true)
+        BatteryGuardPalette.canvas
+            .ignoresSafeArea()
+            .accessibilityHidden(true)
     }
 }
 
-struct PastelCard<Content: View>: View {
-    private let tint: Color
+struct SurfaceCard<Content: View>: View {
     private let padding: CGFloat
     private let fillsAvailableHeight: Bool
     private let content: Content
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     init(
-        tint: Color = BatteryGuardPalette.lavender,
         padding: CGFloat = 20,
         fillsAvailableHeight: Bool = false,
         @ViewBuilder content: () -> Content
     ) {
-        self.tint = tint
         self.padding = padding
         self.fillsAvailableHeight = fillsAvailableHeight
         self.content = content()
@@ -131,24 +101,24 @@ struct PastelCard<Content: View>: View {
     var body: some View {
         cardContent
             .padding(padding)
-            .background {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(reduceTransparency ? BatteryGuardPalette.surface : Color.clear)
-                    if !reduceTransparency {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(.regularMaterial)
-                    }
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(tint.opacity(reduceTransparency ? 0.08 : 0.055))
-                }
+            .background(
+                BatteryGuardPalette.surface,
+                in: RoundedRectangle(cornerRadius: BatteryGuardRadius.card, style: .continuous)
+            )
+            .overlay(alignment: .top) {
+                RoundedRectangle(cornerRadius: BatteryGuardRadius.card, style: .continuous)
+                    .stroke(BatteryGuardPalette.topHighlight, lineWidth: 1)
+                    .mask(
+                        VStack(spacing: 0) {
+                            Rectangle().frame(height: 1)
+                            Spacer(minLength: 0)
+                        }
+                    )
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: BatteryGuardRadius.card, style: .continuous)
                     .stroke(BatteryGuardPalette.border, lineWidth: 1)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .shadow(color: BatteryGuardPalette.shadow, radius: 18, x: 0, y: 8)
     }
 
     @ViewBuilder
@@ -158,17 +128,23 @@ struct PastelCard<Content: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             content
+                .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
 }
 
-struct PastelSectionHeader: View {
+struct SectionHeader: View {
     let title: String
     let subtitle: String?
     let icon: String
-    let tint: Color
+    var tint: Color = BatteryGuardPalette.neutralInk
 
-    init(_ title: String, subtitle: String? = nil, icon: String, tint: Color) {
+    init(
+        _ title: String,
+        subtitle: String? = nil,
+        icon: String,
+        tint: Color = BatteryGuardPalette.neutralInk
+    ) {
         self.title = title
         self.subtitle = subtitle
         self.icon = icon
@@ -176,19 +152,22 @@ struct PastelSectionHeader: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 11) {
             Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 34, height: 34)
-                .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .frame(width: 30, height: 30)
+                .background(
+                    tint.opacity(0.11),
+                    in: RoundedRectangle(cornerRadius: BatteryGuardRadius.iconBadge, style: .continuous)
+                )
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .font(.system(size: 14.5, weight: .semibold))
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 11))
+                        .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -198,50 +177,55 @@ struct PastelSectionHeader: View {
     }
 }
 
-struct PastelStatusPill: View {
+struct StatusPill: View {
     let title: String
     let tint: Color
     var icon: String? = nil
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             if let icon {
                 Image(systemName: icon)
-                    .font(.system(size: 10, weight: .bold))
-            } else {
-                Circle().frame(width: 7, height: 7)
+                    .font(.system(size: 10, weight: .semibold))
             }
             Text(title)
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
         }
         .foregroundStyle(tint)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(tint.opacity(0.13), in: Capsule())
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4.5)
+        .background(tint.opacity(0.12), in: Capsule())
+        .overlay {
+            Capsule().stroke(tint.opacity(0.20), lineWidth: 1)
+        }
         .accessibilityElement(children: .combine)
     }
 }
 
-struct PastelMetricRow: View {
+struct MetricRow: View {
     let icon: String
     let label: String
     let value: String
-    var tint: Color = BatteryGuardPalette.accent
+    var tint: Color = BatteryGuardPalette.neutralInk
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(tint)
-                .frame(width: 26, height: 26)
-                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(width: 24, height: 24)
+                .background(
+                    BatteryGuardPalette.surfaceInset,
+                    in: RoundedRectangle(cornerRadius: BatteryGuardRadius.iconBadge, style: .continuous)
+                )
             Text(label)
-                .font(.system(size: 11))
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 8)
             Text(value)
-                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .font(.system(size: 12, weight: .semibold))
+                .monospacedDigit()
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
         }
@@ -249,7 +233,7 @@ struct PastelMetricRow: View {
     }
 }
 
-struct PastelNotice: View {
+struct StatusNotice: View {
     enum Kind {
         case info
         case warning
@@ -257,7 +241,7 @@ struct PastelNotice: View {
 
         var tint: Color {
             switch self {
-            case .info: return BatteryGuardPalette.accent
+            case .info: return BatteryGuardPalette.info
             case .warning: return BatteryGuardPalette.warning
             case .critical: return BatteryGuardPalette.danger
             }
@@ -276,17 +260,26 @@ struct PastelNotice: View {
     let kind: Kind
 
     var body: some View {
-        Label(message, systemImage: kind.icon)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(kind.tint)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(kind.tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(kind.tint.opacity(0.18), lineWidth: 1)
-            }
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: kind.icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(kind.tint)
+                .padding(.top, 1)
+            Text(message)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(11)
+        .background(
+            kind.tint.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: BatteryGuardRadius.control, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: BatteryGuardRadius.control, style: .continuous)
+                .stroke(kind.tint.opacity(0.22), lineWidth: 1)
+        }
     }
 }
 
@@ -295,8 +288,8 @@ extension BatteryPresentationTone {
         switch self {
         case .success: return BatteryGuardPalette.success
         case .warning: return BatteryGuardPalette.warning
-        case .info: return BatteryGuardPalette.skyInk
-        case .neutral: return .secondary
+        case .info: return BatteryGuardPalette.info
+        case .neutral: return BatteryGuardPalette.neutralInk
         case .danger: return BatteryGuardPalette.danger
         }
     }
