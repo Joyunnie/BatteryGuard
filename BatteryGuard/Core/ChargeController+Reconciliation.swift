@@ -24,6 +24,7 @@ extension ChargeController {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.monitor.requestPresentationRefresh()
+                self.refreshNativeChargeLimit()
                 await self.reconcileExternalState(trigger: .appActivation)
             }
         }

@@ -357,6 +357,20 @@ extension ChargeController {
         longRunningExitObservationTask = nil
     }
 
+    func refreshNativeChargeLimit() {
+        guard !isShuttingDown else { return }
+        let reader = systemChargeLimitReader
+        Task { [weak self] in
+            let status = await reader.readChargeLimit()
+            guard let self, !self.isShuttingDown else { return }
+            guard status != self.nativeChargeLimitStatus else { return }
+            self.nativeChargeLimitStatus = status
+            if case .controlDisabled = self.mode, let info = self.monitor.batteryInfo {
+                self.recordHistorySample(info)
+            }
+        }
+    }
+
     private enum HistoryRecordingTarget: Equatable {
         case skip
         case record(limit: Int?)
@@ -368,10 +382,10 @@ extension ChargeController {
         }
         if case .externalDrift = mode { return .skip }
         if case .controlDisabled = mode {
-            return .record(limit: nil)
+            return .record(limit: nativeChargeLimitStatus.limitPercent)
         }
         if case .failed = mode, isObservationActive, isChargeControlUnsupported {
-            return .record(limit: nil)
+            return .record(limit: nativeChargeLimitStatus.limitPercent)
         }
         if let limit = mode.restorableMode?.maintainLimit {
             return .record(limit: limit)

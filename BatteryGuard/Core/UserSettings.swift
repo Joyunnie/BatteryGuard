@@ -128,6 +128,9 @@ final class UserSettings: ObservableObject {
     @Published var heatProtectionEnabled: Bool {
         didSet { defaults.set(heatProtectionEnabled, forKey: "heatProtection") }
     }
+    @Published var monitoringHeatAlertEnabled: Bool {
+        didSet { defaults.set(monitoringHeatAlertEnabled, forKey: "monitoringHeatAlert") }
+    }
     var heatProtectionThreshold: Double {
         get { heatProtectionThresholdStorage }
         set {
@@ -169,6 +172,9 @@ final class UserSettings: ObservableObject {
         self.heatProtectionThresholdStorage = Self.validatedHeatProtectionThreshold(defaults.double(forKey: "heatThreshold"))
         self.launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
         self.heatProtectionEnabled = defaults.bool(forKey: "heatProtection")
+        self.monitoringHeatAlertEnabled = defaults.object(forKey: "monitoringHeatAlert") == nil
+            ? true
+            : defaults.bool(forKey: "monitoringHeatAlert")
         self.controlMagSafeLED = defaults.bool(forKey: "controlMagSafe")
         self.sleepChargingStrategy = defaults.string(forKey: "sleepChargingStrategy")
             .flatMap(SleepChargingStrategy.init(rawValue:))

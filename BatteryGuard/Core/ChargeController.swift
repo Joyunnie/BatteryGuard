@@ -94,6 +94,7 @@ final class ChargeController: ObservableObject {
     let history: BatteryHistory?
     let diagnostics: DiagnosticLog
     let systemPowerObserver: SystemPowerObserving
+    let systemChargeLimitReader: SystemChargeLimitReading
     let runsSystemPowerObservation: Bool
     let reconciliationInterval: TimeInterval
     let smcTemperatureSamplingInterval: TimeInterval
@@ -115,9 +116,23 @@ final class ChargeController: ObservableObject {
     @Published var issues: [BatteryIssue] = []
     @Published var safetyTemperatureSnapshot: SafetyTemperatureSnapshot = .unavailable
     @Published var controlCapabilities: ChargeControlCapabilities = .full
+    @Published var nativeChargeLimitStatus: SystemChargeLimitStatus = .unavailable
 
     var isReady: Bool { readiness == .ready }
     var isChargeControlUnsupported: Bool { !controlCapabilities.chargeControl.isSupported }
+    var monitoringHeatWarningMessage: String? {
+        guard isBatteryControlDisabled || isChargeControlUnsupported,
+              settings.monitoringHeatAlertEnabled,
+              let temperature = safetyTemperatureSnapshot.value,
+              temperature > settings.heatProtectionThreshold else {
+            return nil
+        }
+        return String(
+            format: "배터리 온도가 높습니다 (%.1f°C · 경고 임계 %.0f°C). 충전이나 고부하 작업을 잠시 확인하세요.",
+            temperature,
+            settings.heatProtectionThreshold
+        )
+    }
     var canDisableBatteryGuardControl: Bool {
         guard !isShuttingDown,
               !initializationInProgress,
@@ -509,6 +524,9 @@ final class ChargeController: ObservableObject {
         historyHeartbeatInterval: TimeInterval = 15 * 60,
         diagnostics: DiagnosticLog = .disabled,
         systemPowerObserver: SystemPowerObserving = SystemPowerObserver(),
+        systemChargeLimitReader: SystemChargeLimitReading = AppRuntime.isRunningTests
+            ? InertSystemChargeLimitReader()
+            : PMSetSystemChargeLimitReader(),
         runsSystemPowerObservation: Bool = !AppRuntime.isRunningTests,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -520,6 +538,7 @@ final class ChargeController: ObservableObject {
         self.history = history
         self.diagnostics = diagnostics
         self.systemPowerObserver = systemPowerObserver
+        self.systemChargeLimitReader = systemChargeLimitReader
         self.runsSystemPowerObservation = runsSystemPowerObservation
         self.now = now
         self.reconciliationInterval = reconciliationInterval.isFinite

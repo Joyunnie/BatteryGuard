@@ -490,4 +490,57 @@ extension ChargeControllerSafetyTests {
         XCTAssertNil(records.first?.chargeLimit)
         try await controller.shutdown()
     }
+
+    func testMonitoringOnlyHeatWarningBannerAndNativeLimitHistory() async throws {
+        let history = BatteryHistory(inMemory: true)
+        let historyReadiness = await history.waitUntilReady()
+        XCTAssertEqual(historyReadiness, .ready)
+
+        let backend = FakeChargeBackend()
+        backend.temperature = 43.0
+        backend.setCapabilities(
+            .unsupportedChargeControl(reason: "SMC CHTE key unavailable", batteryTemperature: true)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .unknown,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 80, temperature: 41.5) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        try settings.completeBatteryControlRelease(lastLimit: 80)
+        settings.heatProtectionThreshold = 40.0
+        settings.monitoringHeatAlertEnabled = true
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings,
+            history: history,
+            systemChargeLimitReader: InertSystemChargeLimitReader(status: .limited(80))
+        )
+
+        try await controller.initialize()
+
+        let observed = await eventually {
+            controller.nativeChargeLimitStatus == .limited(80)
+                && controller.monitoringHeatWarningMessage != nil
+        }
+        XCTAssertTrue(observed)
+        XCTAssertTrue(controller.monitoringHeatWarningMessage?.contains("40°C") == true)
+        XCTAssertFalse(backend.operations.contains("disable-charging"))
+        XCTAssertEqual(history.fetchRecentHistory().last?.chargeLimit, 80)
+
+        settings.monitoringHeatAlertEnabled = false
+        XCTAssertNil(controller.monitoringHeatWarningMessage)
+        try await controller.shutdown()
+    }
 }

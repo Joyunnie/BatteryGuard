@@ -188,3 +188,96 @@ struct BatteryControlOwnershipJournal {
         }
     }
 }
+
+enum SystemChargeLimitStatus: Equatable, Sendable {
+    case limited(Int)
+    case notSet
+    case unavailable
+
+    var limitPercent: Int? {
+        guard case .limited(let percent) = self else { return nil }
+        return percent
+    }
+
+    var summaryText: String {
+        switch self {
+        case .limited(let percent):
+            return "macOS 충전 한도 \(percent)%"
+        case .notSet:
+            return "macOS 충전 한도 미설정"
+        case .unavailable:
+            return "macOS 설정에서 관리"
+        }
+    }
+}
+
+protocol SystemChargeLimitReading: Sendable {
+    func readChargeLimit() async -> SystemChargeLimitStatus
+}
+
+struct InertSystemChargeLimitReader: SystemChargeLimitReading {
+    let status: SystemChargeLimitStatus
+
+    init(status: SystemChargeLimitStatus = .unavailable) {
+        self.status = status
+    }
+
+    func readChargeLimit() async -> SystemChargeLimitStatus {
+        status
+    }
+}
+
+final class PMSetSystemChargeLimitReader: SystemChargeLimitReading, @unchecked Sendable {
+    private let runner: BatteryCommandRunner
+
+    init(runner: BatteryCommandRunner = BatteryCommandRunner()) {
+        self.runner = runner
+    }
+
+    func readChargeLimit() async -> SystemChargeLimitStatus {
+        guard !AppRuntime.isRunningTests else { return .unavailable }
+        do {
+            let result = try await runner.run(
+                BatteryCommandRunner.Command(
+                    executable: "/usr/bin/pmset",
+                    arguments: ["-g", "battlimit"],
+                    label: "pmset -g battlimit",
+                    timeout: 2,
+                    expectedExitCodes: [0]
+                )
+            )
+            guard result.isExpectedExit else { return .unavailable }
+            return Self.parse(output: result.stdout)
+        } catch {
+            return .unavailable
+        }
+    }
+
+    static func parse(output: String) -> SystemChargeLimitStatus {
+        let normalized = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return .unavailable }
+        let lowered = normalized.lowercased()
+        if lowered.contains("no battery level limits set")
+            || lowered.contains("no limit")
+            || lowered.contains("disabled") {
+            return .notSet
+        }
+        // Parse explicit percentage or numeric limit reported by pmset -g battlimit.
+        let patterns = [
+            #"(?i)(?:charge\s*limit|battery\s*level\s*limit|limit)\s*[:=]\s*(\d{2,3})\s*%?"#,
+            #"(\d{2,3})\s*%"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(normalized.startIndex..., in: normalized)
+            if let match = regex.firstMatch(in: normalized, range: range),
+               match.numberOfRanges > 1,
+               let captureRange = Range(match.range(at: 1), in: normalized),
+               let value = Int(normalized[captureRange]),
+               ChargeControlConstraints.limitRange.contains(value) {
+                return .limited(value)
+            }
+        }
+        return .unavailable
+    }
+}

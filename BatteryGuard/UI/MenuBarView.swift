@@ -12,8 +12,12 @@ struct MenuBarView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 headerSection
-                chargeLimitSection
-                quickActions
+                if controller.isBatteryControlDisabled && !controller.hasExternalControlDrift {
+                    monitoringModeSection
+                } else {
+                    chargeLimitSection
+                    quickActions
+                }
                 statusInfo
                 bottomActions
             }
@@ -21,7 +25,10 @@ struct MenuBarView: View {
         }
         .tint(BatteryGuardPalette.accent)
         .frame(width: 344)
-        .onAppear { monitor.requestPresentationRefresh() }
+        .onAppear {
+            monitor.requestPresentationRefresh()
+            controller.refreshNativeChargeLimit()
+        }
     }
 
     private var headerSection: some View {
@@ -64,6 +71,36 @@ struct MenuBarView: View {
             }
 
             Spacer(minLength: 0)
+        }
+    }
+
+    private var monitoringModeSection: some View {
+        PastelCard(tint: BatteryGuardPalette.sky, padding: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Label("macOS 충전 제어", systemImage: "eye.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(BatteryGuardPalette.skyInk)
+                    Spacer()
+                    Text(controller.nativeChargeLimitStatus.summaryText)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(BatteryGuardPalette.skyInk)
+                }
+                Text("BatteryGuard가 실시간 전력, 안전 온도, 7일 이력을 모니터링하고 있습니다.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label("macOS 배터리 설정 열기", systemImage: "gearshape")
+                        .font(.system(size: 10.5, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
         }
     }
 
@@ -163,6 +200,10 @@ struct MenuBarView: View {
                         tint: BatteryGuardPalette.skyInk
                     )
                 }
+            }
+
+            if let heatWarning = controller.monitoringHeatWarningMessage {
+                PastelNotice(message: heatWarning, kind: .warning)
             }
 
             if controller.heatProtectionPhase != .disabled {

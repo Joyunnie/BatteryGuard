@@ -244,6 +244,7 @@ extension ChargeController {
         if restartMonitoring { monitor.startMonitoring() }
         startBatteryInfoObservation()
         updateDisplayState()
+        refreshNativeChargeLimit()
         if backendAvailableForShutdown,
            isChargeControlUnsupported,
            controlCapabilities.batteryTemperature {
@@ -275,6 +276,7 @@ extension ChargeController {
         initializationFailureContext = nil
         synchronizeLongRunningMonitoring()
         updateDisplayState()
+        refreshNativeChargeLimit()
         startSMCTemperatureLoop()
         startExternalReconciliation()
         refreshDisplayedError()

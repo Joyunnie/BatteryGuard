@@ -373,17 +373,30 @@ struct SettingsView: View {
                         tint: BatteryGuardPalette.peachInk
                     )
 
+                    if controller.isBatteryControlDisabled || controller.isChargeControlUnsupported {
+                        Toggle(
+                            "고온 경고 배너 표시 (모니터링 전용)",
+                            isOn: Binding(
+                                get: { settings.monitoringHeatAlertEnabled },
+                                set: { settings.monitoringHeatAlertEnabled = $0 }
+                            )
+                        )
+                        .toggleStyle(.switch)
+                    }
+
                     Toggle(
-                        "열 보호 활성화",
+                        "열 보호 활성화 (충전 자동 차단)",
                         isOn: Binding(
                             get: { settings.heatProtectionEnabled },
                             set: { controller.setHeatProtectionEnabled($0) }
                         )
                     )
                     .toggleStyle(.switch)
-                    .disabled(controller.isBatteryControlDisabled)
+                    .disabled(controller.isBatteryControlDisabled || controller.isChargeControlUnsupported)
 
-                    if settings.heatProtectionEnabled {
+                    if settings.heatProtectionEnabled
+                        || ((controller.isBatteryControlDisabled || controller.isChargeControlUnsupported)
+                            && settings.monitoringHeatAlertEnabled) {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("임계 온도")
@@ -406,7 +419,11 @@ struct SettingsView: View {
                         }
                     }
 
-                    Text("배터리 온도가 임계값을 초과하면 자동으로 충전을 중단합니다. 2°C 히스테리시스를 적용해 짧은 간격의 반복 전환을 막습니다.")
+                    Text(
+                        controller.isBatteryControlDisabled || controller.isChargeControlUnsupported
+                            ? "모니터링 전용 모드에서는 하드웨어 충전을 직접 차단하지 않고, 안전 온도가 임계값을 넘으면 앱 내 경고 배너만 표시합니다."
+                            : "배터리 온도가 임계값을 초과하면 자동으로 충전을 중단합니다. 2°C 히스테리시스를 적용해 짧은 간격의 반복 전환을 막습니다."
+                    )
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -36,7 +36,10 @@ struct DashboardView: View {
         }
         .tint(BatteryGuardPalette.accent)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { monitor.requestPresentationRefresh() }
+        .onAppear {
+            monitor.requestPresentationRefresh()
+            controller.refreshNativeChargeLimit()
+        }
         .task { await refreshHistory() }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
             Task { await refreshHistory() }
@@ -115,17 +118,22 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var criticalContext: some View {
-        if controller.hasExternalControlDrift
-            || controller.manualInterventionRecoveryDescription != nil {
-            ChargeRecoveryStatusView(
-                controller: controller,
-                presentation: controller.batteryPresentation
-            )
-        } else if let issue = controller.issues.first {
-            PastelNotice(
-                message: issue.message,
-                kind: issue.severity == .critical ? .critical : .warning
-            )
+        VStack(alignment: .leading, spacing: 10) {
+            if controller.hasExternalControlDrift
+                || controller.manualInterventionRecoveryDescription != nil {
+                ChargeRecoveryStatusView(
+                    controller: controller,
+                    presentation: controller.batteryPresentation
+                )
+            } else if let issue = controller.issues.first {
+                PastelNotice(
+                    message: issue.message,
+                    kind: issue.severity == .critical ? .critical : .warning
+                )
+            }
+            if let heatWarning = controller.monitoringHeatWarningMessage {
+                PastelNotice(message: heatWarning, kind: .warning)
+            }
         }
     }
 
@@ -194,7 +202,58 @@ struct DashboardView: View {
         }
     }
 
+    @ViewBuilder
     private var chargeControlCard: some View {
+        if controller.isBatteryControlDisabled && !controller.hasExternalControlDrift {
+            monitoringControlSummaryCard
+        } else {
+            activeChargeControlCard
+        }
+    }
+
+    private var monitoringControlSummaryCard: some View {
+        PastelCard(tint: BatteryGuardPalette.sky, fillsAvailableHeight: true) {
+            VStack(alignment: .leading, spacing: 16) {
+                PastelSectionHeader(
+                    "macOS 충전 제어",
+                    subtitle: "BatteryGuard는 모니터링과 7일 이력에 집중합니다.",
+                    icon: "eye.fill",
+                    tint: BatteryGuardPalette.skyInk
+                )
+
+                PastelStatusPill(
+                    title: controller.nativeChargeLimitStatus.summaryText,
+                    tint: BatteryGuardPalette.skyInk,
+                    icon: "battery.75percent"
+                )
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Label("충전 한도는 macOS 배터리 설정이 잠자기 구간까지 직접 유지합니다.", systemImage: "checkmark.circle.fill")
+                    Label("실시간 전력·안전 온도·7일 충전 흐름은 계속 기록됩니다.", systemImage: "chart.xyaxis.line")
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 0)
+
+                Button {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label("macOS 배터리 설정 열기", systemImage: "gearshape")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(BatteryGuardPalette.skyInk)
+            }
+        }
+    }
+
+    private var activeChargeControlCard: some View {
         PastelCard(tint: BatteryGuardPalette.lavender, fillsAvailableHeight: true) {
             VStack(alignment: .leading, spacing: 18) {
                 PastelSectionHeader(
