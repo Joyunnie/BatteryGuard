@@ -1747,6 +1747,7 @@ final class SMCKitOperationSafetyTests: XCTestCase {
             .map(String.init)
         XCTAssertFalse(commands.contains("maintain 80"))
         XCTAssertTrue(commands.contains("maintain stop"))
+        XCTAssertTrue(commands.contains("remove_daemon"))
     }
 
     func testBundledTemperatureReaderWorksWithoutOpeningPrivilegedBatteryCLI() async throws {

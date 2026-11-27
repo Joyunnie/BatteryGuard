@@ -27,6 +27,26 @@ extension ChargeController {
             backendAvailableForShutdown = true
             let capabilities = await backend.capabilities()
             controlCapabilities = capabilities
+            let currentFingerprint = SystemEnvironmentFingerprint.current(
+                chargeControlSupported: capabilities.chargeControl.isSupported
+            )
+            let osRegressionMessage = SystemEnvironmentFingerprint.regressionSummary(
+                previous: settings.lastEnvironmentFingerprint,
+                current: currentFingerprint
+            )
+            if let osRegressionMessage {
+                recordDiagnostic(
+                    category: .lifecycle,
+                    operation: "os capability regression detected",
+                    outcome: .drifted,
+                    message: osRegressionMessage,
+                    stateBefore: settings.lastEnvironmentFingerprint?.displayLabel,
+                    stateAfter: currentFingerprint.displayLabel
+                )
+            }
+            if currentFingerprint.chargeControlSupported || settings.lastEnvironmentFingerprint == nil {
+                settings.lastEnvironmentFingerprint = currentFingerprint
+            }
             readiness = .reconciling
             let observedStatus = try await readInitialStatusWithTransientRetry()
             monitor.startMonitoring()
@@ -71,7 +91,7 @@ extension ChargeController {
                 }
             case .batteryGuard:
                 if case .unsupported(let reason) = capabilities.chargeControl {
-                    throw BatteryError.unsupportedControlCapability(reason)
+                    throw BatteryError.unsupportedControlCapability(osRegressionMessage ?? reason)
                 }
                 guard let info = monitor.batteryInfo else {
                     throw BatteryError.unsupported("배터리 상태를 확인할 수 없어 초기 충전 상태를 안전하게 설정하지 않았습니다.")

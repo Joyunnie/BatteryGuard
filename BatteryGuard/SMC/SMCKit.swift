@@ -531,6 +531,7 @@ actor SMCKit: ChargeBackend {
                 _ = try await runner.cancelLongRunning()
                 try await terminateMaintainWorkersUnlocked()
                 _ = try await batteryCommand(["maintain", "stop"])
+                _ = try? await batteryCommand(["remove_daemon"])
                 let currentCapabilities = probedCapabilities
                 let status = try await readControlStatusUntilSettled(target: "release control") {
                     $0.isVerifiedControlReleased(capabilities: currentCapabilities)
@@ -943,7 +944,8 @@ actor SMCKit: ChargeBackend {
                     label: label,
                     timeout: timeout,
                     outputPolicy: outputPolicy,
-                    descendantPolicy: descendantPolicy
+                    descendantPolicy: descendantPolicy,
+                    expectedExitCodes: allowedExitCodes
                 )
             )
         } catch is CancellationError {

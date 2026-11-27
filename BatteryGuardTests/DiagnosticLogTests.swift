@@ -535,4 +535,68 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertEqual(permissions & 0o777, 0o700)
         XCTAssertNil(persistenceError)
     }
+
+    func testExpectedNonZeroCommandExitRemainsRoutineAndDoesNotEvictSafetyEvents() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("batteryguard-expected-exit-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("Diagnostics.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = DiagnosticLog(fileURL: fileURL, capacity: 3, routineFlushInterval: 60)
+        let runner = BatteryCommandRunner(diagnostics: log)
+
+        await log.record(
+            DiagnosticEvent(
+                timestamp: Date(timeIntervalSince1970: 0),
+                category: .lifecycle,
+                operation: "critical lifecycle event"
+            )
+        )
+        for _ in 0..<4 {
+            let result = try await runner.run(
+                .init(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "exit 1"],
+                    label: "inspect battery CLI processes",
+                    expectedExitCodes: [0, 1]
+                )
+            )
+            XCTAssertEqual(result.exitCode, 1)
+            XCTAssertTrue(result.isExpectedExit)
+        }
+        await log.flushPendingEvents()
+
+        let events = await DiagnosticLog(fileURL: fileURL, capacity: 3).recentEvents()
+        XCTAssertTrue(events.contains { $0.operation == "critical lifecycle event" })
+    }
+
+    func testEnvironmentFingerprintDetectsOSUpdateCapabilityRegression() {
+        let previous = SystemEnvironmentFingerprint(
+            osVersion: "26.6.2",
+            osBuild: "25F70",
+            chargeControlSupported: true
+        )
+        let updated = SystemEnvironmentFingerprint(
+            osVersion: "26.7.3",
+            osBuild: "25G342",
+            chargeControlSupported: false
+        )
+        let summary = SystemEnvironmentFingerprint.regressionSummary(
+            previous: previous,
+            current: updated
+        )
+        XCTAssertEqual(
+            summary,
+            "macOS 업데이트(26.6.2 (25F70) → 26.7.3 (25G342)) 이후 SMC 충전 제어 키를 사용할 수 없습니다."
+        )
+        XCTAssertNil(
+            SystemEnvironmentFingerprint.regressionSummary(
+                previous: previous,
+                current: SystemEnvironmentFingerprint(
+                    osVersion: "26.6.2",
+                    osBuild: "25F70",
+                    chargeControlSupported: false
+                )
+            )
+        )
+    }
 }

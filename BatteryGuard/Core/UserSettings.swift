@@ -316,4 +316,18 @@ final class UserSettings: ObservableObject {
         launchAtLoginState = LaunchAtLoginState(launchAtLoginService.status)
         launchAtLoginError = nil
     }
+
+    var lastEnvironmentFingerprint: SystemEnvironmentFingerprint? {
+        get {
+            guard let data = defaults.data(forKey: "lastEnvironmentFingerprint") else { return nil }
+            return try? JSONDecoder().decode(SystemEnvironmentFingerprint.self, from: data)
+        }
+        set {
+            if let newValue, let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: "lastEnvironmentFingerprint")
+            } else {
+                defaults.removeObject(forKey: "lastEnvironmentFingerprint")
+            }
+        }
+    }
 }

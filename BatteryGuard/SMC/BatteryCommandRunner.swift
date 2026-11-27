@@ -22,6 +22,31 @@ struct BatteryCommandResult: Equatable, Sendable {
     let stdoutWasTruncated: Bool
     let stderrWasTruncated: Bool
     let termination: BatteryCommandTermination
+    let isExpectedExit: Bool
+
+    init(
+        commandID: UUID,
+        operationID: UUID,
+        command: String,
+        exitCode: Int32,
+        stdout: String,
+        stderr: String,
+        stdoutWasTruncated: Bool,
+        stderrWasTruncated: Bool,
+        termination: BatteryCommandTermination,
+        isExpectedExit: Bool? = nil
+    ) {
+        self.commandID = commandID
+        self.operationID = operationID
+        self.command = command
+        self.exitCode = exitCode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.stdoutWasTruncated = stdoutWasTruncated
+        self.stderrWasTruncated = stderrWasTruncated
+        self.termination = termination
+        self.isExpectedExit = isExpectedExit ?? (termination == .exited && exitCode == 0)
+    }
 
     var combinedOutput: String {
         [stdout, stderr]
@@ -310,6 +335,7 @@ actor BatteryCommandRunner {
         let timeout: TimeInterval
         let outputPolicy: OutputPolicy
         let descendantPolicy: DescendantPolicy
+        let expectedExitCodes: Set<Int32>
 
         init(
             executable: String,
@@ -319,7 +345,8 @@ actor BatteryCommandRunner {
             operationID: UUID? = nil,
             timeout: TimeInterval = 30,
             outputPolicy: OutputPolicy = .capture,
-            descendantPolicy: DescendantPolicy = .requireProcessGroupExit
+            descendantPolicy: DescendantPolicy = .requireProcessGroupExit,
+            expectedExitCodes: Set<Int32> = [0]
         ) {
             self.executable = executable
             self.arguments = arguments
@@ -329,6 +356,7 @@ actor BatteryCommandRunner {
             self.timeout = timeout
             self.outputPolicy = outputPolicy
             self.descendantPolicy = descendantPolicy
+            self.expectedExitCodes = expectedExitCodes
         }
     }
 
@@ -1102,16 +1130,19 @@ actor BatteryCommandRunner {
         let stdout = Self.decode(child.stdoutBuffer?.snapshot())
         let stderr = Self.decode(child.stderrBuffer?.snapshot())
 
+        let exitCode = Self.exitCode(from: waitStatus)
+        let termination = requestedTermination ?? Self.termination(from: waitStatus)
         return BatteryCommandResult(
             commandID: child.id,
             operationID: child.command.operationID ?? child.id,
             command: child.command.label,
-            exitCode: Self.exitCode(from: waitStatus),
+            exitCode: exitCode,
             stdout: stdout,
             stderr: stderr,
             stdoutWasTruncated: child.stdoutBuffer?.truncationStatus() ?? false,
             stderrWasTruncated: child.stderrBuffer?.truncationStatus() ?? false,
-            termination: requestedTermination ?? Self.termination(from: waitStatus)
+            termination: termination,
+            isExpectedExit: termination == .exited && child.command.expectedExitCodes.contains(exitCode)
         )
     }
 

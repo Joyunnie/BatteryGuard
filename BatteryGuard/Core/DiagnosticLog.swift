@@ -49,6 +49,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
     let commandID: UUID?
     let operation: String
     let exitCode: Int32?
+    let isExpectedExit: Bool?
     let outcome: DiagnosticOutcome
     let message: String?
     let stateBefore: String?
@@ -65,6 +66,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         commandID: UUID? = nil,
         operation: String,
         exitCode: Int32? = nil,
+        isExpectedExit: Bool? = nil,
         outcome: DiagnosticOutcome = .succeeded,
         message: String? = nil,
         stateBefore: String? = nil,
@@ -80,6 +82,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         self.commandID = commandID
         self.operation = operation
         self.exitCode = exitCode
+        self.isExpectedExit = isExpectedExit
         self.outcome = outcome
         self.message = message.map(Self.summarize)
         self.stateBefore = stateBefore
@@ -102,6 +105,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         case commandID
         case operation
         case exitCode
+        case isExpectedExit
         case outcome
         case message
         case stateBefore
@@ -120,6 +124,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         category = try container.decode(DiagnosticCategory.self, forKey: .category)
         operation = try container.decode(String.self, forKey: .operation)
         exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode)
+        isExpectedExit = try container.decodeIfPresent(Bool.self, forKey: .isExpectedExit)
         stateBefore = try container.decodeIfPresent(String.self, forKey: .stateBefore)
         stateAfter = try container.decodeIfPresent(String.self, forKey: .stateAfter)
         sleepSettlement = try container.decodeIfPresent(
@@ -156,6 +161,7 @@ struct DiagnosticEvent: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(commandID, forKey: .commandID)
         try container.encode(operation, forKey: .operation)
         try container.encodeIfPresent(exitCode, forKey: .exitCode)
+        try container.encodeIfPresent(isExpectedExit, forKey: .isExpectedExit)
         try container.encode(outcome, forKey: .outcome)
         try container.encodeIfPresent(message, forKey: .message)
         try container.encodeIfPresent(stateBefore, forKey: .stateBefore)
@@ -209,7 +215,8 @@ private extension DiagnosticEvent {
         case .succeeded:
             return .contextual
         case .exited:
-            if exitCode != 0 || message?.isEmpty == false {
+            let expected = isExpectedExit ?? (exitCode == 0)
+            if !expected || message?.isEmpty == false {
                 return .safety
             }
             return .routine
@@ -233,12 +240,59 @@ extension DiagnosticEvent {
             commandID: result.commandID,
             operation: result.command,
             exitCode: result.exitCode,
+            isExpectedExit: result.isExpectedExit && result.exitCode != 0 ? true : nil,
             outcome: outcome,
             message: result.stderr,
             stateAfter: result.command.contains("status_csv")
                 ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
                 : nil
         )
+    }
+}
+
+struct SystemEnvironmentFingerprint: Codable, Equatable, Sendable {
+    let osVersion: String
+    let osBuild: String
+    let chargeControlSupported: Bool
+
+    var displayLabel: String {
+        osBuild.isEmpty ? osVersion : "\(osVersion) (\(osBuild))"
+    }
+
+    static func current(chargeControlSupported: Bool) -> SystemEnvironmentFingerprint {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let versionString = "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+        return SystemEnvironmentFingerprint(
+            osVersion: versionString,
+            osBuild: currentOSBuild(),
+            chargeControlSupported: chargeControlSupported
+        )
+    }
+
+    static func regressionSummary(
+        previous: SystemEnvironmentFingerprint?,
+        current: SystemEnvironmentFingerprint
+    ) -> String? {
+        guard let previous,
+              previous.chargeControlSupported,
+              !current.chargeControlSupported,
+              previous.osVersion != current.osVersion || previous.osBuild != current.osBuild else {
+            return nil
+        }
+        return "macOS 업데이트(\(previous.displayLabel) → \(current.displayLabel)) 이후 SMC 충전 제어 키를 사용할 수 없습니다."
+    }
+
+    private static func currentOSBuild() -> String {
+        var size = 0
+        guard sysctlbyname("kern.osversion", nil, &size, nil, 0) == 0, size > 0 else {
+            return ""
+        }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.osversion", &buffer, &size, nil, 0) == 0 else {
+            return ""
+        }
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }
 
