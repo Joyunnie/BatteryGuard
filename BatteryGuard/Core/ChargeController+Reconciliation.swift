@@ -546,7 +546,8 @@ extension ChargeController {
         }
         return ChargeReconciliationSnapshot(
             status: status,
-            ownedLongRunningOperation: ownedLongRunningOperation
+            ownedLongRunningOperation: ownedLongRunningOperation,
+            capabilities: controlCapabilities
         )
     }
 

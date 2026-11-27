@@ -24,6 +24,8 @@ extension ChargeController {
             try settings.requireDurableBatteryControlOwnership()
             try await backend.open()
             backendAvailableForShutdown = true
+            let capabilities = await backend.capabilities()
+            controlCapabilities = capabilities
             readiness = .reconciling
             let observedStatus = try await readInitialStatusWithTransientRetry()
             monitor.startMonitoring()
@@ -37,7 +39,7 @@ extension ChargeController {
                     initializationHardwareMutationAttempted = true
                     try await backend.releaseBatteryGuardControl()
                     let releasedStatus = try await backend.readControlStatus()
-                    guard releasedStatus.isVerifiedControlReleased else {
+                    guard releasedStatus.isVerifiedControlReleased(capabilities: capabilities) else {
                         throw BatteryError.commandFailed(
                             "resume BatteryGuard control release",
                             -1,
@@ -56,7 +58,7 @@ extension ChargeController {
             case .system(let persistedLimit):
                 let lastLimit = UserSettings.validatedChargeLimit(persistedLimit)
                 try await completeControlRelease(lastLimit: lastLimit)
-                if observedStatus.isCompatibleWithReleasedControl {
+                if observedStatus.isCompatibleWithReleasedControl(capabilities: capabilities) {
                     mode = .controlDisabled(lastLimit: lastLimit)
                 } else {
                     mode = .externalDrift(
@@ -66,6 +68,9 @@ extension ChargeController {
                     driftError = "BatteryGuard 제어는 꺼져 있지만 외부 충전 제어가 감지됐습니다."
                 }
             case .batteryGuard:
+                if case .unsupported(let reason) = capabilities.chargeControl {
+                    throw BatteryError.unsupportedControlCapability(reason)
+                }
                 guard let info = monitor.batteryInfo else {
                     throw BatteryError.unsupported("배터리 상태를 확인할 수 없어 초기 충전 상태를 안전하게 설정하지 않았습니다.")
                 }
@@ -119,7 +124,9 @@ extension ChargeController {
                     return
                 }
                 cleanupAfterFailedInitialization()
-                if !initializationHardwareMutationAttempted {
+                if case BatteryError.unsupportedControlCapability(let reason) = error {
+                    initializationFailureContext = .unsupportedControlCapability(reason)
+                } else if !initializationHardwareMutationAttempted {
                     initializationFailureContext = .retryInitialization
                 } else if let recoveryExpectation,
                           isTransientStatusFailure(error) {
@@ -208,7 +215,7 @@ extension ChargeController {
         return false
     }
 
-    private func completeInitializationInfrastructure(restartMonitoring: Bool) throws {
+    func completeInitializationInfrastructure(restartMonitoring: Bool) throws {
         guard !isShuttingDown, !Task.isCancelled else { throw CancellationError() }
         if restartMonitoring { monitor.startMonitoring() }
         startBatteryInfoObservation()
@@ -245,12 +252,11 @@ extension ChargeController {
         let expectation: ReconciledChargeExpectation
         let ownership: BatteryControlOwnership
         switch initializationFailureContext {
-        case .retryInitialization:
+        case .retryInitialization, .unsupportedControlCapability:
             do { try await initialize() } catch { /* initialize records the actionable failure */ }
             return
         case .inspectHardware:
-            commandError = "초기 제어 명령이 실패했습니다. 자동 복구 대신 실제 상태를 점검해야 합니다."
-            refreshDisplayedError()
+            await inspectHardwareAfterFailedInitialization()
             return
         case .verifyControl(let expected, let expectedOwner):
             expectation = expected
@@ -287,6 +293,65 @@ extension ChargeController {
             }
         } else {
             commandError = "현재 충전 제어 상태를 검증하지 못했습니다. 상태를 다시 확인하거나 외부 변경을 점검하세요."
+            refreshDisplayedError()
+        }
+    }
+
+    private func inspectHardwareAfterFailedInitialization() async {
+        let failedMode = mode
+        isReconcilingExternalState = true
+        defer { isReconcilingExternalState = false }
+
+        do {
+            let capabilities = await backend.capabilities()
+            controlCapabilities = capabilities
+            let status = try await backend.readControlStatus()
+            guard mode == failedMode, !isShuttingDown else { return }
+
+            if case .unsupported(let reason) = capabilities.chargeControl {
+                self.initializationFailureContext = .unsupportedControlCapability(reason)
+                if status.isCompatibleWithReleasedControl(capabilities: capabilities) {
+                    initializationHardwareMutationAttempted = false
+                }
+                commandError = nil
+                refreshDisplayedError()
+                return
+            }
+
+            if let restorable = mode.restorableMode {
+                let expectation = ChargeReconciliationPolicy.expectation(from: restorable)
+                let snapshot = ChargeReconciliationSnapshot(
+                    status: status,
+                    ownedLongRunningOperation: .notRequired,
+                    capabilities: capabilities
+                )
+                if ChargeReconciliationPolicy.status(snapshot, matches: expectation) {
+                    if settings.heatProtectionEnabled, case .maintaining = expectation {
+                        let temperature = await readFreshSafetyTemperature()
+                        guard mode == failedMode, !isShuttingDown else { return }
+                        commitFreshSafetyTemperature(temperature)
+                        guard temperature.permitsAutomaticCharging(
+                            upTo: settings.heatProtectionThreshold
+                        ) else {
+                            commandError = "독립 온도 센서 확인을 통과하지 못해 자동 복구를 승인하지 않았습니다."
+                            refreshDisplayedError()
+                            return
+                        }
+                    }
+                    mode = expectation.reconciledMode
+                    commandError = nil
+                    driftError = nil
+                    try completeInitializationInfrastructure(restartMonitoring: true)
+                    return
+                }
+            }
+
+            let observed = ChargeReconciliationPolicy.observedMode(from: status)
+            commandError = "현재 하드웨어 상태: \(observed.userDescription)"
+            refreshDisplayedError()
+        } catch {
+            guard mode == failedMode, !isShuttingDown else { return }
+            commandError = "하드웨어 상태 확인 실패: \(error.localizedDescription)"
             refreshDisplayedError()
         }
     }
@@ -501,10 +566,13 @@ extension ChargeController {
     ) async throws {
         try await backend.requestCancellation()
         let freshStatus = try await backend.readControlStatus()
+        let currentCapabilities = await backend.capabilities()
+        controlCapabilities = currentCapabilities
         let shutdownPolicy = try ChargeShutdownPlanner.verifiedPolicy(
             requested: requestedPolicy,
             status: freshStatus,
-            restoreLimit: requestedLimit
+            restoreLimit: requestedLimit,
+            capabilities: currentCapabilities
         )
         switch shutdownPolicy {
         case .preserveMaintain:
@@ -514,7 +582,9 @@ extension ChargeController {
         case .releaseControl:
             try await backend.releaseBatteryGuardControl()
             let status = try await backend.readControlStatus()
-            guard status.isVerifiedControlReleased else {
+            let updatedCapabilities = await backend.capabilities()
+            controlCapabilities = updatedCapabilities
+            guard status.isVerifiedControlReleased(capabilities: updatedCapabilities) else {
                 throw BatteryError.commandFailed(
                     "shutdown release control",
                     -1,
@@ -536,6 +606,22 @@ extension ChargeController {
                 throw BatteryError.commandFailed("shutdown heat protection", -1, "charging was not fully verified disabled")
             }
         }
+    }
+
+    func forceLocalShutdownForManualEscape() {
+        let stateBefore = mode.diagnosticLabel
+        isShuttingDown = true
+        readiness = .shuttingDown
+        prepareLocalShutdown()
+        finishLocalShutdown()
+        recordDiagnostic(
+            category: .lifecycle,
+            operation: "forced shutdown by user",
+            outcome: .succeeded,
+            message: "User confirmed forced exit after shutdown safety rejection.",
+            stateBefore: stateBefore,
+            stateAfter: readiness.diagnosticLabel
+        )
     }
 
     private func finishLocalShutdown() {

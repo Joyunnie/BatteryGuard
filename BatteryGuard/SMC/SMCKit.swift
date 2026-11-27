@@ -45,10 +45,58 @@ enum MagSafeLEDState: UInt8, Equatable, Sendable {
     case orange = 0x04
 }
 
+enum ChargeControlCapabilityState: Equatable, Sendable {
+    case supported
+    case unsupported(String)
+
+    var isSupported: Bool {
+        if case .supported = self { return true }
+        return false
+    }
+
+    var unsupportedReason: String? {
+        guard case .unsupported(let reason) = self else { return nil }
+        return reason
+    }
+}
+
+struct ChargeControlCapabilities: Equatable, Sendable {
+    let chargeControl: ChargeControlCapabilityState
+    let forceDischarge: Bool
+    let batteryTemperature: Bool
+    let magSafeLED: Bool
+    let cliAvailable: Bool
+
+    static let full = ChargeControlCapabilities(
+        chargeControl: .supported,
+        forceDischarge: true,
+        batteryTemperature: true,
+        magSafeLED: true,
+        cliAvailable: true
+    )
+
+    static func unsupportedChargeControl(
+        reason: String,
+        forceDischarge: Bool = false,
+        batteryTemperature: Bool = true,
+        magSafeLED: Bool = false,
+        cliAvailable: Bool = true
+    ) -> ChargeControlCapabilities {
+        ChargeControlCapabilities(
+            chargeControl: .unsupported(reason),
+            forceDischarge: forceDischarge,
+            batteryTemperature: batteryTemperature,
+            magSafeLED: magSafeLED,
+            cliAvailable: cliAvailable
+        )
+    }
+}
+
 enum BatteryError: Error, LocalizedError, CustomStringConvertible {
     case binaryNotFound(String)
     case invalidChargeLevel(Int)
     case unsupported(String)
+    case unsupportedControlCapability(String)
     case ownershipPersistenceFailed(String)
     case preflightFailed(String)
     case commandCancelled(String)
@@ -62,6 +110,8 @@ enum BatteryError: Error, LocalizedError, CustomStringConvertible {
         case .invalidChargeLevel(let level):
             return "Charge level must be between 20 and 100, received \(level)"
         case .unsupported(let message):
+            return message
+        case .unsupportedControlCapability(let message):
             return message
         case .ownershipPersistenceFailed(let message):
             return message
@@ -147,15 +197,39 @@ struct BatteryControlStatus: Equatable, Sendable {
     }
 
     var isVerifiedControlReleased: Bool {
-        charging == .enabled &&
-            isDischarging == false &&
-            maintainWorker.isStopped
+        isVerifiedControlReleased(capabilities: .full)
+    }
+
+    func isVerifiedControlReleased(
+        capabilities: ChargeControlCapabilities
+    ) -> Bool {
+        switch capabilities.chargeControl {
+        case .supported:
+            return charging == .enabled &&
+                isDischarging == false &&
+                maintainWorker.isStopped
+        case .unsupported:
+            return isDischarging == false &&
+                maintainWorker.isStopped
+        }
     }
 
     var isCompatibleWithReleasedControl: Bool {
-        charging != .unknown &&
-            isDischarging == false &&
-            maintainWorker.isStopped
+        isCompatibleWithReleasedControl(capabilities: .full)
+    }
+
+    func isCompatibleWithReleasedControl(
+        capabilities: ChargeControlCapabilities
+    ) -> Bool {
+        switch capabilities.chargeControl {
+        case .supported:
+            return charging != .unknown &&
+                isDischarging == false &&
+                maintainWorker.isStopped
+        case .unsupported:
+            return isDischarging == false &&
+                maintainWorker.isStopped
+        }
     }
 }
 
@@ -195,6 +269,7 @@ private extension MaintainWorkerStatus {
 
 protocol ChargeControlBackend: AnyObject, Sendable {
     func open() async throws
+    func capabilities() async -> ChargeControlCapabilities
     func readControlStatus() async throws -> BatteryControlStatus
     func applyMaintain(level: Int) async throws
     func releaseBatteryGuardControl() async throws
@@ -269,6 +344,7 @@ actor SMCKit: ChargeBackend {
     private let longRunningVerificationPollNanoseconds: UInt64 = 100_000_000
     private let longRunningOperationTimeout: TimeInterval = 12 * 60 * 60
     var rawSMCAvailable = false
+    var probedCapabilities: ChargeControlCapabilities = .full
     private var savedMagSafeLEDValue: UInt8?
     var batteryExecutableIdentity: ExecutableIdentity?
     var smcExecutableIdentity: ExecutableIdentity?
@@ -389,6 +465,16 @@ actor SMCKit: ChargeBackend {
 
     // MARK: - Verified charge operations
 
+    func capabilities() async -> ChargeControlCapabilities {
+        probedCapabilities
+    }
+
+    private func requireChargeControlSupported() throws {
+        if case .unsupported(let reason) = probedCapabilities.chargeControl {
+            throw BatteryError.unsupportedControlCapability(reason)
+        }
+    }
+
     func applyMaintain(level: Int) async throws {
         let operationID = DiagnosticContext.operationID ?? UUID()
         try await DiagnosticContext.$operationID.withValue(operationID) {
@@ -399,6 +485,7 @@ actor SMCKit: ChargeBackend {
     }
 
     private func applyMaintainUnlocked(level: Int) async throws {
+        try requireChargeControlSupported()
         try validateChargeLevel(level)
         let before = await readPreOperationStatus()
         if executableTrustPolicy == .production,
@@ -444,10 +531,11 @@ actor SMCKit: ChargeBackend {
                 _ = try await runner.cancelLongRunning()
                 try await terminateMaintainWorkersUnlocked()
                 _ = try await batteryCommand(["maintain", "stop"])
+                let currentCapabilities = probedCapabilities
                 let status = try await readControlStatusUntilSettled(target: "release control") {
-                    $0.isVerifiedControlReleased
+                    $0.isVerifiedControlReleased(capabilities: currentCapabilities)
                 }
-                guard status.isVerifiedControlReleased else {
+                guard status.isVerifiedControlReleased(capabilities: currentCapabilities) else {
                     throw BatteryError.commandFailed(
                         "release BatteryGuard control",
                         -1,
@@ -510,6 +598,7 @@ actor SMCKit: ChargeBackend {
     }
 
     private func disableChargingUnlocked() async throws {
+        try requireChargeControlSupported()
         let before = await readPreOperationStatus()
         try await terminateMaintainWorkersUnlocked()
         _ = try await batteryCommand(["charging", "off"])
@@ -530,6 +619,7 @@ actor SMCKit: ChargeBackend {
         let operationID = DiagnosticContext.operationID ?? UUID()
         try await DiagnosticContext.$operationID.withValue(operationID) {
             try await withGate(controlGate) {
+                try requireChargeControlSupported()
                 try validateChargeLevel(level)
                 let before = await readPreOperationStatus()
                 try await terminateMaintainWorkersUnlocked()
@@ -547,6 +637,7 @@ actor SMCKit: ChargeBackend {
         let operationID = DiagnosticContext.operationID ?? UUID()
         try await DiagnosticContext.$operationID.withValue(operationID) {
             try await withGate(controlGate) {
+                try requireChargeControlSupported()
                 try validateChargeLevel(level)
                 let before = await readPreOperationStatus()
                 try await terminateMaintainWorkersUnlocked()

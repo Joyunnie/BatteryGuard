@@ -284,18 +284,26 @@ struct SettingsView: View {
                             Button("제어 해제 다시 시도") {
                                 controller.disableBatteryGuardControl()
                             }
-                            .disabled(!controller.isReady || controller.isCommandPending)
+                            .disabled(!controller.canDisableBatteryGuardControl)
                         } else {
                             Button("BatteryGuard 제어 켜기") {
                                 showsEnableControlConfirmation = true
                             }
-                            .disabled(!controller.isReady || controller.isCommandPending)
+                            .disabled(
+                                !controller.isReady
+                                    || controller.isCommandPending
+                                    || controller.isChargeControlUnsupported
+                            )
+                            .help(
+                                controller.controlCapabilities.chargeControl.unsupportedReason
+                                    ?? "BatteryGuard 충전 제어를 켭니다."
+                            )
                         }
                     } else {
                         Button("BatteryGuard 제어 끄기", role: .destructive) {
                             showsDisableControlConfirmation = true
                         }
-                        .disabled(!controller.isReady || controller.isCommandPending || controller.hasExternalControlDrift)
+                        .disabled(!controller.canDisableBatteryGuardControl)
                     }
 
                     Button("macOS 배터리 설정 열기") {

@@ -329,4 +329,152 @@ extension ChargeControllerSafetyTests {
         XCTAssertNotNil(controller.lastError)
     }
 
+    func testUnsupportedControlCapabilityFailsBeforeMutationAndAllowsShutdown() async throws {
+        let backend = FakeChargeBackend()
+        backend.setCapabilities(
+            .unsupportedChargeControl(reason: "SMC CHTE key unavailable")
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .unknown,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 92) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        do {
+            try await controller.initialize()
+            XCTFail("Expected unsupported control capability failure")
+        } catch let error as BatteryError {
+            guard case .unsupportedControlCapability(let reason) = error else {
+                return XCTFail("Expected unsupportedControlCapability, received \(error)")
+            }
+            XCTAssertTrue(reason.contains("CHTE"))
+        }
+
+        XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("maintain:") }))
+        XCTAssertTrue(controller.isChargeControlUnsupported)
+        XCTAssertTrue(controller.manualRecoveryRefreshAvailability.isAllowed)
+        XCTAssertTrue(controller.canDisableBatteryGuardControl)
+        XCTAssertEqual(controller.manualRecoveryRefreshTitle, "상태 다시 확인")
+
+        try await controller.shutdown()
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+    }
+
+    func testUnsupportedControlCapabilityAllowsOneClickTransitionToMonitoringOnly() async throws {
+        let backend = FakeChargeBackend()
+        let unsupported = ChargeControlCapabilities.unsupportedChargeControl(
+            reason: "SMC CHTE key unavailable",
+            forceDischarge: true
+        )
+        backend.setCapabilities(unsupported)
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .unknown,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 92) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        do { try await controller.initialize() } catch {}
+        XCTAssertTrue(controller.canDisableBatteryGuardControl)
+
+        controller.disableBatteryGuardControl()
+        let transitioned = await eventually {
+            controller.isReady
+                && controller.mode == .controlDisabled(lastLimit: 80)
+                && settings.batteryControlOwnership == .system(lastLimit: 80)
+        }
+        XCTAssertTrue(transitioned)
+        XCTAssertTrue(backend.operations.contains("release-control"))
+        XCTAssertNil(controller.lastError)
+
+        try await controller.shutdown()
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+    }
+
+    func testInspectHardwareInitializationFailureAllowsReadOnlyRefreshAndRecovers() async throws {
+        let backend = FakeChargeBackend()
+        backend.failNext(
+            "maintain",
+            error: BatteryError.commandFailed("battery maintain 80", -1, "status mismatch")
+        )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 80) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        do { try await controller.initialize() } catch {}
+        guard case .failed = controller.readiness else {
+            return XCTFail("Expected failed readiness")
+        }
+        XCTAssertTrue(controller.manualRecoveryRefreshAvailability.isAllowed)
+
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .disabled,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .running(pid: 9_090, target: 80)
+            )
+        )
+        await controller.refreshManualRecoveryStatus()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertEqual(controller.mode, .maintaining(limit: 80))
+        XCTAssertEqual(backend.operations.filter { $0 == "maintain:80" }.count, 1)
+        try await controller.shutdown()
+    }
+
+    func testForceLocalShutdownForManualEscapeTearsDownCleanly() async {
+        let backend = FakeChargeBackend()
+        backend.failNext(
+            "maintain",
+            error: BatteryError.commandFailed("battery maintain 80", -1, "status mismatch")
+        )
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { makeBatteryInfo(charge: 80) },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        let controller = ChargeController(backend: backend, monitor: monitor, settings: settings)
+
+        do { try await controller.initialize() } catch {}
+        let operationsBeforeEscape = backend.operations
+
+        controller.forceLocalShutdownForManualEscape()
+
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+        XCTAssertEqual(backend.operations, operationsBeforeEscape)
+    }
+
 }

@@ -349,6 +349,18 @@ struct ChargeRecoveryStatusView: View {
                 : "외부 CLI 상태만 다시 읽습니다."
         )
 
+        if controller.isChargeControlUnsupported && !controller.isBatteryControlDisabled {
+            Button {
+                controller.disableBatteryGuardControl()
+            } label: {
+                Label("모니터링 전용으로 전환", systemImage: "eye")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(!controller.canDisableBatteryGuardControl)
+            .help("BatteryGuard 충전 제어를 해제하고 macOS 제어(모니터링 전용)로 전환합니다.")
+        }
+
         if let limit = content.maintainRecoveryLimit {
             Button {
                 controller.restoreMaintainFromManualRecovery()

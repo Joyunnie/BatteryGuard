@@ -78,6 +78,46 @@ final class ChargeReconciliationPolicyTests: XCTestCase {
         }
     }
 
+    func testReleasedControlAllowsUnknownChargingOnlyWhenChargeControlCapabilityIsUnsupported() {
+        let unknownChargingStatus = BatteryControlStatus(
+            charging: .unknown,
+            isDischarging: false,
+            maintainLevel: 80,
+            maintainWorker: .stopped
+        )
+        let dischargingStatus = BatteryControlStatus(
+            charging: .unknown,
+            isDischarging: true,
+            maintainLevel: 80,
+            maintainWorker: .stopped
+        )
+        let unsupported = ChargeControlCapabilities.unsupportedChargeControl(
+            reason: "CHTE unavailable",
+            forceDischarge: true
+        )
+
+        XCTAssertTrue(
+            ChargeReconciliationPolicy.status(
+                ChargeReconciliationSnapshot(
+                    status: unknownChargingStatus,
+                    ownedLongRunningOperation: .inactive,
+                    capabilities: unsupported
+                ),
+                matches: .controlReleased(lastLimit: 80)
+            )
+        )
+        XCTAssertFalse(
+            ChargeReconciliationPolicy.status(
+                ChargeReconciliationSnapshot(
+                    status: dischargingStatus,
+                    ownedLongRunningOperation: .inactive,
+                    capabilities: unsupported
+                ),
+                matches: .controlReleased(lastLimit: 80)
+            )
+        )
+    }
+
     func testTopUpRequiresOwnedOperationAndCompleteTuple() {
         let expectation = ReconciledChargeExpectation.toppingUp(returnLimit: 80)
         let valid = BatteryControlStatus(

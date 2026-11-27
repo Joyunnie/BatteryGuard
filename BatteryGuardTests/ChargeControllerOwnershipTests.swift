@@ -403,4 +403,51 @@ extension ChargeControllerSafetyTests {
         XCTAssertFalse(backend.operations.contains("release-control"))
     }
 
+    func testSystemOwnershipInitializesAndReconcilesWhenChargeControlCapabilityIsUnsupported() async throws {
+        let backend = FakeChargeBackend()
+        backend.setCapabilities(
+            .unsupportedChargeControl(reason: "SMC CHTE key unavailable", forceDischarge: true)
+        )
+        backend.setControlStatus(
+            BatteryControlStatus(
+                charging: .unknown,
+                isDischarging: false,
+                maintainLevel: 80,
+                maintainWorker: .stopped
+            )
+        )
+        let info = makeBatteryInfo(charge: 85, isCharging: false)
+        let monitor = BatteryMonitor(
+            batteryInfoProvider: { info },
+            runsMonitoringInfrastructure: false
+        )
+        let settings = UserSettings(
+            defaults: makeTestDefaults(),
+            launchAtLoginService: FakeLaunchAtLoginService()
+        )
+        try settings.completeBatteryControlRelease(lastLimit: 80)
+        let controller = ChargeController(
+            backend: backend,
+            monitor: monitor,
+            settings: settings
+        )
+
+        try await controller.initialize()
+
+        XCTAssertEqual(controller.readiness, .ready)
+        XCTAssertEqual(controller.mode, .controlDisabled(lastLimit: 80))
+        XCTAssertFalse(controller.hasExternalControlDrift)
+
+        await controller.reconcileExternalState()
+        XCTAssertEqual(controller.mode, .controlDisabled(lastLimit: 80))
+        XCTAssertFalse(controller.hasExternalControlDrift)
+
+        controller.enableBatteryGuardControl()
+        XCTAssertEqual(controller.mode, .controlDisabled(lastLimit: 80))
+        XCTAssertFalse(backend.operations.contains(where: { $0.hasPrefix("maintain:") }))
+
+        try await controller.shutdown()
+        XCTAssertEqual(controller.readiness, .shuttingDown)
+    }
+
 }
