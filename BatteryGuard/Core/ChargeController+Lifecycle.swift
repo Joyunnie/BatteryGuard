@@ -23,8 +23,29 @@ extension ChargeController {
         mode = .idle
         do {
             try settings.requireDurableBatteryControlOwnership()
-            try await backend.open()
-            backendAvailableForShutdown = true
+            do {
+                try await backend.open()
+                backendAvailableForShutdown = true
+            } catch BatteryError.binaryNotFound(let message) {
+                guard case .system(let persistedLimit) = settings.batteryControlOwnership else {
+                    throw BatteryError.binaryNotFound(message)
+                }
+                backendAvailableForShutdown = false
+                controlCapabilities = .unsupportedChargeControl(
+                    reason: message,
+                    forceDischarge: false,
+                    batteryTemperature: true,
+                    magSafeLED: false,
+                    cliAvailable: false
+                )
+                monitor.startMonitoring()
+                hasStartedMonitoring = true
+                let lastLimit = UserSettings.validatedChargeLimit(persistedLimit)
+                try await completeControlRelease(lastLimit: lastLimit)
+                mode = .controlDisabled(lastLimit: lastLimit)
+                try completeInitializationInfrastructure(restartMonitoring: false)
+                return
+            }
             let capabilities = await backend.capabilities()
             controlCapabilities = capabilities
             let currentFingerprint = SystemEnvironmentFingerprint.current(

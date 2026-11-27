@@ -9,8 +9,9 @@
 
 ## Product Assumption
 
-- BatteryGuard is the sole owner of advanced charge control (`maintain`, Top Up, Discharge, Heat Protection); macOS Charge Limit should not compete with it.
-- If only an 80% limit is required, prefer macOS native Charge Limit and reduce BatteryGuard to monitoring/history.
+- BatteryGuard keeps its **Observation Plane** (IOKit battery telemetry, bundled read-only `TB0T`/`TB1T`/`TB2T` safety temperature, 7-day history, power/charging diagnostics, read-only macOS Charge Limit display, and in-app high-temperature warning banner) always available regardless of privileged charge-control availability.
+- On macOS 26.4+ Apple Silicon Macs where only an 80–100% limit is required (or when Apple removes userspace SMC charge-inhibit keys such as `CHTE`), prefer macOS native Charge Limit (`ownership == .system`) and run BatteryGuard in first-class monitoring/history mode.
+- Advanced charge control (`maintain`, Top Up, Discharge, Heat Protection auto-blocking) is capability-gated behind `ChargeControlCapabilities` and remains mutually exclusive with macOS Charge Limit when active.
 - Treat changing this ownership model as an explicit product decision.
 
 ## Architecture
@@ -59,7 +60,11 @@ Battery flags + IOPS source -> PowerConnectionObservation -> BatteryPresentation
 - Stop exact maintain worker PIDs before Top Up, Discharge, or charging-off transitions. Never signal an unrelated process group.
 - Coalesce rapid slider changes and block conflicting or duplicate operations.
 - Validate persisted limits and thresholds at every boundary.
-- Before using the privileged CLI, validate executable path, symlink target, owner/mode, version, and required capabilities.
+- Before using the privileged CLI, validate executable path, symlink target, owner/mode, version, and required capabilities. Never issue mutating charge-control commands when preflight detects `charging == .unknown` or `isDischarging == nil`.
+- Keep the bundled read-only SMC temperature reader (`BatteryGuardSMCReader`) usable independently of external `battery` CLI availability so monitoring-only and degraded-control modes retain real safety temperature measurements.
+- Record 7-day history in monitoring-only mode too: store `0` as the no-limit sentinel (mapped to `nil` in `ChartRecord`) when no verified native or BatteryGuard limit is active, and never fabricate a limit line from charging state alone.
+- Mark expected non-zero command exits (such as `pgrep` returning `1` when no worker exists) as routine diagnostics so they do not flush or evict safety events in `Diagnostics.json`.
+- Never deadlock the user in failed initialization: keep read-only status verification enabled, allow transitioning to `.system` (monitoring-only) when control capability is unsupported (verifying stopped worker, disabled/removed LaunchAgent, and non-discharging state), and allow clean local shutdown whenever hardware was not left in an unverified active mutation (with an explicit user-confirmed force-quit escape hatch after shutdown safety alerts).
 - Support only the explicitly verified battery CLI version and revalidate its file identity immediately before each mutation.
 - Give the privileged script a minimal PATH containing only its validated directory and fixed system directories; never search user-writable tool directories.
 - Never recommend or execute an unpinned `curl | bash` installer flow.

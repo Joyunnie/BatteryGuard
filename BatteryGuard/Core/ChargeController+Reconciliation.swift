@@ -41,6 +41,9 @@ extension ChargeController {
     }
 
     func reconcileExternalState(trigger: ReconciliationTrigger = .manual) async {
+        if !controlCapabilities.cliAvailable, case .controlDisabled = mode {
+            return
+        }
         guard readiness == .ready,
               !isShuttingDown,
               activeOperationID == nil,
